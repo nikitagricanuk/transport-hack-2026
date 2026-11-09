@@ -1,0 +1,306 @@
+"""Lossless in-memory model of an OSM XML document.
+
+Design goals:
+* everything that was in the source file survives a load -> save round trip:
+  element order, attributes (id, version, timestamp, uid, ...), tag order,
+  non-element children such as <bounds>, <note> and <meta>;
+* edits are expressed on plain dataclasses, so they are easy to copy for undo;
+* new elements get negative ids (JOSM convention) and are renumbered to free
+  positive ids on export, because not every converter accepts negative ids.
+"""
+
+from __future__ import annotations
+
+import copy
+import io
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from typing import Iterable, Literal, Union
+
+Kind = Literal["node", "way", "relation"]
+KINDS: tuple[Kind, ...] = ("node", "way", "relation")
+
+
+@dataclass
+class Node:
+    id: int
+    lat: float
+    lon: float
+    tags: dict[str, str] = field(default_factory=dict)
+    attrs: dict[str, str] = field(default_factory=dict)
+    # original textual coordinates, kept so untouched nodes are byte-stable
+    raw_coords: tuple[str, str] | None = None
+
+    def set_position(self, lat: float, lon: float) -> None:
+        self.lat = lat
+        self.lon = lon
+        self.raw_coords = None
+
+
+@dataclass
+class Way:
+    id: int
+    nodes: list[int] = field(default_factory=list)
+    tags: dict[str, str] = field(default_factory=dict)
+    attrs: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_closed(self) -> bool:
+        return len(self.nodes) > 2 and self.nodes[0] == self.nodes[-1]
+
+
+@dataclass
+class Member:
+    type: Kind
+    ref: int
+    role: str = ""
+
+
+@dataclass
+class Relation:
+    id: int
+    members: list[Member] = field(default_factory=list)
+    tags: dict[str, str] = field(default_factory=dict)
+    attrs: dict[str, str] = field(default_factory=dict)
+
+
+Element = Union[Node, Way, Relation]
+
+_SKIP_NODE_ATTRS = {"id", "lat", "lon"}
+_SKIP_ATTRS = {"id"}
+
+
+class OsmDocument:
+    def __init__(self) -> None:
+        self.root_attrs: dict[str, str] = {"version": "0.6", "generator": "uds-editor"}
+        self.head: list[ET.Element] = []  # <note>, <meta>, <bounds> ... before data
+        self.tail: list[ET.Element] = []  # unknown elements after data
+        self.nodes: dict[int, Node] = {}
+        self.ways: dict[int, Way] = {}
+        self.relations: dict[int, Relation] = {}
+        self._next_new_id = -1
+        self._original: dict[tuple[str, int], Element] = {}
+
+    # ------------------------------------------------------------------ access
+    def store(self, kind: Kind) -> dict[int, Element]:
+        if kind == "node":
+            return self.nodes  # type: ignore[return-value]
+        if kind == "way":
+            return self.ways  # type: ignore[return-value]
+        if kind == "relation":
+            return self.relations  # type: ignore[return-value]
+        raise ValueError(f"unknown element kind: {kind}")
+
+    def get(self, kind: Kind, eid: int) -> Element | None:
+        return self.store(kind).get(eid)
+
+    def new_id(self) -> int:
+        nid = self._next_new_id
+        self._next_new_id -= 1
+        return nid
+
+    def bounds(self) -> tuple[float, float, float, float] | None:
+        """(minlat, minlon, maxlat, maxlon) from <bounds> or from node extent."""
+        for el in self.head:
+            if el.tag == "bounds":
+                try:
+                    return (
+                        float(el.attrib["minlat"]),
+                        float(el.attrib["minlon"]),
+                        float(el.attrib["maxlat"]),
+                        float(el.attrib["maxlon"]),
+                    )
+                except (KeyError, ValueError):
+                    break
+        if not self.nodes:
+            return None
+        lats = [n.lat for n in self.nodes.values()]
+        lons = [n.lon for n in self.nodes.values()]
+        return (min(lats), min(lons), max(lats), max(lons))
+
+    # ------------------------------------------------------------ change diff
+    def snapshot_original(self) -> None:
+        self._original = {}
+        for kind in KINDS:
+            for eid, el in self.store(kind).items():
+                self._original[(kind, eid)] = copy.deepcopy(el)
+
+    def diff_summary(self) -> dict[str, dict[str, int]]:
+        out = {k: {"added": 0, "modified": 0, "deleted": 0} for k in KINDS}
+        for kind in KINDS:
+            current = self.store(kind)
+            for eid, el in current.items():
+                orig = self._original.get((kind, eid))
+                if orig is None:
+                    out[kind]["added"] += 1
+                elif orig != el:
+                    out[kind]["modified"] += 1
+        for (kind, eid) in self._original:
+            if eid not in self.store(kind):  # type: ignore[arg-type]
+                out[kind]["deleted"] += 1
+        return out
+
+    def is_changed(self) -> bool:
+        return any(v for d in self.diff_summary().values() for v in d.values())
+
+    # ----------------------------------------------------------------- parse
+    @classmethod
+    def parse(cls, data: bytes) -> "OsmDocument":
+        root = ET.fromstring(data)
+        if root.tag != "osm":
+            raise ValueError("корневой элемент файла должен быть <osm>")
+        doc = cls()
+        doc.root_attrs = dict(root.attrib)
+        seen_data = False
+        min_id = 0
+        for child in root:
+            tag = child.tag
+            if tag == "node":
+                seen_data = True
+                n = _parse_node(child)
+                doc.nodes[n.id] = n
+                min_id = min(min_id, n.id)
+            elif tag == "way":
+                seen_data = True
+                w = _parse_way(child)
+                doc.ways[w.id] = w
+                min_id = min(min_id, w.id)
+            elif tag == "relation":
+                seen_data = True
+                r = _parse_relation(child)
+                doc.relations[r.id] = r
+                min_id = min(min_id, r.id)
+            else:
+                (doc.tail if seen_data else doc.head).append(child)
+        doc._next_new_id = min(-1, min_id - 1)
+        doc.snapshot_original()
+        return doc
+
+    # ------------------------------------------------------------- serialize
+    def to_xml(self, renumber_new: bool = True, generator: str | None = None) -> bytes:
+        idmap: dict[Kind, dict[int, int]] = {k: {} for k in KINDS}
+        if renumber_new:
+            for kind in KINDS:
+                store = self.store(kind)
+                used = set(store.keys()) | {eid for (k, eid) in self._original if k == kind}
+                nxt = max([i for i in used if i > 0], default=0) + 1
+                for eid in store:
+                    if eid < 0:
+                        idmap[kind][eid] = nxt
+                        nxt += 1
+
+        def m(kind: Kind, eid: int) -> int:
+            return idmap[kind].get(eid, eid)
+
+        attrs = dict(self.root_attrs)
+        if generator:
+            attrs["generator"] = generator
+        root = ET.Element("osm", attrs)
+        for el in self.head:
+            root.append(copy.deepcopy(el))
+        for n in self.nodes.values():
+            a = {"id": str(m("node", n.id))}
+            if n.raw_coords:
+                a["lat"], a["lon"] = n.raw_coords
+            else:
+                a["lat"], a["lon"] = f"{n.lat:.7f}", f"{n.lon:.7f}"
+            a.update(n.attrs)
+            e = ET.SubElement(root, "node", a)
+            _write_tags(e, n.tags)
+        for w in self.ways.values():
+            a = {"id": str(m("way", w.id))}
+            a.update(w.attrs)
+            e = ET.SubElement(root, "way", a)
+            for ref in w.nodes:
+                ET.SubElement(e, "nd", {"ref": str(m("node", ref))})
+            _write_tags(e, w.tags)
+        for r in self.relations.values():
+            a = {"id": str(m("relation", r.id))}
+            a.update(r.attrs)
+            e = ET.SubElement(root, "relation", a)
+            for mem in r.members:
+                ET.SubElement(
+                    e, "member", {"type": mem.type, "ref": str(m(mem.type, mem.ref)), "role": mem.role}
+                )
+            _write_tags(e, r.tags)
+        for el in self.tail:
+            root.append(copy.deepcopy(el))
+
+        ET.indent(root, space=" ")
+        buf = io.BytesIO()
+        ET.ElementTree(root).write(buf, encoding="utf-8", xml_declaration=True)
+        return buf.getvalue()
+
+    # --------------------------------------------------------------- helpers
+    def ways_of_node(self, node_id: int) -> list[Way]:
+        return [w for w in self.ways.values() if node_id in w.nodes]
+
+    def node_way_index(self) -> dict[int, list[int]]:
+        idx: dict[int, list[int]] = {}
+        for w in self.ways.values():
+            for ref in dict.fromkeys(w.nodes):
+                idx.setdefault(ref, []).append(w.id)
+        return idx
+
+    def relations_with(self, kind: Kind, eid: int) -> Iterable[Relation]:
+        for r in self.relations.values():
+            if any(mem.type == kind and mem.ref == eid for mem in r.members):
+                yield r
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "nodes": len(self.nodes),
+            "ways": len(self.ways),
+            "relations": len(self.relations),
+            "signals": sum(1 for n in self.nodes.values() if n.tags.get("highway") == "traffic_signals"),
+        }
+
+
+# ---------------------------------------------------------------- xml utils
+def _tags(el: ET.Element) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for t in el.findall("tag"):
+        k = t.attrib.get("k")
+        if k is not None:
+            out[k] = t.attrib.get("v", "")
+    return out
+
+
+def _extra_attrs(el: ET.Element, skip: set[str]) -> dict[str, str]:
+    return {k: v for k, v in el.attrib.items() if k not in skip}
+
+
+def _parse_node(el: ET.Element) -> Node:
+    lat_s, lon_s = el.attrib.get("lat", "0"), el.attrib.get("lon", "0")
+    return Node(
+        id=int(el.attrib["id"]),
+        lat=float(lat_s),
+        lon=float(lon_s),
+        tags=_tags(el),
+        attrs=_extra_attrs(el, _SKIP_NODE_ATTRS),
+        raw_coords=(lat_s, lon_s),
+    )
+
+
+def _parse_way(el: ET.Element) -> Way:
+    return Way(
+        id=int(el.attrib["id"]),
+        nodes=[int(nd.attrib["ref"]) for nd in el.findall("nd")],
+        tags=_tags(el),
+        attrs=_extra_attrs(el, _SKIP_ATTRS),
+    )
+
+
+def _parse_relation(el: ET.Element) -> Relation:
+    members = [
+        Member(type=m.attrib["type"], ref=int(m.attrib["ref"]), role=m.attrib.get("role", ""))  # type: ignore[arg-type]
+        for m in el.findall("member")
+    ]
+    return Relation(
+        id=int(el.attrib["id"]), members=members, tags=_tags(el), attrs=_extra_attrs(el, _SKIP_ATTRS)
+    )
+
+
+def _write_tags(parent: ET.Element, tags: dict[str, str]) -> None:
+    for k, v in tags.items():
+        ET.SubElement(parent, "tag", {"k": k, "v": v})

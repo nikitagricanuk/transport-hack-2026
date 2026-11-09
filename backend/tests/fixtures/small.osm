@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="Overpass API 0.7.62">
+<note>The data included in this document is from www.openstreetmap.org. The data is made available under ODbL.</note>
+<meta osm_base="2026-11-01T00:00:00Z"/>
+<bounds minlat="52.2785" minlon="104.2795" maxlat="52.2860" maxlon="104.2905"/>
+  <node id="1" lat="52.28" lon="104.28" version="3" timestamp="2024-01-01T00:00:00Z"/>
+  <node id="2" lat="52.2800000" lon="104.2810000" version="2"/>
+  <node id="3" lat="52.28" lon="104.282"/>
+  <node id="4" lat="52.28" lon="104.283"/>
+  <node id="5" lat="52.281" lon="104.281"/>
+  <node id="6" lat="52.279" lon="104.281"/>
+  <node id="7" lat="52.281" lon="104.2825"/>
+  <node id="8" lat="52.28004" lon="104.2825"/>
+  <node id="9" lat="52.285" lon="104.29"/>
+  <node id="10" lat="52.2852" lon="104.29"/>
+  <node id="11" lat="52.2805" lon="104.2805">
+    <tag k="highway" v="traffic_signals"/>
+  </node>
+  <node id="12" lat="52.28" lon="104.284"/>
+  <node id="20" lat="52.2795" lon="104.2815"/>
+  <node id="21" lat="52.2795" lon="104.2818"/>
+  <node id="22" lat="52.2793" lon="104.2818"/>
+  <way id="100" version="5">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <tag k="name" v="улица Карла Маркса"/>
+    <tag k="highway" v="primary"/>
+    <tag k="lanes" v="2"/>
+  </way>
+  <way id="101">
+    <nd ref="5"/>
+    <nd ref="2"/>
+    <nd ref="6"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="улица Чкалова"/>
+  </way>
+  <way id="102">
+    <nd ref="7"/>
+    <nd ref="8"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="улица Свердлова"/>
+  </way>
+  <way id="103">
+    <nd ref="9"/>
+    <nd ref="10"/>
+    <tag k="highway" v="service"/>
+  </way>
+  <way id="104">
+    <nd ref="4"/>
+    <nd ref="12"/>
+    <tag k="highway" v="primary"/>
+    <tag k="bridge" v="yes"/>
+  </way>
+  <way id="105">
+    <nd ref="20"/>
+    <nd ref="21"/>
+    <nd ref="22"/>
+    <nd ref="20"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <relation id="500">
+    <member type="way" ref="100" role=""/>
+    <member type="node" ref="11" role="signal"/>
+    <tag k="type" v="route"/>
+  </relation>
+</osm>
