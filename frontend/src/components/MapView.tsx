@@ -3,6 +3,8 @@ import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEv
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
+import { defaultCamera } from '../utils/view';
 import { PATH_LAYER_IDS, PATH_STYLES, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
 
 export interface MapHandle {
@@ -10,6 +12,12 @@ export interface MapHandle {
   updatePeers: (peers: Peer[]) => void;
   zoomBy: (delta: number) => void;
   fitData: () => void;
+  /** north-up, no tilt, and the default zoom (the loaded area, or the city view) */
+  resetView: () => void;
+  /** CSS fullscreen. F toggles it; Escape does not leave it. */
+  toggleFullscreen: () => void;
+  /** Points in the way currently being drawn. Zero when that draft is idle. */
+  draftPointCount: () => number;
   flyTo: (lon: number, lat: number, zoom?: number) => void;
   fitBounds: (b: [number, number, number, number]) => void;
 }
@@ -96,6 +104,18 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const b = propsRef.current.geo?.bounds;
     if (b) mapRef.current?.fitBounds([[b[1], b[0]], [b[3], b[2]]], { padding: 40, duration: 400 });
   };
+  const resetView = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const camera = defaultCamera(propsRef.current.geo?.bounds ?? null);
+    if (camera.kind === 'fit') {
+      map.fitBounds(camera.bounds, { padding: 40, duration: 400, bearing: camera.bearing, pitch: camera.pitch });
+    } else {
+      map.easeTo({
+        center: camera.center, zoom: camera.zoom, bearing: camera.bearing, pitch: camera.pitch, duration: 400,
+      });
+    }
+  };
   const [draftCount, setDraftCount] = useState(0);
   const finishRef = useRef<() => void>(() => undefined);
   const cancelDraft = () => {
@@ -162,6 +182,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     updatePeers,
     zoomBy: (delta) => mapRef.current?.easeTo({ zoom: (mapRef.current?.getZoom() ?? 15) + delta, duration: 200 }),
     fitData,
+    resetView,
+    toggleFullscreen: () => toggleMapFullscreen(mapRef.current),
+    draftPointCount: () => draft.current.length,
     flyTo: (lon, lat, zoom = 18) => mapRef.current?.flyTo({ center: [lon, lat], zoom, speed: 1.6 }),
     fitBounds: (b) => mapRef.current?.fitBounds([[b[1], b[0]], [b[3], b[2]]], { padding: 40, duration: 0 }),
   }));
@@ -195,11 +218,22 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       attributionControl: { compact: true },
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
-    // fullscreen covers the map with its hints and toasts, not just the canvas
-    map.addControl(new maplibregl.FullscreenControl({ container: container.current.parentElement ?? undefined }), 'bottom-right');
+    // CSS fullscreen covers the map with its hints and toasts. It is not the
+    // browser Fullscreen API, so Escape cannot leave it (Windows, macOS, iOS).
+    map.addControl(new FullscreenToggle(), 'bottom-right');
     map.addControl(new FitControl(() => fitData()), 'bottom-right');
+    map.addControl(new ResetViewControl(() => resetView()), 'bottom-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
     mapRef.current = map;
+    const onFullscreenEscape = (e: KeyboardEvent) => {
+      if (!mapIsFullscreen(map)) return;
+      if (!isEscapeKey(e)) return;
+      // Browsers that still honour preventDefault will not treat Escape as
+      // "leave fullscreen". This mode is not native fullscreen, so the
+      // shortcut has nothing to exit; the editor keeps Escape for cancel.
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onFullscreenEscape, true);
 
     map.on('load', () => {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
@@ -314,6 +348,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     });
 
     return () => {
+      window.removeEventListener('keydown', onFullscreenEscape, true);
+      document.documentElement.classList.remove(FULLSCREEN_ROOT);
+      map.getContainer().parentElement?.classList.remove(FULLSCREEN_CLASS);
       map.remove();
       mapRef.current = null;
     };
@@ -658,6 +695,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       else if (e.key === 'Backspace' || e.key === 'Delete') {
         e.preventDefault();
         e.stopPropagation();
+        // stopPropagation() does not skip other listeners on this same window.
+        // Stop them too, and claim the key, so a selected object is not deleted.
+        e.stopImmediatePropagation();
+        claimDraftPointKey();
         draft.current = draft.current.slice(0, -1);
         renderDraft();
       }
@@ -722,6 +763,100 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     </>
   );
 });
+
+const FULLSCREEN_CLASS = 'is-fullscreen';
+const FULLSCREEN_ROOT = 'map-is-fullscreen';
+const FULLSCREEN_EVENT = 'uds-fullscreen';
+
+function wrapOf(map: maplibregl.Map | null): HTMLElement | null {
+  return map?.getContainer().parentElement ?? null;
+}
+
+function mapIsFullscreen(map: maplibregl.Map | null): boolean {
+  return wrapOf(map)?.classList.contains(FULLSCREEN_CLASS) ?? false;
+}
+
+function toggleMapFullscreen(map: maplibregl.Map | null): void {
+  const wrap = wrapOf(map);
+  if (!wrap || !map) return;
+  const on = !wrap.classList.contains(FULLSCREEN_CLASS);
+  wrap.classList.toggle(FULLSCREEN_CLASS, on);
+  document.documentElement.classList.toggle(FULLSCREEN_ROOT, on);
+  wrap.getBoundingClientRect();
+  map.resize();
+  requestAnimationFrame(() => map.resize());
+  window.dispatchEvent(new Event(FULLSCREEN_EVENT));
+}
+
+/** Map button: fullscreen of the map area. F toggles the same mode. */
+class FullscreenToggle implements maplibregl.IControl {
+  private button: HTMLButtonElement | null = null;
+  private map: maplibregl.Map | null = null;
+  private onChange = () => this.sync();
+
+  onAdd(map: maplibregl.Map) {
+    this.map = map;
+    const el = document.createElement('div');
+    el.className = 'maplibregl-ctrl maplibregl-ctrl-group';
+    const b = document.createElement('button');
+    b.type = 'button';
+    const icon = document.createElement('span');
+    icon.className = 'maplibregl-ctrl-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    b.appendChild(icon);
+    b.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleMapFullscreen(map);
+    };
+    el.appendChild(b);
+    this.button = b;
+    this.sync();
+    window.addEventListener(FULLSCREEN_EVENT, this.onChange);
+    return el;
+  }
+
+  onRemove() {
+    window.removeEventListener(FULLSCREEN_EVENT, this.onChange);
+    this.button = null;
+    this.map = null;
+  }
+
+  private sync() {
+    const on = mapIsFullscreen(this.map);
+    if (!this.button) return;
+    this.button.className = on ? 'maplibregl-ctrl-shrink' : 'maplibregl-ctrl-fullscreen';
+    this.button.title = on ? 'Выйти из полного экрана (F)' : 'Полный экран (F). Выход — снова F, не Esc';
+    this.button.setAttribute('aria-label', on ? 'Выйти из полного экрана' : 'Полный экран');
+    this.button.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+
+/** Map button: default zoom, bearing and pitch. */
+class ResetViewControl implements maplibregl.IControl {
+  private el: HTMLDivElement | null = null;
+  constructor(private onReset: () => void) {}
+  onAdd() {
+    const el = document.createElement('div');
+    el.className = 'maplibregl-ctrl maplibregl-ctrl-group';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'reset-view-btn';
+    b.title = 'Масштаб и угол обзора по умолчанию';
+    b.setAttribute('aria-label', 'Вернуть масштаб и угол обзора');
+    b.innerHTML = '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="7.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path fill="currentColor" d="M10 3.1 12.1 9.2 10 8.1 7.9 9.2z"/><path fill="currentColor" opacity="0.35" d="M10 16.9 7.9 10.8 10 11.9 12.1 10.8z"/></svg>';
+    b.onclick = (ev) => {
+      ev.preventDefault();
+      this.onReset();
+    };
+    el.appendChild(b);
+    this.el = el;
+    return el;
+  }
+  onRemove() {
+    this.el?.remove();
+  }
+}
 
 /** Map button: zoom back to the whole loaded area. */
 class FitControl implements maplibregl.IControl {

@@ -83,6 +83,7 @@ export async function downloadFile(url: string, filename: string, expectOsm = fa
 }
 
 export const api = {
+  health: () => request<{ ok: boolean; version: string; netconvert: boolean }>('/api/health'),
   samples: () => request<{ name: string; size: number }[]>('/api/samples'),
   openSample: (name: string) => request<DocState>(`/api/samples/${encodeURIComponent(name)}/open`, { method: 'POST' }),
   upload: (file: File) => {
