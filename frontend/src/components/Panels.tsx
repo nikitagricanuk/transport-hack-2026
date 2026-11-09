@@ -1,5 +1,6 @@
 import { memo, useState, type ReactNode } from 'react';
 import type { Fix, HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
+import { ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, issueVisible } from '../utils/layers';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
 
 // ------------------------------------------------------------------ tools
@@ -52,28 +53,18 @@ const LAYERS: { key: keyof LayerVisibility; name: string; sw: string }[] = [
   { key: 'issues', name: 'Ошибки графа', sw: '#EA580C' },
 ];
 
-export function LayersPanel({ layers, onLayers, baseOpacity, onBaseOpacity, canApplyTemplate, onTemplate }: {
-  layers: LayerVisibility; onLayers: (l: LayerVisibility) => void;
+export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBaseOpacity, canApplyTemplate, onTemplate }: {
+  layers: LayerVisibility; onLayers: (l: LayerVisibility) => void; onSelectAll: () => void;
   baseOpacity: number; onBaseOpacity: (v: number) => void;
   canApplyTemplate: boolean; onTemplate: (t: RoadTemplate) => void;
 }) {
   return (
     <aside className="left" aria-label="Слои и шаблоны">
       <h3 className="section">Слои</h3>
+      <div className="layer-actions">
+        <button type="button" className="btn small" onClick={onSelectAll}>Выбрать всё</button>
+      </div>
       <div className="layer-list">
-        {(() => {
-          const all = LAYERS.every((l) => layers[l.key]);
-          const some = !all && LAYERS.some((l) => layers[l.key]);
-          return (
-            <label className="layer layer-all">
-              <input type="checkbox" checked={all}
-                ref={(el) => { if (el) el.indeterminate = some; }}
-                onChange={() => onLayers(Object.fromEntries(LAYERS.map((l) => [l.key, !all])) as unknown as LayerVisibility)} />
-              <span className="sw" aria-hidden="true" />
-              <span><b>Выбрать все</b></span>
-            </label>
-          );
-        })()}
         {LAYERS.map((l) => (
           <label key={l.key} className="layer">
             <input type="checkbox" checked={layers[l.key]} onChange={() => onLayers({ ...layers, [l.key]: !layers[l.key] })} />
@@ -112,20 +103,26 @@ const ISSUES_PAGE = 200;
 
 export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
 
-export const BottomPanel = memo(function BottomPanel({ validation, history, tab, onTab, onShow, onFix, validating, children }: {
+export const BottomPanel = memo(function BottomPanel({
+  validation, history, tab, onTab, onShow, onFix, validating, issueFilters, onIssueFilter, onSelectAllIssues, children,
+}: {
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: BottomTab; onTab: (t: BottomTab) => void;
   onShow: (i: Issue) => void; onFix: (i: Issue, fix: Fix) => void; validating: boolean;
+  issueFilters: IssueFilters;
+  onIssueFilter: (key: IssueFilterKey) => void;
+  onSelectAllIssues: () => void;
   /** content of the "load" and "changes" tabs */
   children?: ReactNode;
 }) {
   const issues = validation?.issues ?? [];
+  const visible = issues.filter((issue) => issueVisible(issueFilters, issue.category));
   // thousands of DOM rows make every re-render slow; show a page, load more on demand
   const [limit, setLimit] = useState(ISSUES_PAGE);
   return (
     <section className="bottom" aria-label="Проблемы и история">
       <div className="tabs" role="tablist">
-        <button role="tab" aria-selected={tab === 'issues'} onClick={() => onTab('issues')}>Проблемы графа · {issues.length}</button>
+        <button role="tab" aria-selected={tab === 'issues'} onClick={() => onTab('issues')}>Проблемы графа · {visible.length}</button>
         <button role="tab" aria-selected={tab === 'history'} onClick={() => onTab('history')}>История правок · {history?.entries.length ?? 0}</button>
         <button role="tab" aria-selected={tab === 'changes'} onClick={() => onTab('changes')}>До / после</button>
         <button role="tab" aria-selected={tab === 'load'} onClick={() => onTab('load')}>Нагрузка</button>
@@ -141,10 +138,24 @@ export const BottomPanel = memo(function BottomPanel({ validation, history, tab,
         )}
         <span className="muted small">{validating ? 'проверка…' : 'проверка после каждой правки'}</span>
       </div>
+      {tab === 'issues' && (
+        <div className="issue-filters" role="group" aria-label="Фильтры ошибок">
+          <button type="button" className="btn small" onClick={onSelectAllIssues}>Выбрать всё</button>
+          {ISSUE_FILTERS.map((item) => (
+            <label key={item.key} className="check">
+              <input type="checkbox" checked={issueFilters[item.key]}
+                onChange={() => onIssueFilter(item.key)} />
+              <span>{item.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
       <div className="bottom-body">
         {tab === 'issues' && (issues.length === 0
           ? <p className="ok-msg">Проблем не найдено</p>
-          : issues.slice(0, limit).map((i) => (
+          : visible.length === 0
+            ? <p className="muted pad">Типы ошибок скрыты — нажмите «Выбрать всё»</p>
+            : visible.slice(0, limit).map((i) => (
             <div key={i.id} className="issue">
               <span className={`sev ${i.severity}`} title={SEV_LABEL[i.severity]}>{i.severity === 'info' ? 'i' : '!'}</span>
               <button className="link issue-title" onClick={() => onShow(i)}>{i.title}</button>
@@ -157,9 +168,9 @@ export const BottomPanel = memo(function BottomPanel({ validation, history, tab,
               </span>
             </div>
           )))}
-        {tab === 'issues' && issues.length > limit && (
+        {tab === 'issues' && visible.length > limit && (
           <button className="btn small more" onClick={() => setLimit(limit + ISSUES_PAGE)}>
-            Показать ещё {Math.min(ISSUES_PAGE, issues.length - limit)} из {issues.length - limit}
+            Показать ещё {Math.min(ISSUES_PAGE, visible.length - limit)} из {visible.length - limit}
           </button>
         )}
         {(tab === 'load' || tab === 'changes') && children}

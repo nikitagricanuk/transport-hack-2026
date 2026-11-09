@@ -1,53 +1,70 @@
 import type { ExpressionSpecification, FilterSpecification } from 'maplibre-gl';
 
 /**
- * One colour per highway class. Links are a lighter shade of their parent and
- * are drawn dashed (see MapView) so a ramp is not the same mark as the main road.
- * Paths are not in this match: they live on their own layers with their own dash.
+ * One colour per highway class, kept from the merged road-style palette.
+ * Links are a lighter shade of their parent and are drawn dashed (see MapView)
+ * so a ramp is not the same mark as the main road.
+ * `casing` and `casingExtra` extend that palette: the outline is its own colour
+ * and thickness, so the class is readable before the fill is wide enough to see.
+ * Paths are not in this table: they live on their own layers with their own dash.
  */
+export interface RoadMark {
+  highway: string;
+  fill: string;
+  casing: string;
+  scale: number;
+  /** Extra casing pixels added at every zoom stop. */
+  casingExtra: number;
+  link?: boolean;
+}
+
+export const ROAD_MARKS: RoadMark[] = [
+  { highway: 'motorway', fill: '#DC2626', casing: '#7F1D1D', scale: 1.45, casingExtra: 3.6 },
+  { highway: 'motorway_link', fill: '#F87171', casing: '#B91C1C', scale: 0.9, casingExtra: 2.6, link: true },
+  { highway: 'trunk', fill: '#C2410C', casing: '#7C2D12', scale: 1.28, casingExtra: 3.2 },
+  { highway: 'trunk_link', fill: '#FB923C', casing: '#C2410C', scale: 0.82, casingExtra: 2.4, link: true },
+  { highway: 'primary', fill: '#D97706', casing: '#92400E', scale: 1.16, casingExtra: 2.8 },
+  { highway: 'primary_link', fill: '#FBBF24', casing: '#B45309', scale: 0.76, casingExtra: 2.2, link: true },
+  { highway: 'secondary', fill: '#CA8A04', casing: '#854D0E', scale: 1.05, casingExtra: 2.5 },
+  { highway: 'secondary_link', fill: '#FACC15', casing: '#A16207', scale: 0.7, casingExtra: 2, link: true },
+  { highway: 'tertiary', fill: '#64748B', casing: '#334155', scale: 0.96, casingExtra: 2.2 },
+  { highway: 'tertiary_link', fill: '#94A3B8', casing: '#475569', scale: 0.64, casingExtra: 1.8, link: true },
+  { highway: 'unclassified', fill: '#FDE68A', casing: '#78350F', scale: 0.9, casingExtra: 2 },
+  { highway: 'residential', fill: '#FFFFFF', casing: '#6B7280', scale: 0.88, casingExtra: 2 },
+  { highway: 'living_street', fill: '#4ADE80', casing: '#166534', scale: 0.74, casingExtra: 1.8 },
+  { highway: 'service', fill: '#7C3AED', casing: '#4C1D95', scale: 0.62, casingExtra: 1.3 },
+  { highway: 'road', fill: '#F9A8D4', casing: '#9D174D', scale: 0.9, casingExtra: 2 },
+];
+
+const FALLBACK_FILL = '#F9A8D4';
+const FALLBACK_CASING = '#9D174D';
+const FALLBACK_SCALE = 0.85;
+const FALLBACK_CASING_EXTRA = 2;
+
+function matchHighway(value: (mark: RoadMark) => string | number, fallback: string | number): ExpressionSpecification {
+  const expr: (string | number | string[])[] = ['match', ['get', 'highway']];
+  for (const mark of ROAD_MARKS) expr.push(mark.highway, value(mark));
+  expr.push(fallback);
+  return expr as unknown as ExpressionSpecification;
+}
+
 export function roadColor(): ExpressionSpecification {
-  return [
-    'match', ['get', 'highway'],
-    'motorway', '#DC2626',
-    'motorway_link', '#F87171',
-    'trunk', '#C2410C',
-    'trunk_link', '#FB923C',
-    'primary', '#D97706',
-    'primary_link', '#FBBF24',
-    'secondary', '#CA8A04',
-    'secondary_link', '#FACC15',
-    'tertiary', '#64748B',
-    'tertiary_link', '#94A3B8',
-    'unclassified', '#FDE68A',
-    'residential', '#FFFFFF',
-    'living_street', '#4ADE80',
-    'service', '#7C3AED',
-    'road', '#F9A8D4',
-    '#F9A8D4',
-  ];
+  return matchHighway((mark) => mark.fill, FALLBACK_FILL);
 }
 
 /** Relative width. Service stays narrower than a residential street, a motorway wider. */
 export function classScale(): ExpressionSpecification {
-  return [
-    'match', ['get', 'highway'],
-    'motorway', 1.45,
-    'trunk', 1.28,
-    'primary', 1.16,
-    'secondary', 1.05,
-    'tertiary', 0.96,
-    'unclassified', 0.9,
-    'residential', 0.88,
-    'living_street', 0.74,
-    'service', 0.62,
-    'road', 0.9,
-    'motorway_link', 0.9,
-    'trunk_link', 0.82,
-    'primary_link', 0.76,
-    'secondary_link', 0.7,
-    'tertiary_link', 0.64,
-    0.85,
-  ];
+  return matchHighway((mark) => mark.scale, FALLBACK_SCALE);
+}
+
+/** Darker outline of the same class. Bridges keep a near-black casing on top. */
+export function casingColor(): ExpressionSpecification {
+  return ['case', ['get', 'bridge'], '#1F2937', matchHighway((mark) => mark.casing, FALLBACK_CASING)];
+}
+
+/** Casing thickness. A bridge adds a little so the deck reads above the fill. */
+export function casingWidthExtra(): ExpressionSpecification {
+  return ['+', matchHighway((mark) => mark.casingExtra, FALLBACK_CASING_EXTRA), ['case', ['get', 'bridge'], 1.6, 0]];
 }
 
 /** Normal colour, or green → red while a load scenario is painted via feature-state. */
@@ -61,9 +78,7 @@ export function roadLineColor(): ExpressionSpecification {
   ];
 }
 
-export const LINK_HIGHWAYS = [
-  'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link',
-] as const;
+export const LINK_HIGHWAYS = ROAD_MARKS.filter((mark) => mark.link).map((mark) => mark.highway);
 
 export function linkFilter(): FilterSpecification {
   return ['all', ['==', ['get', 'layer'], 'road'], ['in', ['get', 'highway'], ['literal', [...LINK_HIGHWAYS]]]];
@@ -83,7 +98,11 @@ export interface PathStyle {
   dash?: [number, number];
 }
 
-/** Pedestrian and footway used to share one grey dash. Each class is its own mark. */
+/**
+ * Pedestrian and footway used to share one grey dash. Each class is its own mark,
+ * including the non-drivable highway classes (busway, construction, raceway, escape)
+ * that the graph draws on the path layer.
+ */
 export const PATH_STYLES: PathStyle[] = [
   { id: 'path-pedestrian', highways: ['pedestrian'], color: '#DB2777', width: 3.2 },
   { id: 'path-footway', highways: ['footway'], color: '#475569', width: 1.6, dash: [1.6, 1.2] },
@@ -93,6 +112,10 @@ export const PATH_STYLES: PathStyle[] = [
   { id: 'path-track', highways: ['track'], color: '#92400E', width: 2, dash: [3, 1.8] },
   { id: 'path-bridleway', highways: ['bridleway'], color: '#4D7C0F', width: 1.8, dash: [6, 1.5] },
   { id: 'path-corridor', highways: ['corridor'], color: '#7C3AED', width: 1.5, dash: [2, 2] },
+  { id: 'path-busway', highways: ['busway', 'bus_guideway'], color: '#0891B2', width: 3.4 },
+  { id: 'path-construction', highways: ['construction', 'proposed'], color: '#4B5563', width: 2.4, dash: [5, 3] },
+  { id: 'path-raceway', highways: ['raceway'], color: '#BE123C', width: 2.6 },
+  { id: 'path-escape', highways: ['escape'], color: '#B45309', width: 1.8, dash: [1.2, 1.4] },
   { id: 'path-other', highways: null, color: '#9CA3AF', width: 1.4, dash: [2, 1.5] },
 ];
 
@@ -105,4 +128,9 @@ export function pathFilter(style: PathStyle): FilterSpecification {
     return ['all', base, ['in', ['get', 'highway'], ['literal', [...style.highways]]]];
   }
   return ['all', base, ['!', ['in', ['get', 'highway'], ['literal', known]]]];
+}
+
+/** Colour plus dash, so two classes can share neither and still be told apart. */
+export function pathSignature(style: PathStyle): string {
+  return `${style.color}|${style.dash ? style.dash.join(',') : 'solid'}|${style.width}`;
 }

@@ -4,8 +4,8 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
+import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
 import { defaultCamera } from '../utils/view';
-import { PATH_LAYER_IDS, PATH_STYLES, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
 
 export interface MapHandle {
   /** collaborators' cursors and selections; called often, does not re-render React */
@@ -261,8 +261,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       }
       map.addLayer({ id: 'road-casing', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'road'],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': ['case', ['get', 'bridge'], '#4B5260', '#AEB5C0'],
-                 'line-width': laneWidth(['case', ['get', 'bridge'], 4, 2]) } });
+        paint: { 'line-color': casingColor(), 'line-width': laneWidth(casingWidthExtra()) } });
       map.addLayer({ id: 'road-fill', type: 'line', source: 'ways', filter: solidRoadFilter(),
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {

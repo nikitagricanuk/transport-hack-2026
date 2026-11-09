@@ -12,14 +12,14 @@ import type {
 import { applyPatch } from './utils/geoPatch';
 import { saveName, savedName, useCollab, type CollabMessage } from './utils/collab';
 import { isDraftPointKeyClaimed, isFullscreenToggle, shouldDeleteSelection } from './utils/keys';
+import {
+  DEFAULT_LAYERS, allIssueFiltersOn, allLayersOn, applyLayerChange, defaultIssueFilters, issueVisible,
+  type IssueFilterKey,
+} from './utils/layers';
 import { TEMPLATES, templateOps, type RoadTemplate } from './utils/osm';
 import { APP_VERSION, isFrontendOutdated } from './utils/version';
 
 const VERSION_CHECK_MS = 60_000;
-
-const DEFAULT_LAYERS: LayerVisibility = {
-  roads: true, paths: true, rail: true, signals: true, crossings: true, stops: true, buildings: true, issues: true,
-};
 const STORAGE_KEY = 'uds-editor-session';
 const NO_ISSUES: Issue[] = [];
 
@@ -30,6 +30,7 @@ export default function App() {
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [validating, setValidating] = useState(false);
   const [layers, setLayers] = useState(DEFAULT_LAYERS);
+  const [issueFilters, setIssueFilters] = useState(defaultIssueFilters);
   const [baseOpacity, setBaseOpacity] = useState(50);
   const [bottomTab, setBottomTab] = useState<BottomTab>('issues');
   const [load, setLoad] = useState<LoadState | null>(null);
@@ -410,7 +411,26 @@ export default function App() {
     runOps({ op: fix.op, args: fix.args }, { label: fix.label + ': ' + i.title });
   }, [runOps]);
   const onInspectorOp = useCallback((op: Op | Op[], label?: string) => { runOps(op, { label }); }, [runOps]);
-  const mapIssues = layers.issues ? validation?.issues ?? NO_ISSUES : NO_ISSUES;
+  const onLayers = useCallback((next: LayerVisibility) => {
+    const applied = applyLayerChange(layers, issueFilters, next);
+    setLayers(applied.layers);
+    setIssueFilters(applied.filters);
+  }, [layers, issueFilters]);
+  const onSelectAllLayers = useCallback(() => {
+    onLayers(allLayersOn());
+  }, [onLayers]);
+  const onIssueFilter = useCallback((key: IssueFilterKey) => {
+    setIssueFilters((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+  const onSelectAllIssues = useCallback(() => {
+    setIssueFilters(allIssueFiltersOn());
+    setLayers((prev) => ({ ...prev, issues: true }));
+  }, []);
+  const mapIssues = useMemo(() => {
+    if (!layers.issues || !validation) return NO_ISSUES;
+    const shown = validation.issues.filter((issue) => issueVisible(issueFilters, issue.category));
+    return shown.length ? shown : NO_ISSUES;
+  }, [layers.issues, validation, issueFilters]);
 
   const undo = useCallback(async () => {
     if (doc?.history.can_undo) ingest(await api.undo(doc.doc_id));
@@ -609,7 +629,8 @@ export default function App() {
 
       <div className="body">
         <ToolRail tool={tool} onTool={setTool} />
-        <LayersPanel layers={layers} onLayers={setLayers} baseOpacity={baseOpacity} onBaseOpacity={setBaseOpacity}
+        <LayersPanel layers={layers} onLayers={onLayers} onSelectAll={onSelectAllLayers}
+          baseOpacity={baseOpacity} onBaseOpacity={setBaseOpacity}
           canApplyTemplate={selectedWay?.layer === 'road'} onTemplate={applyTemplate} />
         <main className="center">
           <div className="map-wrap">
@@ -625,7 +646,8 @@ export default function App() {
             {error && <div className="toast error" role="alert">{error}<button className="icon-btn" aria-label="Закрыть" onClick={() => setError(null)}>×</button></div>}
           </div>
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
-            validating={validating} onShow={showIssue} onFix={onFix}>
+            validating={validating} onShow={showIssue} onFix={onFix}
+            issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}>
             {bottomTab === 'load' && (
               <LoadPanel load={load} comparison={comparison} onMultiplier={onMultiplier} onSnapshot={onSnapshot}
                 onDeleteSnapshot={onDeleteSnapshot} onCompare={onCompare} onReset={onResetLoad} onShowRoad={onShowRoad}
