@@ -355,6 +355,85 @@ def _piece_for_role(role: str, old: Way, new: Way, via: set[int], tags: dict[str
     return new if new.nodes[0] in via else old
 
 
+def _role_endpoints(doc: OsmDocument, rel: Relation, role: str) -> set[int]:
+    nodes: set[int] = set()
+    for member in rel.members:
+        if member.role != role:
+            continue
+        if member.type == "node":
+            nodes.add(member.ref)
+        elif member.type == "way":
+            way = doc.ways.get(member.ref)
+            if way is not None and way.nodes:
+                nodes.add(way.nodes[0])
+                nodes.add(way.nodes[-1])
+    return nodes
+
+
+def _other_via_edges(doc: OsmDocument, rel: Relation, skip_id: int) -> list[tuple[int, int]]:
+    edges: list[tuple[int, int]] = []
+    for member in rel.members:
+        if member.role != "via" or member.type != "way" or member.ref == skip_id:
+            continue
+        way = doc.ways.get(member.ref)
+        if way is not None and len(way.nodes) >= 2:
+            edges.append((way.nodes[0], way.nodes[-1]))
+    return edges
+
+
+def _endpoints_linked(sources: set[int], targets: set[int], edges: list[tuple[int, int]]) -> bool:
+    """True when some source node reaches some target along via-way endpoints."""
+    if not sources or not targets:
+        return False
+    if sources & targets:
+        return True
+    adjacent: dict[int, set[int]] = {}
+    for left, right in edges:
+        adjacent.setdefault(left, set()).add(right)
+        adjacent.setdefault(right, set()).add(left)
+    seen = set(sources)
+    stack = list(sources)
+    while stack:
+        node = stack.pop()
+        for nxt in adjacent.get(node, ()):
+            if nxt in seen:
+                continue
+            if nxt in targets:
+                return True
+            seen.add(nxt)
+            stack.append(nxt)
+    return False
+
+
+def _restriction_via_backward(doc: OsmDocument, rel: Relation, old: Way, new: Way) -> bool:
+    """True when the via way is travelled from its last node toward its first.
+
+    Restriction members are not a route. ``from``, ``to``, and ``via`` may be
+    stored in any order, so the direction is the path from the ``from`` role
+    to the ``to`` role through connected via endpoints. ``old`` is the first
+    half of the original node order and ``new`` is the second.
+    """
+    if len(old.nodes) < 2 or len(new.nodes) < 2:
+        return False
+    start, end = old.nodes[0], new.nodes[-1]
+    edges = _other_via_edges(doc, rel, old.id)
+    from_nodes = _role_endpoints(doc, rel, "from")
+    enters_start = _endpoints_linked(from_nodes, {start}, edges)
+    enters_end = _endpoints_linked(from_nodes, {end}, edges)
+    if enters_end and not enters_start:
+        return True
+    if enters_start and not enters_end:
+        return False
+    to_nodes = _role_endpoints(doc, rel, "to")
+    leaves_start = _endpoints_linked({start}, to_nodes, edges)
+    leaves_end = _endpoints_linked({end}, to_nodes, edges)
+    if leaves_start and not leaves_end:
+        return True
+    if leaves_end and not leaves_start:
+        return False
+    return False
+
+
 def _neighbour_nodes(doc: OsmDocument, members: list[Member], index: int, step: int, old_id: int) -> list[int] | None:
     j = index + step
     while 0 <= j < len(members):
@@ -401,7 +480,7 @@ def _rewrite_split_members(doc: OsmDocument, rel: Relation, old: Way, new: Way) 
     out: list[Member] = []
     if _is_restriction(rel.tags):
         via = _via_node_ids(doc, rel)
-        for i, m in enumerate(rel.members):
+        for m in rel.members:
             if not (m.type == "way" and m.ref == old.id):
                 out.append(m)
                 continue
@@ -409,7 +488,7 @@ def _rewrite_split_members(doc: OsmDocument, rel: Relation, old: Way, new: Way) 
                 chosen = _piece_for_role(m.role, old, new, via, old.tags)
                 out.append(Member("way", chosen.id, m.role))
             elif m.role == "via":
-                backward = _traverse_backward(doc, rel.members, i, old, new, m.role)
+                backward = _restriction_via_backward(doc, rel, old, new)
                 out.extend(_ordered_pieces(backward, old, new, m.role))
             else:
                 # Unknown role: still one member, so converters do not see a duplicated from/to.

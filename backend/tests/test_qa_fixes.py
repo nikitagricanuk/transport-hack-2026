@@ -1,14 +1,16 @@
 """Regression tests for the independent QA pass."""
 
+import json
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.edits import History, apply_op
 from app.main import SESSIONS, app
 from app.organizer import OrganizerError, credentials, upload_osm
-from app.osm_model import Member, OsmDocument, Relation
+from app.osm_model import Member, OsmDocument, Relation, Way
 from app.roads import reversed_tags, traffic_node_order
 from app.validation import validate
 
@@ -17,6 +19,10 @@ EXAMPLE = Path(__file__).resolve().parents[2] / "data" / "example.osm"
 
 def _way_refs(rel):
     return [(m.ref, m.role) for m in rel.members if m.type == "way"]
+
+
+def _via_refs(rel):
+    return [m.ref for m in rel.members if m.type == "way" and m.role == "via"]
 
 
 def test_split_restriction_keeps_one_from_member(doc):
@@ -54,6 +60,107 @@ def test_split_at_via_keeps_the_approaching_piece(doc):
     assert len(from_members) == 1 and from_members[0].ref == 100
     assert from_members[0].ref != new_id
     assert doc.ways[100].nodes[-1] == 3
+
+
+def _restriction_ways(doc, via_nodes):
+    """from [1,2], via as given, to [4,5]. Node 4 is an end of a forward via [2,3,4]."""
+    doc.ways[210] = Way(id=210, nodes=[1, 2], tags={"highway": "residential"})
+    doc.ways[211] = Way(id=211, nodes=list(via_nodes), tags={"highway": "primary"})
+    doc.ways[212] = Way(id=212, nodes=[4, 5], tags={"highway": "residential"})
+    return 210, 211, 212
+
+
+def test_split_forward_via_keeps_from_to_chain_when_members_are_from_to_via(doc):
+    """from=[1,2], via=[2,3,4], to=[4,5]. Members are ordered from, to, via.
+
+    Splitting the via way at 3 must leave [2,3] then [3,4], not the reverse.
+    """
+    from_id, via_id, to_id = _restriction_ways(doc, [2, 3, 4])
+    doc.relations[920] = Relation(
+        id=920,
+        members=[
+            Member("way", from_id, "from"),
+            Member("way", to_id, "to"),
+            Member("way", via_id, "via"),
+        ],
+        tags={"type": "restriction", "restriction": "no_left_turn"},
+    )
+    h = History()
+    new_id = apply_op(doc, h, "split_way", {"way_id": via_id, "node_id": 3})["new_id"]
+    assert _via_refs(doc.relations[920]) == [via_id, new_id]
+    assert doc.ways[via_id].nodes == [2, 3]
+    assert doc.ways[new_id].nodes == [3, 4]
+    assert [m.ref for m in doc.relations[920].members if m.role == "from"] == [from_id]
+    assert [m.ref for m in doc.relations[920].members if m.role == "to"] == [to_id]
+    h.undo()
+    assert _via_refs(doc.relations[920]) == [via_id]
+    assert doc.ways[via_id].nodes == [2, 3, 4]
+
+
+def test_split_forward_via_keeps_from_to_chain_when_members_are_from_via_to(doc):
+    from_id, via_id, to_id = _restriction_ways(doc, [2, 3, 4])
+    doc.relations[921] = Relation(
+        id=921,
+        members=[
+            Member("way", from_id, "from"),
+            Member("way", via_id, "via"),
+            Member("way", to_id, "to"),
+        ],
+        tags={"type": "restriction", "restriction": "no_straight_on"},
+    )
+    new_id = apply_op(doc, History(), "split_way", {"way_id": via_id, "node_id": 3})["new_id"]
+    assert _via_refs(doc.relations[921]) == [via_id, new_id]
+    assert doc.ways[via_id].nodes == [2, 3] and doc.ways[new_id].nodes == [3, 4]
+
+
+def test_split_backward_stored_via_still_chains_from_the_from_way(doc):
+    """Via stored as [4,3,2] is travelled 2→4. Pieces must meet the from way first."""
+    from_id, via_id, to_id = _restriction_ways(doc, [4, 3, 2])
+    doc.relations[922] = Relation(
+        id=922,
+        members=[
+            Member("way", from_id, "from"),
+            Member("way", to_id, "to"),
+            Member("way", via_id, "via"),
+        ],
+        tags={"type": "restriction", "restriction": "no_u_turn"},
+    )
+    new_id = apply_op(doc, History(), "split_way", {"way_id": via_id, "node_id": 3})["new_id"]
+    assert _via_refs(doc.relations[922]) == [new_id, via_id]
+    assert doc.ways[new_id].nodes == [3, 2]
+    assert doc.ways[via_id].nodes == [4, 3]
+    first, second = (doc.ways[ref] for ref in _via_refs(doc.relations[922]))
+    assert {first.nodes[0], first.nodes[-1]} & {1, 2}
+    assert {second.nodes[0], second.nodes[-1]} & {4, 5}
+    assert first.nodes[-1] in second.nodes or first.nodes[0] in second.nodes
+
+
+def test_split_via_in_a_chain_ignores_the_downstream_neighbour(doc):
+    """Preceding member is the downstream via, which touches the far end.
+
+    from=[1,2], via=[2,3,4] then [4,5], to=[5,6]. Member order puts the
+    downstream via immediately before the way being split.
+    """
+    doc.ways[210] = Way(id=210, nodes=[1, 2], tags={"highway": "residential"})
+    doc.ways[211] = Way(id=211, nodes=[2, 3, 4], tags={"highway": "primary"})
+    doc.ways[212] = Way(id=212, nodes=[4, 5], tags={"highway": "primary"})
+    doc.ways[213] = Way(id=213, nodes=[5, 6], tags={"highway": "residential"})
+    doc.relations[923] = Relation(
+        id=923,
+        members=[
+            Member("way", 210, "from"),
+            Member("way", 212, "via"),
+            Member("way", 211, "via"),
+            Member("way", 213, "to"),
+        ],
+        tags={"type": "restriction", "restriction": "no_left_turn"},
+    )
+    new_id = apply_op(doc, History(), "split_way", {"way_id": 211, "node_id": 3})["new_id"]
+    split = [m.ref for m in doc.relations[923].members if m.ref in {211, new_id}]
+    assert split == [211, new_id]
+    assert doc.ways[211].nodes == [2, 3]
+    assert doc.ways[new_id].nodes == [3, 4]
+    assert _via_refs(doc.relations[923]) == [212, 211, new_id]
 
 
 def test_split_route_backward_inserts_the_second_half_first(doc):
@@ -224,6 +331,89 @@ def test_draft_survives_dropping_the_memory_session(raw):
     assert tags["maxspeed"] == "40"
     assert c.delete("/api/draft").status_code == 200
     assert c.get("/api/draft").status_code == 404
+
+
+def test_drafts_restore_only_the_requested_document(raw):
+    c = TestClient(app)
+    opened_a = c.post("/api/documents", files={"file": ("a.osm", raw, "application/xml")})
+    opened_b = c.post("/api/documents", files={"file": ("b.osm", raw, "application/xml")})
+    assert opened_a.status_code == 200 and opened_b.status_code == 200
+    doc_a = opened_a.json()["doc_id"]
+    doc_b = opened_b.json()["doc_id"]
+    edit = {"op": "set_tags", "args": {"kind": "way", "id": 100, "tags": {}}}
+    edit["args"]["tags"] = {"name": "alpha", "maxspeed": "10"}
+    assert c.post(f"/api/documents/{doc_a}/ops", json=edit).status_code == 200
+    edit["args"]["tags"] = {"name": "beta", "maxspeed": "20"}
+    assert c.post(f"/api/documents/{doc_b}/ops", json=edit).status_code == 200
+    edit["args"]["tags"] = {"maxspeed": "11"}
+    assert c.post(f"/api/documents/{doc_a}/ops", json=edit).status_code == 200
+
+    draft_dir = main_module.DRAFT_DIR
+    assert (draft_dir / f"{doc_a}.osm").is_file() and (draft_dir / f"{doc_a}.json").is_file()
+    assert (draft_dir / f"{doc_b}.osm").is_file() and (draft_dir / f"{doc_b}.json").is_file()
+    assert json.loads((draft_dir / f"{doc_a}.json").read_text(encoding="utf-8"))["doc_id"] == doc_a
+    assert json.loads((draft_dir / f"{doc_b}.json").read_text(encoding="utf-8"))["doc_id"] == doc_b
+    assert not (draft_dir / "autosave.osm").exists()
+    assert not (draft_dir / "autosave.json").exists()
+
+    before = set(SESSIONS)
+    missing = c.get("/api/draft", params={"doc_id": "missing-doc"})
+    assert missing.status_code == 404
+    assert "alpha" not in missing.text and "beta" not in missing.text
+    assert "a.osm" not in missing.text and "b.osm" not in missing.text
+    assert c.get("/api/documents/missing-doc").status_code == 404
+    assert c.get("/api/draft", params={"doc_id": "../autosave"}).status_code == 404
+    assert set(SESSIONS) == before
+
+    # Backend restart: memory is gone, both drafts are still on disk.
+    SESSIONS.pop(doc_a)
+    SESSIONS.pop(doc_b)
+    assert c.get("/api/draft").status_code == 404
+
+    restored_a = c.get(f"/api/documents/{doc_a}")
+    assert restored_a.status_code == 200
+    assert restored_a.json()["doc_id"] == doc_a
+    assert restored_a.json()["filename"] == "a.osm"
+    tags_a = c.get(f"/api/documents/{doc_a}/elements/way/100").json()["tags"]
+    assert tags_a["name"] == "alpha" and tags_a["maxspeed"] == "11"
+
+    restored_b = c.get("/api/draft", params={"doc_id": doc_b})
+    assert restored_b.status_code == 200
+    assert restored_b.json()["doc_id"] == doc_b
+    assert restored_b.json()["filename"] == "b.osm"
+    tags_b = c.get(f"/api/documents/{doc_b}/elements/way/100").json()["tags"]
+    assert tags_b["name"] == "beta" and tags_b["maxspeed"] == "20"
+
+    assert c.delete("/api/draft", params={"doc_id": doc_a}).status_code == 200
+    SESSIONS.pop(doc_a, None)
+    SESSIONS.pop(doc_b, None)
+    assert c.get("/api/draft", params={"doc_id": doc_a}).status_code == 404
+    assert c.get("/api/documents/missing-doc").status_code == 404
+    kept = c.get("/api/draft", params={"doc_id": doc_b})
+    assert kept.status_code == 200 and kept.json()["doc_id"] == doc_b
+    assert c.get(f"/api/documents/{doc_b}/elements/way/100").json()["tags"]["name"] == "beta"
+
+
+def test_unknown_draft_id_does_not_load_legacy_autosave(raw):
+    draft_dir = main_module.DRAFT_DIR
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    (draft_dir / "autosave.osm").write_bytes(raw)
+    (draft_dir / "autosave.json").write_text(
+        json.dumps({"doc_id": "legacy-doc", "filename": "legacy.osm"}),
+        encoding="utf-8",
+    )
+    c = TestClient(app)
+    before = set(SESSIONS)
+    missing = c.get("/api/draft", params={"doc_id": "other-doc"})
+    assert missing.status_code == 404
+    assert "legacy" not in missing.text
+    assert c.get("/api/documents/other-doc").status_code == 404
+    assert set(SESSIONS) == before
+    restored = c.get("/api/draft", params={"doc_id": "legacy-doc"})
+    assert restored.status_code == 200
+    assert restored.json()["doc_id"] == "legacy-doc"
+    assert restored.json()["filename"] == "legacy.osm"
+    assert "other-doc" not in SESSIONS
 
 
 def test_organizer_requires_token_and_team(monkeypatch):

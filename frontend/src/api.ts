@@ -45,10 +45,12 @@ export const api = {
     try {
       return await request<DocState>(`/api/documents/${docId}`);
     } catch {
-      return request<DocState>('/api/draft');
+      // An unscoped autosave may belong to another document. Ask for this id only.
+      return request<DocState>(`/api/draft?doc_id=${encodeURIComponent(docId)}`);
     }
   },
-  discardDraft: () => request<{ ok: boolean }>('/api/draft', { method: 'DELETE' }),
+  discardDraft: (docId: string) =>
+    request<{ ok: boolean }>(`/api/draft?doc_id=${encodeURIComponent(docId)}`, { method: 'DELETE' }),
   exportUrl: (docId: string, filename: string) =>
     `/api/documents/${docId}/export?filename=${encodeURIComponent(filename)}`,
 };

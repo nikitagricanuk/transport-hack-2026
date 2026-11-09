@@ -99,17 +99,135 @@ def _open(data: bytes, filename: str) -> dict[str, Any]:
     return _state(SESSIONS[sid])
 
 
+# Document ids are generated as short hex, but restore accepts a client-supplied
+# id, so the filename is restricted to this set before it is joined onto the draft dir.
+_DRAFT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_LEGACY_DRAFT = ("autosave.osm", "autosave.json")
+
+
+def _draft_paths(doc_id: str) -> tuple[Path, Path] | None:
+    if not _DRAFT_ID.fullmatch(doc_id):
+        return None
+    root = DRAFT_DIR.resolve()
+    osm_path = (DRAFT_DIR / f"{doc_id}.osm").resolve()
+    meta_path = (DRAFT_DIR / f"{doc_id}.json").resolve()
+    if osm_path.parent != root or meta_path.parent != root:
+        return None
+    return osm_path, meta_path
+
+
+def _migrate_legacy_autosave() -> None:
+    """Copy the old shared autosave to the document it names, then remove it.
+
+    A single autosave.osm cannot be attributed to a request for a different id,
+    so it is never served until it lives under that document's own filenames.
+    """
+    meta_path = DRAFT_DIR / "autosave.json"
+    osm_path = DRAFT_DIR / "autosave.osm"
+    if not meta_path.is_file() or not osm_path.is_file():
+        return
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        sid = str(meta["doc_id"])
+        filename = str(meta.get("filename") or "draft.osm")
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    paths = _draft_paths(sid)
+    if paths is None:
+        return
+    dest_osm, dest_meta = paths
+    try:
+        if not dest_osm.exists():
+            DRAFT_DIR.mkdir(parents=True, exist_ok=True)
+            dest_osm.write_bytes(osm_path.read_bytes())
+            dest_meta.write_text(
+                json.dumps({"doc_id": sid, "filename": filename}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        meta_path.unlink()
+        osm_path.unlink()
+    except OSError:
+        return
+
+
 def _persist_draft(s: Session) -> None:
-    """Write the current document so a browser refresh can reload it."""
+    """Write this document's draft. Other documents keep their own files."""
+    paths = _draft_paths(s.id)
+    if paths is None:
+        return
+    osm_path, meta_path = paths
     try:
         DRAFT_DIR.mkdir(parents=True, exist_ok=True)
-        (DRAFT_DIR / "autosave.osm").write_bytes(s.doc.to_xml(renumber_new=False))
-        (DRAFT_DIR / "autosave.json").write_text(
+        _migrate_legacy_autosave()
+        osm_path.write_bytes(s.doc.to_xml(renumber_new=False))
+        meta_path.write_text(
             json.dumps({"doc_id": s.id, "filename": s.filename}, ensure_ascii=False),
             encoding="utf-8",
         )
     except OSError:
         return
+
+
+def _draft_ids() -> list[str]:
+    _migrate_legacy_autosave()
+    if not DRAFT_DIR.is_dir():
+        return []
+    found: list[str] = []
+    for meta in DRAFT_DIR.glob("*.json"):
+        if meta.name == "autosave.json":
+            continue
+        paths = _draft_paths(meta.stem)
+        if paths is None:
+            continue
+        osm_path, meta_path = paths
+        if osm_path.is_file() and meta_path.is_file():
+            found.append(meta.stem)
+    return sorted(found)
+
+
+def _draft_exists(doc_id: str) -> bool:
+    _migrate_legacy_autosave()
+    paths = _draft_paths(doc_id)
+    if paths is None:
+        return False
+    osm_path, meta_path = paths
+    return osm_path.is_file() and meta_path.is_file()
+
+
+def _materialize_draft(doc_id: str) -> Session:
+    """Load the draft stored for this id. Never substitutes a different document."""
+    existing = SESSIONS.get(doc_id)
+    if existing is not None:
+        return existing
+    _migrate_legacy_autosave()
+    paths = _draft_paths(doc_id)
+    if paths is None:
+        raise HTTPException(404, "черновик не найден")
+    osm_path, meta_path = paths
+    if not osm_path.is_file() or not meta_path.is_file():
+        raise HTTPException(404, "черновик не найден")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        sid = str(meta["doc_id"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise HTTPException(404, "черновик повреждён") from e
+    if sid != doc_id:
+        raise HTTPException(404, "черновик не найден")
+    try:
+        doc = OsmDocument.parse(osm_path.read_bytes())
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"не удалось прочитать черновик: {e}") from e
+    SESSIONS[doc_id] = Session(id=doc_id, filename=str(meta.get("filename") or "draft.osm"), doc=doc)
+    return SESSIONS[doc_id]
+
+
+def _delete_draft_files(doc_id: str) -> None:
+    paths = _draft_paths(doc_id)
+    if paths is None:
+        return
+    for path in paths:
+        if path.is_file():
+            path.unlink()
 
 
 def _remember(s: Session) -> dict[str, Any]:
@@ -154,7 +272,12 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @app.get("/api/documents/{doc_id}")
 def get_document(doc_id: str) -> dict[str, Any]:
-    return _state(_session(doc_id))
+    s = SESSIONS.get(doc_id)
+    if s is None and _draft_exists(doc_id):
+        s = _materialize_draft(doc_id)
+    if s is None:
+        raise HTTPException(404, "документ не найден — загрузите .osm заново")
+    return _state(s)
 
 
 @app.get("/api/documents/{doc_id}/elements/{kind}/{eid}")
@@ -207,30 +330,30 @@ def redo(doc_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/draft")
-def read_draft() -> dict[str, Any]:
-    meta_path = DRAFT_DIR / "autosave.json"
-    osm_path = DRAFT_DIR / "autosave.osm"
-    if not meta_path.is_file() or not osm_path.is_file():
+def read_draft(doc_id: str | None = None) -> dict[str, Any]:
+    """Restore one document.
+
+    With ``doc_id``, only that document's draft is loaded — an unknown id is a
+    404 even when other drafts exist. Without it, the sole draft is returned
+    so a single-document client keeps working; several drafts are ambiguous
+    and also 404 rather than handing back whichever file was written last.
+    """
+    if doc_id is not None:
+        return _state(_materialize_draft(doc_id))
+    ids = _draft_ids()
+    if len(ids) != 1:
         raise HTTPException(404, "черновик не найден")
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        sid = str(meta["doc_id"])
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        raise HTTPException(404, "черновик повреждён") from e
-    existing = SESSIONS.get(sid)
-    if existing is not None:
-        return _state(existing)
-    try:
-        doc = OsmDocument.parse(osm_path.read_bytes())
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(400, f"не удалось прочитать черновик: {e}") from e
-    SESSIONS[sid] = Session(id=sid, filename=str(meta.get("filename") or "draft.osm"), doc=doc)
-    return _state(SESSIONS[sid])
+    return _state(_materialize_draft(ids[0]))
 
 
 @app.delete("/api/draft")
-def delete_draft() -> dict[str, bool]:
-    for name in ("autosave.osm", "autosave.json"):
+def delete_draft(doc_id: str | None = None) -> dict[str, bool]:
+    if doc_id is not None:
+        _delete_draft_files(doc_id)
+        return {"ok": True}
+    for sid in _draft_ids():
+        _delete_draft_files(sid)
+    for name in _LEGACY_DRAFT:
         path = DRAFT_DIR / name
         if path.is_file():
             path.unlink()
