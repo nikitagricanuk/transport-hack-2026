@@ -34,19 +34,37 @@ echo "deploy dir: ${DEPLOY_DIR}"
 umask 022
 printf '%s' "$COMPOSE_B64" | base64 -d > docker-compose.yml
 
+# Credentials are written only under this directory, never ~/.docker.
+# The trap runs on every exit, including a failed pull, up, or prune.
+docker_cfg=""
+cleanup_docker_cfg() {
+  status=$?
+  trap - EXIT
+  if [ -n "$docker_cfg" ] && [ -d "$docker_cfg" ]; then
+    DOCKER_CONFIG="$docker_cfg" docker logout ghcr.io >/dev/null 2>&1 || true
+    rm -rf "$docker_cfg"
+  fi
+  exit "$status"
+}
+
+docker_cfg=$(mktemp -d)
+trap cleanup_docker_cfg EXIT
+chmod 700 "$docker_cfg"
+
 token=$(printf '%s' "$TOKEN_B64" | base64 -d)
 if [ -n "$token" ]; then
-  printf '%s' "$token" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+  printf '%s' "$token" | DOCKER_CONFIG="$docker_cfg" docker login ghcr.io -u "$GHCR_USER" --password-stdin
 else
   echo "No GHCR token; pulling as a public package"
 fi
 unset token TOKEN_B64
 
-docker compose pull
-docker compose up -d --remove-orphans
+DOCKER_CONFIG="$docker_cfg" docker compose pull
+# The image is already in the daemon. --pull never keeps `up` from contacting
+# the registry (Compose otherwise refreshes the :latest tag), so this does
+# not need the token. The trap still drops the temp config afterwards.
+docker compose up -d --remove-orphans --pull never
 docker image prune -f
-# The token is only needed for the pull. Do not leave it in ~/.docker/config.json.
-docker logout ghcr.io >/dev/null 2>&1 || true
 
 ok=0
 i=0

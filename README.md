@@ -69,8 +69,8 @@ Job `deploy` запускается только после успешной с�
 
 1. Каталог `/opt/transport-hack`. Если его нельзя создать или в него нельзя писать — `~/transport-hack` пользователя `deploy`.
 2. В каталог записывается [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml): образ GHCR, порт только `127.0.0.1:8095`, `restart: unless-stopped`, healthcheck, логи `json-file` (max-size 10m, max-file 3), именованный том `transport-hack-data` на `/data`. Имя контейнера — `transport-hack-editor`.
-3. `docker login ghcr.io`. Пароль — секрет `GHCR_TOKEN`, если он задан, иначе `GITHUB_TOKEN` этого job. После `pull` выполняется `docker logout`, токен на диске не остаётся.
-4. `docker compose pull`, `docker compose up -d`, затем `docker image prune -f`.
+3. `docker login ghcr.io` пишет токен только во временный `DOCKER_CONFIG` (`mktemp -d`, режим 700). Пароль — секрет `GHCR_TOKEN`, если он задан, иначе `GITHUB_TOKEN` этого job. `docker compose pull` использует этот каталог. Ловушка `EXIT` на любом выходе, в том числе после ошибки `pull`, `up` или `prune`, делает `docker logout` и удаляет каталог. В `~/.docker/config.json` токен не попадает.
+4. `docker compose up -d --pull never` поднимает уже скачанный образ и в реестр больше не ходит, затем `docker image prune -f`.
 5. `curl` `http://127.0.0.1:8095/api/health` до 15 раз с паузой 3 секунды. В ответе должно быть `"ok": true`, иначе job падает.
 
 Nginx на сервере уже терминирует HTTPS для https://thack.nikitagricanuk.ru и проксирует на `127.0.0.1:8095`.
