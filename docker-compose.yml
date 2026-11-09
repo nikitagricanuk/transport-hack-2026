@@ -1,12 +1,33 @@
+name: transport-hack-dev
+
 services:
   editor:
     build:
       context: .
       args:
-        WITH_SUMO: "1"
-    image: uds-editor:latest
+        WITH_SUMO: ${WITH_SUMO:-0}
+    image: transport-hack:local
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./data:/data
+      # :Z relabels the directory for this container on SELinux (RHEL).
+      # Docker Desktop and hosts without SELinux accept the flag.
+      - ./data:/data:Z
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

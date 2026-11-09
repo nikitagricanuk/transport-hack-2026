@@ -38,6 +38,15 @@ def test_fixes_resolve_issues(doc):
     assert 8 not in doc.nodes or any(8 in w.nodes for w in doc.ways.values() if w.id == 100)
 
 
+def test_health():
+    r = TestClient(app).get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert isinstance(body["version"], str)
+    assert isinstance(body["netconvert"], bool)
+
+
 def test_api_flow(raw):
     c = TestClient(app)
     r = c.post("/api/documents", files={"file": ("example.osm", raw, "application/xml")})

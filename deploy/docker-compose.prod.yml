@@ -1,0 +1,47 @@
+# Production stack for the hackathon server.
+# Host nginx already terminates TLS for https://thack.nikitagricanuk.ru
+# and proxies to 127.0.0.1:8095. Nothing here is published on a public interface.
+#
+# RHEL 10, SELinux enforcing, Docker 29 / Compose v5.
+# /data is a named volume, so no bind-mount :Z flag is required.
+# If you later bind-mount a host directory, add the :Z suffix.
+
+name: transport-hack
+
+services:
+  editor:
+    image: ghcr.io/nikitagricanuk/transport-hack-2026:latest
+    container_name: transport-hack-editor
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8095:8000"
+    environment:
+      UDS_DATA_DIR: /data
+      UDS_STATIC_DIR: /app/static
+    volumes:
+      - transport-hack-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  transport-hack-data:
+    name: transport-hack-data
+
+networks:
+  default:
+    name: transport-hack
