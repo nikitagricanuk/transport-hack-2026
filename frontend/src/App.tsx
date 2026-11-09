@@ -6,7 +6,7 @@ import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail, type BottomTab }
 import { ChangesPanel, ExportCheck, LoadPanel, ReportModal } from './components/Analysis';
 import StartScreen from './components/StartScreen';
 import type {
-  ChangesResult, Comparison, DocState, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
+  ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
   ReportData, Selection, SumoResult, Tool, ValidationResult, WayProps,
 } from './types';
 import { applyPatch } from './utils/geoPatch';
@@ -356,6 +356,11 @@ export default function App() {
       if (list.length === 1) res = await api.op(docId, list[0], opts?.label);
       else res = await api.batch(docId, list, opts?.label);
       ingest(res);
+      const warnings = [
+        ...(res.result?.warnings ?? []),
+        ...(res.results ?? []).flatMap((r) => r.warnings ?? []),
+      ];
+      if (warnings.length) setHint(warnings.join(' · '));
       if (opts?.select === 'result') {
         const id = res.result?.id ?? res.results?.[res.results.length - 1]?.id;
         const op = list[list.length - 1].op;
@@ -372,8 +377,8 @@ export default function App() {
   // stable callbacks so memoized panels and the map skip unrelated re-renders
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
-  const onFix = useCallback((i: Issue) => {
-    if (i.fix) runOps({ op: i.fix.op, args: i.fix.args }, { label: i.fix.label + ': ' + i.title });
+  const onFix = useCallback((i: Issue, fix: Fix) => {
+    runOps({ op: fix.op, args: fix.args }, { label: fix.label + ': ' + i.title });
   }, [runOps]);
   const onInspectorOp = useCallback((op: Op | Op[], label?: string) => { runOps(op, { label }); }, [runOps]);
   const mapIssues = layers.issues ? validation?.issues ?? NO_ISSUES : NO_ISSUES;

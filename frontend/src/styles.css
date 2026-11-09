@@ -116,7 +116,8 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1p
 .tabs [role='tab'] { padding: 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); }
 .tabs [role='tab'][aria-selected='true'] { color: #fff; border-bottom-color: #3b82f6; }
 .bottom-body { flex: 1; overflow-y: auto; }
-.issue { display: grid; grid-template-columns: 24px 220px minmax(0, 1fr) 170px 130px; gap: 12px; align-items: center; padding: 7px 14px; border-bottom: 1px solid #1a212b; }
+.issue { display: grid; grid-template-columns: 24px minmax(140px, 200px) minmax(0, 1fr) minmax(80px, 140px) minmax(120px, max-content); gap: 12px; align-items: center; padding: 7px 14px; border-bottom: 1px solid #1a212b; }
+.issue-fixes { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; max-width: 420px; }
 .issue:hover { background: #18202a; }
 .issue-title { font-weight: 600; }
 .issue-desc { color: #b7c0cc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

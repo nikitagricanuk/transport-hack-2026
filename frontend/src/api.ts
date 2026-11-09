@@ -43,8 +43,8 @@ const json = (body: unknown): RequestInit => ({
 export type OpResponse = Omit<DocState, 'geo'> & {
   geo?: Geo;
   patch?: GeoPatch | null;
-  result?: { id?: number; new_id?: number };
-  results?: { id?: number }[];
+  result?: { id?: number; new_id?: number; warnings?: string[] };
+  results?: { id?: number; warnings?: string[] }[];
 };
 
 export const api = {

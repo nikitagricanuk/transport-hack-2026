@@ -9,7 +9,7 @@ import networkx as nx
 
 from .geo import GridIndex, LocalProjection, dist, project_on_segment
 from .osm_model import OsmDocument
-from .roads import ONEWAY_VALID, default_turns, direction, is_drivable, parse_int
+from .roads import ONEWAY_VALID, can_connect, default_turns, direction, is_access_way, is_drivable, parse_int
 from .edits import ATTACH_MAX_M, way_level
 
 Severity = Literal["critical", "warning", "info"]
@@ -20,6 +20,8 @@ CLOSE_JUNCTION_M = 2.0
 BOUNDARY_M = 40.0    # dead ends near the extract border are expected
 STOP_FAR_M = 25.0
 MAX_GRADE = 0.12    # steeper than 12 % between two nodes is a Z jump
+CONNECT_FIX_M = 30.0  # offer "connect to a nearby road" only inside this radius
+ENTRANCE_M = 12.0     # driveway/sidewalk end this close to a door is not a dead end
 
 
 @dataclass
@@ -32,8 +34,16 @@ class Issue:
     refs: list[dict[str, Any]]
     location: list[float] | None = None  # [lon, lat]
     locations: list[list[float]] | None = None  # every highlighted point, [lon, lat]
-    fix: dict[str, Any] | None = None    # {"label", "op", "args"}
+    fix: dict[str, Any] | None = None    # primary option, kept for older clients; equals fixes[0]
+    fixes: list[dict[str, Any]] = field(default_factory=list)  # every alternative the UI can apply
     levels: list[str] = field(default_factory=list)  # affected: matsim/sumo/webots
+
+
+def _is_entrance(tags: dict[str, str]) -> bool:
+    """OSM door: ``entrance=*`` other than ``no``, or the older ``building=entrance``."""
+    if tags.get("entrance") not in (None, "no"):
+        return True
+    return tags.get("building") == "entrance"
 
 
 def validate(doc: OsmDocument) -> dict[str, Any]:
@@ -121,11 +131,19 @@ class _Validator:
         return w.tags.get("name") or f"{w.tags.get('highway', 'ребро')} way/{wid}"
 
     def add(self, **kw: Any) -> None:
+        fixes = kw.pop("fixes", None)
+        if fixes is None:
+            fix = kw.get("fix")
+            fixes = [fix] if fix else []
+        else:
+            kw["fix"] = fixes[0] if fixes else None
+        kw["fixes"] = fixes
         kw.setdefault("id", f"{kw['category']}-{len(self.issues)}")
         self.issues.append(Issue(**kw))
 
     # ------------------------------------------------------------------ run
     def run(self) -> None:
+        self._prepare_entrances()
         self.check_data()
         self.check_connectivity()
         self.check_strong_connectivity()
@@ -136,6 +154,7 @@ class _Validator:
         self.check_geometry()
         self.check_elevation()
         self.check_signals_and_stops()
+        self.check_connections()
 
     def check_data(self) -> None:
         for w in self.doc.ways.values():
@@ -157,8 +176,14 @@ class _Validator:
                          description=f"oneway={ow} на {self.name(w.id)}; допустимо yes, no, -1.",
                          refs=[{"kind": "way", "id": w.id}], levels=["sumo"],
                          location=self.loc(w.nodes[0]) if w.nodes else None,
-                         fix={"label": "oneway=yes", "op": "set_tags",
-                              "args": {"kind": "way", "id": w.id, "tags": {"oneway": "yes"}}})
+                         fixes=[
+                             {"label": "oneway=yes", "op": "set_tags",
+                              "args": {"kind": "way", "id": w.id, "tags": {"oneway": "yes"}}},
+                             {"label": "oneway=no", "op": "set_tags",
+                              "args": {"kind": "way", "id": w.id, "tags": {"oneway": "no"}}},
+                             {"label": "oneway=-1", "op": "set_tags",
+                              "args": {"kind": "way", "id": w.id, "tags": {"oneway": "-1"}}},
+                         ])
 
     def check_connectivity(self) -> None:
         g = nx.Graph()
@@ -173,16 +198,25 @@ class _Validator:
         self.main_nodes = comps[0]
         for comp in comps[1:]:
             ways = sorted({d["way"] for _, _, d in g.subgraph(comp).edges(data=True)})
+            # A driveway or sidewalk that ends at a building door is supposed to stop
+            # there. It is not a broken piece of the car network.
+            if self._access_component(ways, comp):
+                continue
             first = next(iter(comp))
             single = len(ways) == 1
+            fixes: list[dict[str, Any]] = []
+            if single:
+                connect = self._connect_fix(ways[0])
+                if connect:
+                    fixes.append(connect)
+                fixes.append({"label": "Удалить", "op": "delete", "args": {"kind": "way", "id": ways[0]}})
             self.add(category="connectivity", severity="critical",
                      title="Изолированное ребро" if single else "Изолированный фрагмент сети",
                      description=(f"{self.name(ways[0])} не связано с основной сетью" if single
                                   else f"{len(ways)} рёбер не связаны с основной сетью")
                                  + " — MatSim не построит маршрут, SUMO отбросит фрагмент.",
                      refs=[{"kind": "way", "id": w} for w in ways[:20]], location=self.loc(first),
-                     levels=["matsim", "sumo"],
-                     fix={"label": "Удалить", "op": "delete", "args": {"kind": "way", "id": ways[0]}} if single else None)
+                     levels=["matsim", "sumo"], fixes=fixes)
 
     def _segment_index(self) -> GridIndex:
         idx = GridIndex(cell=25.0)
@@ -202,6 +236,8 @@ class _Validator:
             w = self.doc.ways[wids[0]]
             if nid not in (w.nodes[0], w.nodes[-1]) or w.is_closed:
                 continue
+            if self._exempt_access_end(nid):
+                continue
             p = self.xy(nid)
             if p is None:
                 continue
@@ -216,12 +252,14 @@ class _Validator:
             if best is None:
                 continue
             d, owid = best
+            fixes = [{"label": "Соединить", "op": "connect_endpoint", "args": {"node_id": nid, "way_id": owid}}]
+            if self._fully_dangling(w):
+                fixes.append({"label": "Удалить", "op": "delete", "args": {"kind": "way", "id": w.id}})
             self.add(category="junction", severity="warning", title="Разорванный перекрёсток",
                      description=f"{self.name(w.id)} заканчивается в {d:.1f} м от {self.name(owid)} "
                                  "без общего узла.",
                      refs=[{"kind": "node", "id": nid}, {"kind": "way", "id": owid}], location=self.loc(nid),
-                     levels=["matsim", "sumo"],
-                     fix={"label": "Соединить", "op": "connect_endpoint", "args": {"node_id": nid, "way_id": owid}})
+                     levels=["matsim", "sumo"], fixes=fixes)
 
     def check_close_junctions(self) -> None:
         junctions = [n for n, ws in self.road_node_ways.items() if len(ws) >= 2]
@@ -284,6 +322,10 @@ class _Validator:
             # Separate undirected pieces are already reported as isolated fragments.
             if self.main_nodes and not (comp & self.main_nodes):
                 continue
+            # The door-end of a one-way driveway is a dead end on purpose.
+            comp = {n for n in comp if not self._exempt_access_end(n)}
+            if not comp:
+                continue
             if i in reachable and i not in reaches_main:
                 groups["trap"].append(comp)
             elif i in reaches_main and i not in reachable:
@@ -323,12 +365,13 @@ class _Validator:
         else:
             severity = "warning"
         noun = "узлов" if len(nodes) != 1 else "узел"
+        fixes = self._trap_fixes(nodes) if kind == "trap" else None
         self.add(category="connectivity", severity=severity, title=title,
                  description=f"{len(nodes)} {noun}: {why}. MatSim не построит обратный маршрут, "
                              "в SUMO машины останутся в этом кармане.",
                  refs=[{"kind": "node", "id": ordered[0]}] + [{"kind": "way", "id": w} for w in sorted(ways)[:12]],
                  location=locs[0] if locs else None, locations=locs[:800] or None,
-                 levels=["matsim", "sumo"])
+                 levels=["matsim", "sumo"], fixes=fixes)
 
     def check_directions(self) -> None:
         dg = nx.DiGraph()
@@ -346,9 +389,13 @@ class _Validator:
             ind, outd = dg.in_degree(nid), dg.out_degree(nid)
             if (ind == 0) == (outd == 0):
                 continue
-            wid = self.road_node_ways.get(nid, [None])[0]
-            if wid is None or direction(self.doc.ways[wid].tags) == 0 and len(self.road_node_ways[nid]) == 1:
+            if self._exempt_access_end(nid):
+                continue
+            wids = self.road_node_ways.get(nid, [])
+            oneway_ids = [w for w in wids if direction(self.doc.ways[w].tags) != 0]
+            if not oneway_ids and len(wids) <= 1:
                 continue  # plain two-way dead end: fine for simulation
+            wid = oneway_ids[0] if oneway_ids else wids[0]
             boundary = self.near_boundary(nid)
             kind = "Тупик: въезд без выезда" if outd == 0 else "Узел без въезда"
             self.add(category="direction", severity="info" if boundary else "critical", title=kind,
@@ -356,10 +403,9 @@ class _Validator:
                                   if boundary else
                                   "Односторонние рёбра сходятся так, что машины застрянут (SUMO) или маршрут "
                                   "не построится (MatSim)."),
-                     refs=[{"kind": "node", "id": nid}] + [{"kind": "way", "id": w} for w in self.road_node_ways.get(nid, [])],
+                     refs=[{"kind": "node", "id": nid}] + [{"kind": "way", "id": w} for w in wids],
                      location=self.loc(nid), levels=["matsim", "sumo"],
-                     fix={"label": "Сделать двусторонним", "op": "set_tags",
-                          "args": {"kind": "way", "id": wid, "tags": {"oneway": None}}})
+                     fixes=self._oneway_fixes(nid, wid))
 
     def check_lanes(self) -> None:
         for w in self.road_ways:
@@ -373,11 +419,18 @@ class _Validator:
                          description=f"lanes={t['lanes']} на {self.name(w.id)}.", refs=ref, location=loc,
                          levels=["sumo"])
             if lanes is not None and fw is not None and bw is not None and fw + bw != lanes and direction(t) == 0:
+                lane_fixes = [
+                    {"label": f"lanes={fw + bw}", "op": "set_tags",
+                     "args": {"kind": "way", "id": w.id, "tags": {"lanes": str(fw + bw)}}},
+                ]
+                if lanes > fw:
+                    lane_fixes.append({
+                        "label": f"lanes:backward={lanes - fw}", "op": "set_tags",
+                        "args": {"kind": "way", "id": w.id, "tags": {"lanes:backward": str(lanes - fw)}},
+                    })
                 self.add(category="lanes", severity="warning", title="lanes ≠ forward + backward",
                          description=f"lanes={lanes}, а lanes:forward + lanes:backward = {fw + bw}.",
-                         refs=ref, location=loc, levels=["sumo"],
-                         fix={"label": f"lanes={fw + bw}", "op": "set_tags",
-                              "args": {"kind": "way", "id": w.id, "tags": {"lanes": str(fw + bw)}}})
+                         refs=ref, location=loc, levels=["sumo"], fixes=lane_fixes)
             for key, expected in (
                 ("turn:lanes", lanes if direction(t) != 0 else None),
                 ("turn:lanes:forward", fw),
@@ -434,14 +487,22 @@ class _Validator:
                          description=f"{self.name(w.id)}: bridge без layer — Webots положит полотно на землю.",
                          refs=[{"kind": "way", "id": w.id}], location=self.loc(w.nodes[len(w.nodes) // 2]),
                          levels=["webots"],
-                         fix={"label": "layer=1", "op": "set_tags",
-                              "args": {"kind": "way", "id": w.id, "tags": {"layer": "1"}}})
+                         fixes=[
+                             {"label": "layer=1", "op": "set_tags",
+                              "args": {"kind": "way", "id": w.id, "tags": {"layer": "1"}}},
+                             {"label": "Убрать мост", "op": "set_tags",
+                              "args": {"kind": "way", "id": w.id, "tags": {"bridge": None}}},
+                         ])
             if w.tags.get("tunnel") not in (None, "no") and "layer" not in w.tags and w.nodes:
                 self.add(category="geometry", severity="info", title="Тоннель без layer",
                          description=f"{self.name(w.id)}: tunnel без layer.", refs=[{"kind": "way", "id": w.id}],
                          location=self.loc(w.nodes[0]), levels=["webots"],
-                         fix={"label": "layer=-1", "op": "set_tags",
-                              "args": {"kind": "way", "id": w.id, "tags": {"layer": "-1"}}})
+                         fixes=[
+                             {"label": "layer=-1", "op": "set_tags",
+                              "args": {"kind": "way", "id": w.id, "tags": {"layer": "-1"}}},
+                             {"label": "Убрать тоннель", "op": "set_tags",
+                              "args": {"kind": "way", "id": w.id, "tags": {"tunnel": None}}},
+                         ])
 
     def check_elevation(self) -> None:
         """Z jumps: a bridge raised with ele next to ground nodes, or a level change with no ramp."""
@@ -483,6 +544,158 @@ class _Validator:
                                      f"(допустимо до {MAX_GRADE:.0%}).",
                          refs=[{"kind": "way", "id": w.id}], location=self.loc(a), levels=["webots"],
                          fix={"label": "Плавный Z", "op": "smooth_z", "args": {"way_id": bridge.id}} if bridge else None)
+
+    # ------------------------------------------------------- fixes & entrances
+    def _prepare_entrances(self) -> None:
+        self._entrance_idx = GridIndex(cell=20.0)
+        self._entrance_nodes: set[int] = set()
+        for n in self.doc.nodes.values():
+            if not _is_entrance(n.tags):
+                continue
+            self._entrance_nodes.add(n.id)
+            p = self.xy(n.id)
+            if p:
+                self._entrance_idx.insert_point(p[0], p[1], p)
+        self._entrance_building_nodes: set[int] = set()
+        for w in self.doc.ways.values():
+            if "building" not in w.tags:
+                continue
+            nodes = [r for r in dict.fromkeys(w.nodes) if r in self.doc.nodes]
+            if not any(r in self._entrance_nodes or self._near_entrance(r) for r in nodes):
+                continue
+            for r in nodes:
+                if r in self._entrance_nodes or self._near_entrance(r):
+                    self._entrance_building_nodes.add(r)
+
+    def _near_entrance(self, nid: int) -> bool:
+        p = self.xy(nid)
+        if p is None:
+            return False
+        return any(dist(p, e) <= ENTRANCE_M for e in self._entrance_idx.query(p[0], p[1], ENTRANCE_M))
+
+    def _at_entrance(self, nid: int) -> bool:
+        n = self.doc.nodes.get(nid)
+        if n is not None and _is_entrance(n.tags):
+            return True
+        if nid in self._entrance_building_nodes:
+            return True
+        return self._near_entrance(nid)
+
+    def _exempt_access_end(self, nid: int) -> bool:
+        """Driveway/sidewalk endpoint at a door: not a connectivity error."""
+        wids = self.road_node_ways.get(nid, [])
+        if len(wids) != 1:
+            return False
+        w = self.doc.ways.get(wids[0])
+        if w is None or not is_access_way(w.tags) or w.is_closed:
+            return False
+        if nid not in (w.nodes[0], w.nodes[-1]):
+            return False
+        return self._at_entrance(nid)
+
+    def _access_component(self, ways: list[int], nodes: set[int]) -> bool:
+        if not ways or not all(is_access_way(self.doc.ways[w].tags) for w in ways if w in self.doc.ways):
+            return False
+        return any(self._exempt_access_end(n) for n in nodes)
+
+    def _fully_dangling(self, w) -> bool:
+        if w.is_closed or len(w.nodes) < 2:
+            return False
+        return all(len(self.road_node_ways.get(n, [])) <= 1 for n in (w.nodes[0], w.nodes[-1]))
+
+    def _nearest_way(self, nid: int, exclude: set[int]) -> tuple[float, int] | None:
+        p = self.xy(nid)
+        if p is None:
+            return None
+        src = [self.doc.ways[w] for w in self.road_node_ways.get(nid, []) if w in self.doc.ways]
+        best: tuple[float, int] | None = None
+        for w in self.road_ways:
+            if w.id in exclude:
+                continue
+            if any(can_connect(s.tags, w.tags) for s in src):
+                continue
+            for a, b in zip(w.nodes, w.nodes[1:]):
+                pa, pb = self.xy(a), self.xy(b)
+                if pa is None or pb is None:
+                    continue
+                _q, _t, d = project_on_segment(p, pa, pb)
+                if d <= CONNECT_FIX_M and (best is None or d < best[0]):
+                    best = (d, w.id)
+        return best
+
+    def _connect_fix(self, wid: int) -> dict[str, Any] | None:
+        w = self.doc.ways.get(wid)
+        if w is None or w.is_closed or len(w.nodes) < 2:
+            return None
+        best: tuple[float, int, int] | None = None
+        for nid in (w.nodes[0], w.nodes[-1]):
+            near = self._nearest_way(nid, {wid})
+            if near is not None and (best is None or near[0] < best[0]):
+                best = (near[0], nid, near[1])
+        if best is None:
+            return None
+        _d, nid, target = best
+        return {"label": "Соединить", "op": "connect_endpoint", "args": {"node_id": nid, "way_id": target}}
+
+    def _oneway_fixes(self, nid: int, wid: int) -> list[dict[str, Any]]:
+        fixes: list[dict[str, Any]] = [
+            {"label": "Сделать двусторонним", "op": "set_tags",
+             "args": {"kind": "way", "id": wid, "tags": {"oneway": None}}},
+            {"label": "Развернуть направление", "op": "reverse_way", "args": {"id": wid}},
+        ]
+        near = self._nearest_way(nid, {wid})
+        if near is not None:
+            fixes.append({"label": "Соединить с ближайшей", "op": "connect_endpoint",
+                          "args": {"node_id": nid, "way_id": near[1]}})
+        return fixes
+
+    def _trap_fixes(self, nodes: set[int]) -> list[dict[str, Any]]:
+        for nid in sorted(nodes):
+            for wid in self.road_node_ways.get(nid, []):
+                w = self.doc.ways.get(wid)
+                if w is None or direction(w.tags) == 0 or not w.nodes:
+                    continue
+                end = w.nodes[-1] if direction(w.tags) > 0 else w.nodes[0]
+                if end in nodes:
+                    return self._oneway_fixes(end, wid)
+        return []
+
+    def check_connections(self) -> None:
+        """Warn where two highways already share a node they are not allowed to."""
+        seen: set[tuple[int, int]] = set()
+        index: dict[int, list[int]] = {}
+        for w in self.doc.ways.values():
+            if "highway" not in w.tags or w.tags.get("area") == "yes" or len(w.nodes) < 2:
+                continue
+            for ref in dict.fromkeys(w.nodes):
+                index.setdefault(ref, []).append(w.id)
+        for nid, wids in index.items():
+            if len(wids) < 2:
+                continue
+            ways = [self.doc.ways[w] for w in wids]
+            for i, a in enumerate(ways):
+                for b in ways[i + 1:]:
+                    if a.id == b.id:
+                        continue
+                    msg = can_connect(a.tags, b.tags)
+                    if not msg:
+                        continue
+                    key = (min(a.id, b.id), max(a.id, b.id))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    lo, hi = (a, b) if a.tags.get("highway") != "motorway" else (b, a)
+                    fixes = []
+                    pedestrian = {"footway", "pedestrian", "path", "cycleway", "steps", "bridleway", "corridor"}
+                    if hi.tags.get("highway") == "motorway" and lo.tags.get("highway") not in pedestrian:
+                        fixes.append({
+                            "label": "Сделать съездом", "op": "set_tags",
+                            "args": {"kind": "way", "id": lo.id, "tags": {"highway": "motorway_link"}},
+                        })
+                    self.add(category="junction", severity="warning", title="Недопустимое соединение",
+                             description=f"{msg}: {self.name(a.id)} и {self.name(b.id)} имеют общий узел.",
+                             refs=[{"kind": "node", "id": nid}, {"kind": "way", "id": a.id}, {"kind": "way", "id": b.id}],
+                             location=self.loc(nid), levels=["sumo"], fixes=fixes)
 
     def check_signals_and_stops(self) -> None:
         any_way_nodes = {r for w in self.doc.ways.values() for r in w.nodes}

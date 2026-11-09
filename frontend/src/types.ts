@@ -87,7 +87,9 @@ export interface Issue {
   refs: { kind: Kind; id: number }[];
   location: [number, number] | null;
   locations?: [number, number][] | null;
+  /** First option. Older replies only had this; `fixes` is the full list. */
   fix: Fix | null;
+  fixes: Fix[];
   levels: string[];
 }
 

@@ -1,5 +1,5 @@
 import { memo, useState, type ReactNode } from 'react';
-import type { HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
+import type { Fix, HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
 
 // ------------------------------------------------------------------ tools
@@ -115,7 +115,7 @@ export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
 export const BottomPanel = memo(function BottomPanel({ validation, history, tab, onTab, onShow, onFix, validating, children }: {
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: BottomTab; onTab: (t: BottomTab) => void;
-  onShow: (i: Issue) => void; onFix: (i: Issue) => void; validating: boolean;
+  onShow: (i: Issue) => void; onFix: (i: Issue, fix: Fix) => void; validating: boolean;
   /** content of the "load" and "changes" tabs */
   children?: ReactNode;
 }) {
@@ -150,7 +150,11 @@ export const BottomPanel = memo(function BottomPanel({ validation, history, tab,
               <button className="link issue-title" onClick={() => onShow(i)}>{i.title}</button>
               <span className="issue-desc">{i.description}</span>
               <span className="mono muted small">{i.refs.slice(0, 2).map((r) => `${r.kind}/${r.id}`).join(', ')}</span>
-              {i.fix ? <button className="btn small" onClick={() => onFix(i)}>{i.fix.label}</button> : <span />}
+              <span className="issue-fixes">
+                {(i.fixes?.length ? i.fixes : i.fix ? [i.fix] : []).map((f) => (
+                  <button key={`${f.op}:${f.label}`} className="btn small" onClick={() => onFix(i, f)}>{f.label}</button>
+                ))}
+              </span>
             </div>
           )))}
         {tab === 'issues' && issues.length > limit && (
