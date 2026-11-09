@@ -48,8 +48,8 @@ def run_netconvert(osm_xml: bytes, timeout: int = 180) -> dict:
             return {"available": True, "ok": False, "errors": ["netconvert: превышено время ожидания"],
                     "warnings": [], "message": "timeout"}
         log = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        errors = [l.strip() for l in log.splitlines() if l.strip().startswith("Error")]
-        warnings = [l.strip() for l in log.splitlines() if l.strip().startswith("Warning")]
+        errors = [line.strip() for line in log.splitlines() if line.strip().startswith("Error")]
+        warnings = [line.strip() for line in log.splitlines() if line.strip().startswith("Warning")]
         stats = {}
         if out.exists():
             text = out.read_text(encoding="utf-8", errors="ignore")
