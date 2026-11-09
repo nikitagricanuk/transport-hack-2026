@@ -206,8 +206,9 @@ export default function App() {
   };
 
   const closeDocument = () => {
+    const docId = doc?.doc_id;
     localStorage.removeItem(STORAGE_KEY);
-    api.discardDraft().catch(() => undefined);
+    if (docId) api.discardDraft(docId).catch(() => undefined);
     setDoc(null);
     setValidation(null);
     setSelection(null);
