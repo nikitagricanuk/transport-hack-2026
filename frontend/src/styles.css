@@ -95,6 +95,7 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1p
 .left { width: 248px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; }
 .section { margin: 0; padding: 16px 14px 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; }
 .section .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.layer-actions { padding: 0 14px 6px; }
 .layer-list { padding: 0 6px; display: flex; flex-direction: column; }
 .layer { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 6px; cursor: pointer; }
 .layer:hover { background: #18202a; }
@@ -115,6 +116,8 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1p
 .tabs { display: flex; align-items: center; gap: 4px; padding: 0 12px; border-bottom: 1px solid var(--line); min-height: 40px; }
 .tabs [role='tab'] { padding: 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); }
 .tabs [role='tab'][aria-selected='true'] { color: #fff; border-bottom-color: #3b82f6; }
+.issue-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.issue-filters .check { font-size: 12px; color: #c5ccd6; }
 .bottom-body { flex: 1; overflow-y: auto; }
 .issue { display: grid; grid-template-columns: 24px minmax(140px, 200px) minmax(0, 1fr) minmax(80px, 140px) minmax(120px, max-content); gap: 12px; align-items: center; padding: 7px 14px; border-bottom: 1px solid #1a212b; }
 .issue-fixes { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; max-width: 420px; }
@@ -238,7 +241,6 @@ table.cmp th { color: var(--muted); font-weight: 500; }
 .report-grid h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
 a.btn { text-decoration: none; color: var(--text); }
 a.btn.primary { color: #fff; }
-.layer-all { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; margin-bottom: 2px; }
 .draft-bar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 8px; align-items: center;
   padding: 8px 10px; background: #111827; border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.35); z-index: 3; }
 .draft-bar kbd { margin-left: 4px; }

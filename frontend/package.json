@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/utils/editor.test.ts"
+    "test": "node --experimental-strip-types --test src/utils/*.test.ts"
   },
   "dependencies": {
     "maplibre-gl": "4.7.1",
