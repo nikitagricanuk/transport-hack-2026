@@ -1,9 +1,11 @@
 """Split a joined crossing apart, and move a whole way in one step."""
 
+import math
+
 import pytest
 
-from app.edits import History, OpError, apply_op
-from app.geo import LocalProjection, dist
+from app.edits import History, OpError, _proj, apply_op
+from app.geo import LocalProjection, dist, project_on_segment
 
 
 def _shared(doc, a, b):
@@ -126,3 +128,174 @@ def test_move_way_rejects_an_empty_shift(doc):
     with pytest.raises(OpError, match="слишком мал"):
         apply_op(doc, h, "move_way", {"id": 100, "dlat": 0, "dlon": 0})
     assert doc.nodes[1].lat == pytest.approx(52.28)
+
+
+def _ll(proj, x, y):
+    return proj.to_latlon(x, y)
+
+
+def _road(doc, h, proj, a, b):
+    pa, pb = _ll(proj, *a), _ll(proj, *b)
+    return apply_op(doc, h, "add_way", {"points": [
+        {"lat": pa[0], "lon": pa[1]}, {"lat": pb[0], "lon": pb[1]},
+    ], "tags": {"highway": "residential"}})["id"]
+
+
+def _off_way(doc, proj, nid, way_id) -> float:
+    node = doc.nodes[nid]
+    point = proj.to_xy(node.lat, node.lon)
+    best = float("inf")
+    for a, b in zip(doc.ways[way_id].nodes, doc.ways[way_id].nodes[1:]):
+        if a not in doc.nodes or b not in doc.nodes:
+            continue
+        na, nb = doc.nodes[a], doc.nodes[b]
+        _, _, gap = project_on_segment(point, proj.to_xy(na.lat, na.lon), proj.to_xy(nb.lat, nb.lon))
+        best = min(best, gap)
+    return best
+
+
+def _spur(doc, h, proj, length, angle_deg):
+    """A branch of ``length`` metres meeting a straight road at ``angle_deg``."""
+    main = _road(doc, h, proj, (-80.0, 0.0), (80.0, 0.0))
+    rad = math.radians(angle_deg)
+    tip = _ll(proj, length * math.cos(rad), length * math.sin(rad))
+    join = _ll(proj, 0.0, 0.0)
+    branch = apply_op(doc, h, "add_way", {"points": [
+        {"lat": tip[0], "lon": tip[1]},
+        {"lat": join[0], "lon": join[1], "way_id": main},
+    ], "tags": {"highway": "residential"}})["id"]
+    shared = _shared(doc, main, branch)
+    assert len(shared) == 1
+    return main, branch, next(iter(shared))
+
+
+def test_separate_shallow_branch_clears_the_snap_and_stays_split(doc):
+    # 4 m along a 6° branch is only ~0.4 m off the retained road, inside the 1 m snap.
+    h = History()
+    proj = _proj(doc)
+    main, branch, junction = _spur(doc, h, proj, 50.0, 6.0)
+    original = set(doc.ways[branch].nodes)
+    apply_op(doc, h, "separate_ways", {"node_id": junction})
+    assert junction in doc.ways[main].nodes
+    assert junction not in doc.ways[branch].nodes
+    fresh = [nid for nid in doc.ways[branch].nodes if nid not in original]
+    assert len(fresh) == 1
+    end = fresh[0]
+    assert _off_way(doc, proj, end, main) > 1.0
+    end_xy = proj.to_xy(doc.nodes[end].lat, doc.nodes[end].lon)
+    join_xy = proj.to_xy(doc.nodes[junction].lat, doc.nodes[junction].lon)
+    assert dist(end_xy, join_xy) > 4.5
+    tip = next(nid for nid in doc.ways[branch].nodes if nid != end)
+    moved = doc.nodes[tip]
+    apply_op(doc, h, "move_node", {"id": tip, "lat": moved.lat - 1.0 / 110_540.0, "lon": moved.lon})
+    assert not _shared(doc, main, branch)
+    assert end in doc.ways[branch].nodes
+    assert _off_way(doc, proj, end, main) > 1.0
+
+
+@pytest.mark.parametrize(("length", "angle"), [(15.0, 6.0), (2.0, 90.0)])
+def test_separate_rejects_when_the_end_cannot_clear_the_snap(doc, length, angle):
+    h = History()
+    proj = _proj(doc)
+    main, branch, junction = _spur(doc, h, proj, length, angle)
+    before_ways = {wid: list(w.nodes) for wid, w in doc.ways.items()}
+    before_pos = {nid: (n.lat, n.lon) for nid, n in doc.nodes.items()}
+    stacked = len(h.undo_stack)
+    with pytest.raises(OpError, match="ближе 1 м"):
+        apply_op(doc, h, "separate_ways", {"node_id": junction})
+    assert len(h.undo_stack) == stacked
+    assert {wid: list(w.nodes) for wid, w in doc.ways.items()} == before_ways
+    for nid, (lat, lon) in before_pos.items():
+        assert doc.nodes[nid].lat == lat and doc.nodes[nid].lon == lon
+    assert junction in _shared(doc, main, branch)
+
+
+def test_separate_rolls_back_when_one_arm_cannot_clear_the_snap(doc):
+    h = History()
+    proj = _proj(doc)
+    main = _road(doc, h, proj, (-80.0, 0.0), (80.0, 0.0))
+    rad = math.radians(6.0)
+    back, forward = 15.0, 50.0
+    start = _ll(proj, -back * math.cos(rad), -back * math.sin(rad))
+    end = _ll(proj, forward * math.cos(rad), forward * math.sin(rad))
+    branch = apply_op(doc, h, "add_way", {"points": [
+        {"lat": start[0], "lon": start[1]}, {"lat": end[0], "lon": end[1]},
+    ], "tags": {"highway": "residential"}})["id"]
+    shared = _shared(doc, main, branch)
+    assert len(shared) == 1
+    junction = next(iter(shared))
+    assert junction not in (doc.ways[branch].nodes[0], doc.ways[branch].nodes[-1])
+    assert abs(main) < abs(branch)
+    for nid in (doc.ways[branch].nodes[0], doc.ways[branch].nodes[-1]):
+        assert _off_way(doc, proj, nid, main) > 1.0
+    before_ways = {wid: list(w.nodes) for wid, w in doc.ways.items()}
+    stacked = len(h.undo_stack)
+    with pytest.raises(OpError, match="ближе 1 м"):
+        apply_op(doc, h, "separate_ways", {"node_id": junction})
+    assert len(h.undo_stack) == stacked
+    assert {wid: list(w.nodes) for wid, w in doc.ways.items()} == before_ways
+    assert junction in _shared(doc, main, branch)
+
+
+def test_move_way_joins_a_crossing_created_by_a_shared_building_corner(doc):
+    h = History()
+    proj = _proj(doc)
+    road_c = _road(doc, h, proj, (-40.0, 0.0), (40.0, 0.0))
+    south, corner_at = _ll(proj, 0.0, -30.0), _ll(proj, 0.0, -6.0)
+    road_b = apply_op(doc, h, "add_way", {"points": [
+        {"lat": south[0], "lon": south[1]}, {"lat": corner_at[0], "lon": corner_at[1]},
+    ], "tags": {"highway": "residential"}})["id"]
+    corner = doc.ways[road_b].nodes[-1]
+    assert not _shared(doc, road_b, road_c)
+    box = [_ll(proj, 12.0, -6.0), _ll(proj, 12.0, -18.0), _ll(proj, 0.0, -18.0)]
+    building = apply_op(doc, h, "add_way", {"points": [
+        {"id": corner},
+        {"lat": box[0][0], "lon": box[0][1]},
+        {"lat": box[1][0], "lon": box[1][1]},
+        {"lat": box[2][0], "lon": box[2][1]},
+        {"id": corner},
+    ], "tags": {"building": "yes"}})["id"]
+    before_c = list(doc.ways[road_c].nodes)
+    dlat = 20.0 / 110_540.0
+    apply_op(doc, h, "move_way", {"id": building, "dlat": dlat, "dlon": 0.0})
+    shared = _shared(doc, road_b, road_c)
+    assert len(shared) == 1
+    assert corner not in shared
+    assert len(doc.ways[road_c].nodes) == len(before_c) + 1
+    assert corner in doc.ways[building].nodes
+    h.undo()
+    assert doc.ways[road_c].nodes == before_c
+    assert not _shared(doc, road_b, road_c)
+    node = doc.nodes[corner]
+    apply_op(doc, h, "move_node", {"id": corner, "lat": node.lat + dlat, "lon": node.lon})
+    assert len(_shared(doc, road_b, road_c)) == 1
+
+
+def test_move_way_rejoins_a_highway_that_only_shared_a_moved_node(doc):
+    h = History()
+    proj = _proj(doc)
+    road_c = _road(doc, h, proj, (-40.0, 0.0), (40.0, 0.0))
+    start, corner_at = _ll(proj, -20.0, -20.0), _ll(proj, 0.0, -5.0)
+    road_a = apply_op(doc, h, "add_way", {"points": [
+        {"lat": start[0], "lon": start[1]}, {"lat": corner_at[0], "lon": corner_at[1]},
+    ], "tags": {"highway": "residential"}})["id"]
+    shared_node = doc.ways[road_a].nodes[-1]
+    other = _ll(proj, 25.0, -5.0)
+    road_b = apply_op(doc, h, "add_way", {"points": [
+        {"id": shared_node}, {"lat": other[0], "lon": other[1]},
+    ], "tags": {"highway": "residential"}})["id"]
+    assert not _shared(doc, road_a, road_c)
+    assert not _shared(doc, road_b, road_c)
+    apply_op(doc, h, "move_way", {"id": road_b, "dlat": 20.0 / 110_540.0, "dlon": 0.0})
+    assert not _shared(doc, road_b, road_c)
+    assert len(_shared(doc, road_a, road_c)) == 1
+
+
+def test_move_way_joins_when_the_moved_road_itself_crosses(doc):
+    h = History()
+    proj = _proj(doc)
+    road_c = _road(doc, h, proj, (-8.0, 0.0), (8.0, 0.0))
+    road_b = _road(doc, h, proj, (30.0, -20.0), (30.0, 20.0))
+    assert not _shared(doc, road_b, road_c)
+    apply_op(doc, h, "move_way", {"id": road_b, "dlat": 0.0, "dlon": -30.0 / proj.kx})
+    assert len(_shared(doc, road_b, road_c)) == 1
