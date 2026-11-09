@@ -11,7 +11,7 @@ import type {
 } from './types';
 import { applyPatch } from './utils/geoPatch';
 import { saveName, savedName, useCollab, type CollabMessage } from './utils/collab';
-import { isFullscreenToggle } from './utils/keys';
+import { isDraftPointKeyClaimed, isFullscreenToggle, shouldDeleteSelection } from './utils/keys';
 import { TEMPLATES, templateOps, type RoadTemplate } from './utils/osm';
 import { APP_VERSION, isFrontendOutdated } from './utils/version';
 
@@ -440,7 +440,14 @@ export default function App() {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
       if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); return; }
-      if ((e.key === 'Delete' || (e.key === 'Backspace' && tool !== 'way')) && selection) {
+      // Delete/Backspace remove the selection, unless a way draft owns the key
+      // (then it only drops the latest draft point). That listener is capture
+      // on this same window, and stopPropagation() does not suppress another
+      // capture listener, so this handler stays on the bubble path and also
+      // refuses the delete when the draft still owns the key.
+      if (selection && shouldDeleteSelection(
+        e, tool, mapRef.current?.draftPointCount() ?? 0, isDraftPointKeyClaimed(),
+      )) {
         runOps({ op: 'delete', args: { kind: selection.kind, id: selection.id } });
         return;
       }
@@ -452,8 +459,8 @@ export default function App() {
       const tpl = TEMPLATES.find((x) => x.key === e.key);
       if (tpl) applyTemplate(tpl);
     };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
+    window.addEventListener('keydown', onKey, false);
+    return () => window.removeEventListener('keydown', onKey, false);
   }, [tool, selection, undo, redo, runOps, applyTemplate]);
 
   useEffect(() => { setHint(null); }, [tool]);

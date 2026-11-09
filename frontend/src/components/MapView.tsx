@@ -3,7 +3,7 @@ import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEv
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
-import { isEscapeKey } from '../utils/keys';
+import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { defaultCamera } from '../utils/view';
 import { PATH_LAYER_IDS, PATH_STYLES, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
 
@@ -16,6 +16,8 @@ export interface MapHandle {
   resetView: () => void;
   /** CSS fullscreen. F toggles it; Escape does not leave it. */
   toggleFullscreen: () => void;
+  /** Points in the way currently being drawn. Zero when that draft is idle. */
+  draftPointCount: () => number;
   flyTo: (lon: number, lat: number, zoom?: number) => void;
   fitBounds: (b: [number, number, number, number]) => void;
 }
@@ -182,6 +184,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     fitData,
     resetView,
     toggleFullscreen: () => toggleMapFullscreen(mapRef.current),
+    draftPointCount: () => draft.current.length,
     flyTo: (lon, lat, zoom = 18) => mapRef.current?.flyTo({ center: [lon, lat], zoom, speed: 1.6 }),
     fitBounds: (b) => mapRef.current?.fitBounds([[b[1], b[0]], [b[3], b[2]]], { padding: 40, duration: 0 }),
   }));
@@ -692,6 +695,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       else if (e.key === 'Backspace' || e.key === 'Delete') {
         e.preventDefault();
         e.stopPropagation();
+        // stopPropagation() does not skip other listeners on this same window.
+        // Stop them too, and claim the key, so a selected object is not deleted.
+        e.stopImmediatePropagation();
+        claimDraftPointKey();
         draft.current = draft.current.slice(0, -1);
         renderDraft();
       }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { isEscapeKey, isFullscreenToggle } from './keys.ts';
+import { claimDraftPointKey, isDraftPointKeyClaimed, isEscapeKey, isFullscreenToggle, shouldDeleteSelection } from './keys.ts';
 import { APP_VERSION, isFrontendOutdated } from './version.ts';
 import { DEFAULT_CENTER, DEFAULT_ZOOM, defaultCamera } from './view.ts';
 
@@ -43,6 +43,48 @@ test('F toggles fullscreen on a US or Russian layout and Escape does not', () =>
   assert.equal(isEscapeKey({ ...plain, key: 'Escape', code: 'Escape' }), true);
   assert.equal(isEscapeKey({ ...plain, key: 'Esc', code: '' }), true);
   assert.equal(isEscapeKey({ ...plain, key: 'а', code: 'KeyF', keyCode: 27 }), true);
+});
+
+test('a way draft owns Delete and Backspace, including the key that removes the last point', async () => {
+  const del = { ...plain, key: 'Delete' };
+  const back = { ...plain, key: 'Backspace' };
+
+  assert.equal(shouldDeleteSelection(del, 'way', 3), false);
+  assert.equal(shouldDeleteSelection(back, 'way', 1), false);
+  // global listener runs before the draft mutates: the point is still there
+  assert.equal(shouldDeleteSelection(del, 'way', 1, false), false);
+
+  let points = 1;
+  claimDraftPointKey();
+  points -= 1;
+  assert.equal(points, 0);
+  assert.equal(shouldDeleteSelection(del, 'way', points, isDraftPointKeyClaimed()), false);
+  assert.equal(shouldDeleteSelection(back, 'way', points, isDraftPointKeyClaimed()), false);
+
+  await new Promise((resolve) => queueMicrotask(resolve));
+  assert.equal(isDraftPointKeyClaimed(), false);
+  assert.equal(shouldDeleteSelection(del, 'way', 0), true);
+  assert.equal(shouldDeleteSelection(back, 'way', 0), false);
+
+  assert.equal(shouldDeleteSelection(del, 'select', 0), true);
+  assert.equal(shouldDeleteSelection(back, 'select', 0), true);
+  assert.equal(shouldDeleteSelection(back, 'node', 0), true);
+  assert.equal(shouldDeleteSelection({ ...del, shiftKey: true }, 'select', 0), true);
+  assert.equal(shouldDeleteSelection({ ...del, ctrlKey: true }, 'select', 0), false);
+  assert.equal(shouldDeleteSelection({ ...del, metaKey: true }, 'select', 0), false);
+  assert.equal(shouldDeleteSelection({ ...back, altKey: true }, 'select', 0), false);
+  assert.equal(shouldDeleteSelection({ ...plain, key: 'а', code: 'KeyF' }, 'way', 2), false);
+  assert.equal(shouldDeleteSelection({ ...plain, key: 'f', code: 'KeyF' }, 'select', 0), false);
+});
+
+test('global shortcuts stay on the bubble phase so a draft can swallow Delete', () => {
+  const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+  const map = readFileSync(new URL('../components/MapView.tsx', import.meta.url), 'utf8');
+  assert.match(app, /window\.addEventListener\('keydown', onKey, false\)/);
+  assert.doesNotMatch(app, /addEventListener\('keydown', onKey, true\)/);
+  assert.match(map, /window\.addEventListener\('keydown', onKey, true\)/);
+  assert.match(map, /e\.stopImmediatePropagation\(\)/);
+  assert.match(map, /claimDraftPointKey\(\)/);
 });
 
 test('page version matches package.json and is outdated only against a newer server', () => {
