@@ -19,7 +19,7 @@ export const TOOL_HINTS: Record<Tool, string> = {
   node: 'Клик по ребру — вставить узел; по пустому месту — отдельный узел',
   split: 'Клик по внутреннему узлу — разделить ребро',
   merge: 'Клик по первому узлу, затем по второму — склеить',
-  reverse: 'Клик по ребру — развернуть направление геометрии',
+  reverse: 'Клик по ребру — развернуть направление движения',
   signal: 'Клик по узлу или ребру — поставить светофор',
   crossing: 'Клик по ребру — пешеходный переход',
 };
@@ -109,7 +109,9 @@ export function BottomPanel({ validation, history, tab, onTab, onShow, onFix, va
         {validation && (
           <span className="levels">
             {(['matsim', 'sumo', 'webots'] as const).map((l) => (
-              <span key={l} className={`level ${validation.summary.levels[l]}`}>{l === 'matsim' ? 'MatSim' : l === 'sumo' ? 'SUMO' : 'Webots'}</span>
+              <span key={l} className={`level ${validation.summary.levels[l]}`} title={validation.summary.level_notes?.[l]}>
+                {l === 'matsim' ? 'MatSim' : l === 'sumo' ? 'SUMO' : 'Webots'}
+              </span>
             ))}
           </span>
         )}

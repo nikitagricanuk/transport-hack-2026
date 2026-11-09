@@ -1,4 +1,4 @@
-import type { DocState, Op, SumoResult, ValidationResult } from './types';
+import type { DocState, Op, OrganizerResult, SumoResult, ValidationResult } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -39,6 +39,16 @@ export const api = {
   redo: (docId: string) => request<DocState>(`/api/documents/${docId}/redo`, { method: 'POST' }),
   validate: (docId: string) => request<ValidationResult>(`/api/documents/${docId}/validate`),
   sumo: (docId: string) => request<SumoResult>(`/api/documents/${docId}/check/sumo`, { method: 'POST' }),
+  organizer: (docId: string) =>
+    request<OrganizerResult>(`/api/documents/${docId}/check/organizer`, { method: 'POST' }),
+  restore: async (docId: string) => {
+    try {
+      return await request<DocState>(`/api/documents/${docId}`);
+    } catch {
+      return request<DocState>('/api/draft');
+    }
+  },
+  discardDraft: () => request<{ ok: boolean }>('/api/draft', { method: 'DELETE' }),
   exportUrl: (docId: string, filename: string) =>
     `/api/documents/${docId}/export?filename=${encodeURIComponent(filename)}`,
 };

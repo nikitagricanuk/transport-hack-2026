@@ -204,10 +204,14 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map) return;
-    const feats: Feature<Point>[] = props.issues
-      .filter((i) => i.location)
-      .map((i) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: i.location! },
-                     properties: { severity: i.severity, id: i.id } }));
+    const feats: Feature<Point>[] = props.issues.flatMap((i) => {
+      const pts = i.locations?.length ? i.locations : i.location ? [i.location] : [];
+      return pts.map((coordinates, n) => ({
+        type: 'Feature' as const,
+        geometry: { type: 'Point' as const, coordinates },
+        properties: { severity: i.severity, id: `${i.id}-${n}` },
+      }));
+    });
     (map.getSource('issues') as GeoJSONSource).setData({ type: 'FeatureCollection', features: feats });
   }, [ready, props.issues]);
 
