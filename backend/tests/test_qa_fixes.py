@@ -457,7 +457,8 @@ def test_organizer_posts_team_file(monkeypatch, raw):
     assert result["ok"] and result["filename"] == "irkutsk.osm"
     assert captured["url"].endswith("/api/submit")
     assert captured["auth"] == "Bearer secret-token"
-    assert b'filename="irkutsk.osm"' in captured["body"]
+    assert b'name="osm"; filename="irkutsk.osm"' in captured["body"]
+    assert b'name="file"' not in captured["body"]
     assert b"<osm/>" in captured["body"]
 
     c = TestClient(app)

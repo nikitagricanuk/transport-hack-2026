@@ -199,7 +199,7 @@ frontend (React + MapLibre)  ──HTTP──▶  backend (FastAPI)
 
 Обновление страницы не теряет правки: id документа лежит в `localStorage`, а сам файл — в `data/drafts/`. Если процесс сервера ещё жив, восстанавливается и история undo.
 
-Отправка на сервер организаторов (`POST /api/submit`, `Authorization: Bearer`, файл `{TEAM_NAME}.osm`) включается переменными окружения:
+Отправка на сервер организаторов (`POST /api/submit`, заголовок `Authorization: Bearer`, multipart-поле `osm`, файл `{TEAM_NAME}.osm`) включается переменными окружения:
 
 ```bash
 export ORGANIZER_TOKEN=...   # токен команды

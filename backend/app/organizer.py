@@ -1,11 +1,16 @@
 """Upload an exported .osm to the organisers' check server.
 
-The live service is http://innerlogistics.lovethosetrains.com:7078.
-``POST /api/submit`` with ``Authorization: Bearer <token>`` accepts a multipart
-field ``file``; the filename (without .osm) is the team name. That field name
-is the one in the published django-app of B216-lab/MatSim-SUMO-Webots, which
-this server replaced; unauthenticated calls are rejected before the body is
-validated, so the field name cannot be re-checked against the live host.
+Contract, from the hack task (B216-lab/hack_task) and the live server at
+http://innerlogistics.lovethosetrains.com:7078:
+
+* ``POST /api/submit``
+* ``Authorization: Bearer <ORGANIZER_TOKEN>`` (a missing or unknown token is
+  rejected before the body is read)
+* one multipart part named ``osm`` whose filename is ``{TEAM_NAME}.osm``
+
+The earlier django-app in B216-lab/MatSim-SUMO-Webots read a part named
+``file``. The server that replaced it answers
+``Прикрепите файл .osm в поле «osm».`` when that old name is used.
 """
 
 from __future__ import annotations
@@ -64,7 +69,7 @@ def upload_osm(osm_bytes: bytes, token: str, team: str, base_url: str) -> dict:
     boundary = "----uds" + uuid.uuid4().hex
     preamble = (
         f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f'Content-Disposition: form-data; name="osm"; filename="{filename}"\r\n'
         f"Content-Type: application/xml\r\n\r\n"
     ).encode()
     body = preamble + osm_bytes + f"\r\n--{boundary}--\r\n".encode()
