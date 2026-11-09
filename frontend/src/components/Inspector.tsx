@@ -158,7 +158,7 @@ function WayAttributes({ way, tags, setTags, onOp }: {
       <div className="grid2">
         <label className="field"><span>Класс дороги</span>
           <select value={tags.highway ?? ''} onChange={(e) => setTags({ highway: e.target.value || null })}>
-            <option value="">—</option>
+            <option value="">не указано</option>
             {HIGHWAY_CLASSES.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
             {tags.highway && !HIGHWAY_CLASSES.some((h) => h.value === tags.highway) && <option value={tags.highway}>{tags.highway}</option>}
           </select>
@@ -166,7 +166,8 @@ function WayAttributes({ way, tags, setTags, onOp }: {
         <label className="field"><span>Покрытие</span>
           <select value={tags.surface ?? ''} onChange={(e) => setTags({ surface: e.target.value || null })}>
             <option value="">—</option>
-            {SURFACES.map((s) => <option key={s} value={s}>{s}</option>)}
+            {SURFACES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+            {tags.surface && !SURFACES.some((s) => s.value === tags.surface) && <option value={tags.surface}>{tags.surface}</option>}
           </select>
         </label>
       </div>
