@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+from app import __version__
 from app.edits import History, apply_op
 from app.main import app
 from app.validation import validate
@@ -43,8 +46,14 @@ def test_health():
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert isinstance(body["version"], str)
+    assert body["version"] == __version__
     assert isinstance(body["netconvert"], bool)
+
+
+def test_frontend_version_matches_backend():
+    """The page compares its baked version with /api/health. They have to move together."""
+    version_ts = Path(__file__).resolve().parents[2] / "frontend" / "src" / "utils" / "version.ts"
+    assert f"APP_VERSION = '{__version__}'" in version_ts.read_text(encoding="utf-8")
 
 
 def test_api_flow(raw):

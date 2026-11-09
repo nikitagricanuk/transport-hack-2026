@@ -242,7 +242,20 @@ a.btn.primary { color: #fff; }
   padding: 8px 10px; background: #111827; border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.35); z-index: 3; }
 .draft-bar kbd { margin-left: 4px; }
 .fit-btn { font-size: 17px; line-height: 1; color: #1f2937; }
-.map-wrap:fullscreen { width: 100vw; height: 100vh; background: var(--bg); }
+.reset-view-btn { display: flex; align-items: center; justify-content: center; color: #1f2937; }
+.reset-view-btn svg { display: block; }
+.map-wrap:fullscreen,
+.map-wrap.is-fullscreen {
+  position: fixed; inset: 0; z-index: 40; width: 100%; height: 100dvh; background: var(--bg);
+}
+html.map-is-fullscreen, html.map-is-fullscreen body { overflow: hidden; }
+.version-banner {
+  position: fixed; z-index: 80; top: 12px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px; max-width: min(640px, calc(100% - 24px));
+  padding: 10px 12px; border-radius: 10px; background: #3f2a10; border: 1px solid #92400e; color: #fde68a;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.version-banner p { margin: 0; }
 .warn-card { border-color: #7c2d12; background: #2a1610; color: #fed7aa; }
 
 /* ------------------------------------------------------- collaboration */

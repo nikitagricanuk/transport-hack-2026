@@ -11,7 +11,11 @@ import type {
 } from './types';
 import { applyPatch } from './utils/geoPatch';
 import { saveName, savedName, useCollab, type CollabMessage } from './utils/collab';
+import { isFullscreenToggle } from './utils/keys';
 import { TEMPLATES, templateOps, type RoadTemplate } from './utils/osm';
+import { APP_VERSION, isFrontendOutdated } from './utils/version';
+
+const VERSION_CHECK_MS = 60_000;
 
 const DEFAULT_LAYERS: LayerVisibility = {
   roads: true, paths: true, rail: true, signals: true, crossings: true, stops: true, buildings: true, issues: true,
@@ -63,7 +67,32 @@ export default function App() {
   const [sumo, setSumo] = useState<SumoResult | 'running' | null>(null);
   const [organizer, setOrganizer] = useState<OrganizerResult | 'running' | null>(null);
   const [booting, setBooting] = useState(true);
+  const [stale, setStale] = useState(false);
   const mapRef = useRef<MapHandle>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => {
+      if (document.visibilityState === 'hidden') return;
+      api.health()
+        .then((health) => {
+          if (!cancelled) setStale(isFrontendOutdated(APP_VERSION, health.version));
+        })
+        .catch(() => undefined);
+    };
+    check();
+    const timer = window.setInterval(check, VERSION_CHECK_MS);
+    const onFocus = () => check();
+    const onVis = () => { if (document.visibilityState === 'visible') check(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, []);
 
   // ---------------------------------------------------------- indexes
   const wayIndex = useMemo(() => {
@@ -409,6 +438,7 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'я')) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
       if ((e.ctrlKey || e.metaKey) && (k === 'y' || k === 'н')) { e.preventDefault(); redo(); return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
       if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); return; }
       if ((e.key === 'Delete' || (e.key === 'Backspace' && tool !== 'way')) && selection) {
         runOps({ op: 'delete', args: { kind: selection.kind, id: selection.id } });
@@ -422,8 +452,8 @@ export default function App() {
       const tpl = TEMPLATES.find((x) => x.key === e.key);
       if (tpl) applyTemplate(tpl);
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [tool, selection, undo, redo, runOps, applyTemplate]);
 
   useEffect(() => { setHint(null); }, [tool]);
@@ -480,14 +510,30 @@ export default function App() {
     setChangesData(null);
   };
 
-  if (booting) return <div className="start"><p className="muted">Восстановление правок…</p></div>;
-  if (!doc) return <StartScreen onLoaded={loadDoc} />;
+  const versionNotice = stale ? <VersionNotice /> : null;
+  if (booting) {
+    return (
+      <>
+        {versionNotice}
+        <div className="start"><p className="muted">Восстановление правок…</p></div>
+      </>
+    );
+  }
+  if (!doc) {
+    return (
+      <>
+        {versionNotice}
+        <StartScreen onLoaded={loadDoc} />
+      </>
+    );
+  }
 
   const counts = validation?.summary.counts;
   const changes = Object.values(doc.diff).reduce((s, d) => s + d.added + d.modified + d.deleted, 0);
 
   return (
     <div className="app">
+      {versionNotice}
       <header className="top">
         <div className="brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -630,6 +676,15 @@ export default function App() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function VersionNotice() {
+  return (
+    <div className="version-banner" role="status">
+      <p>Версия страницы устарела. Обновите её, чтобы продолжить в актуальном редакторе.</p>
+      <button type="button" className="btn small primary" onClick={() => window.location.reload()}>Обновить страницу</button>
     </div>
   );
 }

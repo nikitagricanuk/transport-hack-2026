@@ -30,7 +30,7 @@ export default memo(function Inspector({ way, node, geometry, loadRow, onSetLoad
       <aside className="inspector empty" aria-label="Свойства объекта">
         <p>Выберите ребро или узел на карте.</p>
         <p className="muted">V — выбор, W — новое ребро, N — узел, S — разделить, M — соединить, T — светофор, P — переход.</p>
-        <p className="muted">+ / − — масштаб, 0 — весь участок. Рисование ребра: Enter — готово, Esc или правая кнопка мыши — отменить, ⌫ — шаг назад.</p>
+        <p className="muted">+ / − — масштаб, 0 — весь участок, F — полный экран (выход — снова F). Рисование ребра: Enter — готово, Esc или правая кнопка мыши — отменить, ⌫ — шаг назад.</p>
       </aside>
     );
   }
