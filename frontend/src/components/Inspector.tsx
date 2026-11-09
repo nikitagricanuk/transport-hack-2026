@@ -3,7 +3,7 @@ import type { LoadRow, NodeProps, Op, Tags, WayProps } from '../types';
 import TagEditor from './TagEditor';
 import { RoadLoad } from './Analysis';
 import { areaM2, fmt, lengthM } from '../utils/geom';
-import { HIGHWAY_CLASSES, SPEEDS, SURFACES, laneCounts, onewayMode, turnGlyphs, type OnewayMode } from '../utils/osm';
+import { HIGHWAY_CLASSES, ROAD_PERMISSIONS, SPEEDS, SURFACES, laneCounts, onewayMode, turnGlyphs, type OnewayMode } from '../utils/osm';
 
 interface Props {
   way?: WayProps;
@@ -172,6 +172,24 @@ function WayAttributes({ way, tags, setTags, onOp }: {
         </label>
       </div>
       <NameField value={tags.name ?? ''} onCommit={(v) => setTags({ name: v || null })} />
+
+      {(way.layer === 'road' || way.layer === 'path') && (
+        <div className="field">
+          <span>Разрешения</span>
+          <div className="perm-list" role="group" aria-label="Разрешения">
+            {ROAD_PERMISSIONS.map((p) => {
+              const on = way.permissions[p.key];
+              return (
+                <label key={p.key} className="check">
+                  <input type="checkbox" checked={on}
+                    onChange={() => setTags({ [p.key]: on ? 'no' : 'yes' }, `Разрешение: ${p.label}`)} />
+                  <span>{p.label}<br /><small className="muted">{p.key}</small></span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {isRoad && (
         <>

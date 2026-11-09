@@ -160,6 +160,7 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1p
 .lane span { font-size: 17px; color: #fff; line-height: 1; }
 .lane small { font: 9px var(--mono); color: #a8b2c0; }
 .check { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.perm-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
 .preset-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .preset-grid .btn { justify-content: center; white-space: normal; }
 
