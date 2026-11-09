@@ -2,9 +2,13 @@ import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } fr
 import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
-import type { Geo, GeoDiff, Issue, LayerVisibility, Op, Selection, Tool, WayProps } from '../types';
+import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
 
 export interface MapHandle {
+  /** collaborators' cursors and selections; called often, does not re-render React */
+  updatePeers: (peers: Peer[]) => void;
+  zoomBy: (delta: number) => void;
+  fitData: () => void;
   flyTo: (lon: number, lat: number, zoom?: number) => void;
   fitBounds: (b: [number, number, number, number]) => void;
 }
@@ -18,9 +22,13 @@ interface Props {
   layers: LayerVisibility;
   baseOpacity: number;
   issues: Issue[];
+  /** v/c per way id: roads are coloured by congestion while set */
+  loadVc: Map<number, number> | null;
+  /** edits vs the loaded file, drawn as "before" (dashed) and "after" overlays while set */
+  changes: ChangesResult | null;
   onSelect: (s: Selection) => void;
   /** resolves false when the backend rejected the edit */
-  onOp: (op: Op, opts?: { select?: 'result' | 'keep' }) => void | Promise<boolean>;
+  onOp: (op: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }) => void | Promise<boolean>;
   onHint: (text: string | null) => void;
   onCursor: (lonlat: [number, number] | null, zoom: number) => void;
   wayById: (id: number) => WayProps | undefined;
@@ -83,7 +91,76 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     ways: { coords: number[][]; idx: number[] }[]; frame: number;
   } | null>(null);
 
+  const fitData = () => {
+    const b = propsRef.current.geo?.bounds;
+    if (b) mapRef.current?.fitBounds([[b[1], b[0]], [b[3], b[2]]], { padding: 40, duration: 400 });
+  };
+  const [draftCount, setDraftCount] = useState(0);
+  const finishRef = useRef<() => void>(() => undefined);
+  const cancelDraft = () => {
+    draft.current = [];
+    renderDraft();
+  };
+
+  const peerMarkers = useRef(new Map<string, { marker: maplibregl.Marker; label: HTMLSpanElement }>());
+  const peersRef = useRef<Peer[]>([]);
+  const drawPeerSelections = () => {
+    const map = mapRef.current;
+    const geo = propsRef.current.geo;
+    const src = map?.getSource('peer-sel') as GeoJSONSource | undefined;
+    if (!map || !src) return;
+    const feats: Feature[] = [];
+    for (const peer of peersRef.current) {
+      const sel = peer.selection;
+      if (!sel || !geo) continue;
+      if (sel.kind === 'way') {
+        const line = geo.ways.features.find((f) => f.properties.id === sel.id);
+        const area = line ? undefined : geo.areas.features.find((f) => f.properties.id === sel.id);
+        const coords = line ? line.geometry.coordinates : area?.geometry.coordinates[0];
+        if (coords) feats.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: { color: peer.color } });
+      } else {
+        const node = geo.nodes.features.find((f) => f.properties.id === sel.id)?.geometry.coordinates ?? findVertex(geo, sel.id);
+        if (node) feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: node }, properties: { color: peer.color } });
+      }
+    }
+    src.setData({ type: 'FeatureCollection', features: feats });
+  };
+  const updatePeers = (peers: Peer[]) => {
+    const map = mapRef.current;
+    if (!map) return;
+    peersRef.current = peers;
+    const seen = new Set<string>();
+    for (const peer of peers) {
+      if (!peer.cursor) continue;
+      seen.add(peer.id);
+      let m = peerMarkers.current.get(peer.id);
+      if (!m) {
+        const el = document.createElement('div');
+        el.className = 'peer-cursor';
+        el.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 1l13 7-6 1.6L6.4 16z" stroke="#fff" stroke-width="1.4"/></svg>';
+        const label = document.createElement('span');
+        el.appendChild(label);
+        m = { marker: new maplibregl.Marker({ element: el, anchor: 'top-left' }).setLngLat(peer.cursor).addTo(map), label };
+        peerMarkers.current.set(peer.id, m);
+      }
+      m.marker.setLngLat(peer.cursor);
+      const el = m.marker.getElement();
+      el.style.setProperty('--peer', peer.color);
+      m.label.textContent = peer.name;
+    }
+    for (const [id, m] of peerMarkers.current) {
+      if (!seen.has(id)) {
+        m.marker.remove();
+        peerMarkers.current.delete(id);
+      }
+    }
+    drawPeerSelections();
+  };
+
   useImperativeHandle(ref, () => ({
+    updatePeers,
+    zoomBy: (delta) => mapRef.current?.easeTo({ zoom: (mapRef.current?.getZoom() ?? 15) + delta, duration: 200 }),
+    fitData,
     flyTo: (lon, lat, zoom = 18) => mapRef.current?.flyTo({ center: [lon, lat], zoom, speed: 1.6 }),
     fitBounds: (b) => mapRef.current?.fitBounds([[b[1], b[0]], [b[3], b[2]]], { padding: 40, duration: 0 }),
   }));
@@ -117,18 +194,25 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       attributionControl: { compact: true },
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+    // fullscreen covers the map with its hints and toasts, not just the canvas
+    map.addControl(new maplibregl.FullscreenControl({ container: container.current.parentElement ?? undefined }), 'bottom-right');
+    map.addControl(new FitControl(() => fitData()), 'bottom-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
     mapRef.current = map;
 
     map.on('load', () => {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
-      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'draft', 'drag']) {
+      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'draft', 'drag', 'cmp-before', 'cmp-after', 'peer-sel']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
+      // translucent plans: the base map stays readable under buildings and zones
       map.addLayer({ id: 'areas-fill', type: 'fill', source: 'areas',
-        paint: { 'fill-color': ['match', ['get', 'layer'], 'building', '#D9D6CF', '#D3E3C6'], 'fill-opacity': 0.85,
-                 'fill-outline-color': '#C2BEB4' } });
+        paint: { 'fill-color': ['match', ['get', 'layer'], 'building', '#B8B2A6', '#9CCB86'], 'fill-opacity': 0.45 } });
+      map.addLayer({ id: 'areas-line', type: 'line', source: 'areas',
+        paint: { 'line-color': ['match', ['get', 'layer'], 'building', '#8A8273', '#6A9E55'], 'line-width': 1, 'line-opacity': 0.8 } });
+      map.addLayer({ id: 'area-selected', type: 'line', source: 'areas', filter: ['==', ['get', 'id'], 0],
+        paint: { 'line-color': '#2563EB', 'line-width': 2.5 } });
       map.addLayer({ id: 'paths', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'path'],
         paint: { 'line-color': '#9CA3AF', 'line-width': 1.4, 'line-dasharray': [2, 1.5] } });
       map.addLayer({ id: 'road-casing', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'road'],
@@ -137,7 +221,13 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
                  'line-width': laneWidth(1, ['case', ['get', 'bridge'], 4, 2]) } });
       map.addLayer({ id: 'road-fill', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'road'],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': ROAD_COLOR, 'line-width': laneWidth(1) } });
+        paint: {
+          // no v/c state (-1) -> normal road colour; otherwise green / yellow / orange / red by congestion
+          'line-color': ['case', ['<', ['to-number', ['coalesce', ['feature-state', 'vc'], -1]], 0],
+            ROAD_COLOR,
+            ['step', ['to-number', ['coalesce', ['feature-state', 'vc'], 0]], '#22C55E', 0.6, '#EAB308', 0.85, '#F97316', 1.0, '#DC2626']],
+          'line-width': laneWidth(1),
+        } });
       map.addLayer({ id: 'rail', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'rail'],
         paint: { 'line-color': '#7C3AED', 'line-width': 2, 'line-dasharray': [3, 2] } });
       map.addLayer({ id: 'way-selected', type: 'line', source: 'ways', filter: ['==', ['get', 'id'], 0],
@@ -173,6 +263,21 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addLayer({ id: 'node-selected', type: 'circle', source: 'nodes', filter: ['==', ['get', 'id'], 0],
         paint: { 'circle-radius': 8, 'circle-color': 'rgba(37,99,235,0.25)', 'circle-stroke-color': '#2563EB', 'circle-stroke-width': 2.5 } });
 
+      map.addLayer({ id: 'cmp-before-line', type: 'line', source: 'cmp-before', filter: ['==', ['geometry-type'], 'LineString'],
+        paint: { 'line-color': '#DC2626', 'line-width': 2.5, 'line-dasharray': [2, 1.5], 'line-opacity': 0.9 } });
+      map.addLayer({ id: 'cmp-after-line', type: 'line', source: 'cmp-after', filter: ['==', ['geometry-type'], 'LineString'],
+        layout: { 'line-cap': 'round' },
+        paint: { 'line-color': ['match', ['get', 'status'], 'added', '#16A34A', '#F59E0B'], 'line-width': 5, 'line-opacity': 0.75 } });
+      map.addLayer({ id: 'cmp-pts', type: 'circle', source: 'cmp-after', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 6, 'circle-color': ['match', ['get', 'status'], 'added', '#16A34A', '#F59E0B'],
+                 'circle-stroke-color': '#FFFFFF', 'circle-stroke-width': 1.5 } });
+      map.addLayer({ id: 'cmp-before-pts', type: 'circle', source: 'cmp-before', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 5, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': '#DC2626', 'circle-stroke-width': 2 } });
+      map.addLayer({ id: 'peer-sel-line', type: 'line', source: 'peer-sel', filter: ['==', ['geometry-type'], 'LineString'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': ['get', 'color'], 'line-width': 7, 'line-opacity': 0.45 } });
+      map.addLayer({ id: 'peer-sel-pt', type: 'circle', source: 'peer-sel', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 9, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': ['get', 'color'], 'circle-stroke-width': 3 } });
       map.addLayer({ id: 'issues', type: 'circle', source: 'issues',
         paint: {
           'circle-radius': 9,
@@ -224,6 +329,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     }
     rendered.current = geo;
     clearDrag();
+    drawPeerSelections();
     const key = JSON.stringify(props.geo.bounds);
     if (props.geo.bounds && fitted.current === null) {
       fitted.current = key;
@@ -232,6 +338,40 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, props.geo]);
+
+  // congestion colouring through feature-state: no re-upload of the road source
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map || !props.geo) return;
+    map.removeFeatureState({ source: 'ways' });
+    if (!props.loadVc) return;
+    for (const f of props.geo.ways.features) {
+      const vc = props.loadVc.get(f.properties.id);
+      if (vc !== undefined && f.id !== undefined) map.setFeatureState({ source: 'ways', id: f.id }, { vc });
+    }
+  }, [ready, props.loadVc, props.geo]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const before: Feature[] = [];
+    const after: Feature[] = [];
+    const geom = (c: number[][] | number[]) => (typeof c[0] === 'number'
+      ? { type: 'Point' as const, coordinates: c as number[] }
+      : { type: 'LineString' as const, coordinates: c as number[][] });
+    for (const c of props.changes?.changes ?? []) {
+      if (c.kind === 'relation') continue;
+      const props_ = { status: c.status };
+      if (c.before_coords && (c.status === 'deleted' || c.geometry)) {
+        before.push({ type: 'Feature', geometry: geom(c.before_coords), properties: props_ });
+      }
+      if (c.after_coords && c.status !== 'deleted') {
+        after.push({ type: 'Feature', geometry: geom(c.after_coords), properties: props_ });
+      }
+    }
+    (map.getSource('cmp-before') as GeoJSONSource).setData({ type: 'FeatureCollection', features: before });
+    (map.getSource('cmp-after') as GeoJSONSource).setData({ type: 'FeatureCollection', features: after });
+  }, [ready, props.changes]);
 
   const clearDrag = () => {
     const src = mapRef.current?.getSource('drag') as GeoJSONSource | undefined;
@@ -259,9 +399,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const sel = p.selection;
     let data: FeatureCollection = EMPTY;
     if (sel?.kind === 'way') {
-      const f = p.geo?.ways.features.find((w) => w.properties.id === sel.id);
+      const line = p.geo?.ways.features.find((w) => w.properties.id === sel.id);
+      const area = line ? undefined : p.geo?.areas.features.find((w) => w.properties.id === sel.id);
+      const f = line ?? area;
       if (f) {
-        const coords = f.geometry.coordinates;
+        const coords = line ? line.geometry.coordinates : area!.geometry.coordinates[0];
         data = { type: 'FeatureCollection', features: coords.map((c, i) => ({
           type: 'Feature', geometry: { type: 'Point', coordinates: c },
           properties: { id: f.properties.nodes[i], end: i === 0 || i === coords.length - 1 } })) };
@@ -279,6 +421,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     map.setFilter('way-selected', ['==', ['get', 'id'], wayId]);
     map.setFilter('way-selected-core', ['==', ['get', 'id'], wayId]);
     map.setFilter('node-selected', ['==', ['get', 'id'], nodeId]);
+    map.setFilter('area-selected', ['==', ['get', 'id'], wayId]);
     updateVerts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, props.selection, props.geo]);
@@ -292,7 +435,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     set(['road-casing', 'road-fill', 'oneway', 'road-label', 'junctions'], L.roads);
     set(['paths'], L.paths);
     set(['rail'], L.rail);
-    set(['areas-fill'], L.buildings);
+    set(['areas-fill', 'areas-line'], L.buildings);
     set(['issues'], L.issues);
     const cats = [L.signals && 'signal', L.crossings && 'crossing', L.stops && 'stop', 'tagged'].filter(Boolean);
     map.setFilter('pois', ['in', ['get', 'category'], ['literal', cats]]);
@@ -316,6 +459,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
   const renderDraft = (cursor?: [number, number]) => {
     const map = mapRef.current;
+    setDraftCount(draft.current.length);
     if (!map || !map.getSource('draft')) return;
     const pts = draft.current.map((p) => [p.lon, p.lat]);
     const line = cursor && pts.length ? [...pts, cursor] : pts;
@@ -371,9 +515,23 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
           break;
         case 'signal':
         case 'crossing': {
-          const tags = p.tool === 'signal' ? { highway: 'traffic_signals' } : { highway: 'crossing', crossing: 'marked' };
-          if (nodeId !== undefined) p.onOp({ op: 'set_tags', args: { kind: 'node', id: nodeId, tags } });
-          else if (wayId !== undefined) p.onOp({ op: 'insert_node', args: { way_id: wayId, lat, lon: lng, tags } }, { select: 'result' });
+          const signal = p.tool === 'signal';
+          if (nodeId !== undefined) {
+            const cur = p.geo?.nodes.features.find((n) => n.properties.id === nodeId)?.properties.tags ?? {};
+            // a signal on a crossing makes it a signalised crossing instead of erasing the crossing
+            const signalised = signal ? cur.highway === 'crossing' : cur.highway === 'traffic_signals';
+            const tags: Record<string, string> = signalised
+              ? { highway: 'crossing', crossing: 'traffic_signals' }
+              : signal ? { highway: 'traffic_signals' } : { highway: 'crossing', crossing: 'marked' };
+            const ops: Op[] = [{ op: 'set_tags', args: { kind: 'node', id: nodeId, tags } }];
+            const onRoad = p.geo?.ways.features.some((f) => f.properties.layer === 'road' && f.properties.nodes.includes(nodeId));
+            if (!onRoad) ops.push({ op: 'attach_to_road', args: { node_id: nodeId } });  // snap onto the nearest road
+            p.onOp(ops, { select: 'result', label: signalised ? 'Переход со светофором' : signal ? 'Светофор' : 'Пешеходный переход' });
+          } else if (wayId !== undefined) {
+            if (p.wayById(wayId)?.layer !== 'road') { p.onHint('Светофор и переход ставятся на проезжую часть — кликните по дороге'); break; }
+            const tags = signal ? { highway: 'traffic_signals' } : { highway: 'crossing', crossing: 'marked' };
+            p.onOp({ op: 'insert_node', args: { way_id: wayId, lat, lon: lng, tags } }, { select: 'result' });
+          }
           break;
         }
         case 'split': {
@@ -449,11 +607,15 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       if (!draggable) return;
       e.preventDefault();
       map.dragPan.disable();
-      const ways = (p.geo?.ways.features ?? [])
-        .filter((f) => f.properties.nodes.includes(nodeId!))
+      const shapes = [
+        ...(p.geo?.ways.features ?? []).map((f) => ({ nodes: f.properties.nodes, coords: f.geometry.coordinates })),
+        ...(p.geo?.areas.features ?? []).map((f) => ({ nodes: f.properties.nodes, coords: f.geometry.coordinates[0] })),
+      ];
+      const ways = shapes
+        .filter((f) => f.nodes.includes(nodeId!))
         .map((f) => ({
-          coords: f.geometry.coordinates.map((c) => [...c]),
-          idx: f.properties.nodes.flatMap((n, i) => (n === nodeId ? [i] : [])),
+          coords: f.coords.map((c) => [...c]),
+          idx: f.nodes.flatMap((n, i) => (n === nodeId ? [i] : [])),
         }));
       drag.current = { nodeId: nodeId!, moved: false, lon: e.lngLat.lng, lat: e.lngLat.lat, ways, frame: 0 };
     };
@@ -473,12 +635,31 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       }
     };
 
+    finishRef.current = finishDraft;
     const onKey = (e: KeyboardEvent) => {
-      if (propsRef.current.tool !== 'way') return;
-      if (e.key === 'Enter') finishDraft();
-      if (e.key === 'Escape') { draft.current = []; renderDraft(); }
-      if (e.key === 'Backspace' && draft.current.length) { draft.current = draft.current.slice(0, -1); renderDraft(); }
+      if (propsRef.current.tool !== 'way' || !draft.current.length) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+      // macOS can swallow Esc (fullscreen, system shortcuts); check every form and offer
+      // the on-map buttons and right click as alternatives
+      const esc = e.key === 'Escape' || e.key === 'Esc' || e.code === 'Escape' || e.keyCode === 27;
+      if (e.key === 'Enter') { e.preventDefault(); finishDraft(); }
+      else if (esc) { e.preventDefault(); e.stopPropagation(); cancelDraft(); }
+      else if (e.key === 'Backspace' || e.key === 'Delete') {
+        e.preventDefault();
+        e.stopPropagation();
+        draft.current = draft.current.slice(0, -1);
+        renderDraft();
+      }
     };
+    // right click while drawing cancels the line (works with any keyboard)
+    const onContext = (e: MapMouseEvent) => {
+      if (propsRef.current.tool === 'way' && draft.current.length) {
+        e.preventDefault();
+        cancelDraft();
+      }
+    };
+    map.on('contextmenu', onContext);
 
     map.on('click', onClick);
     map.on('dblclick', onDbl);
@@ -487,7 +668,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     map.on('mouseup', onUp);
     const onOut = () => propsRef.current.onCursor(null, map.getZoom());
     map.on('mouseout', onOut);
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     return () => {
       map.off('click', onClick);
       map.off('dblclick', onDbl);
@@ -495,7 +676,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.off('mousedown', onDown);
       map.off('mouseup', onUp);
       map.off('mouseout', onOut);
-      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, true);
+      map.off('contextmenu', onContext);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
@@ -512,8 +694,47 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     (map.getSource('drag') as GeoJSONSource).setData({ type: 'FeatureCollection', features: feats });
   };
 
-  return <div ref={container} className="map" />;
+  return (
+    <>
+      <div ref={container} className="map" />
+      {props.tool === 'way' && draftCount > 0 && (
+        <div className="draft-bar" role="group" aria-label="Рисование ребра">
+          <span className="muted small">точек: {draftCount}</span>
+          <button className="btn small" onClick={() => { draft.current = draft.current.slice(0, -1); renderDraft(); }}>
+            Шаг назад <kbd>⌫</kbd>
+          </button>
+          <button className="btn small" onClick={cancelDraft}>Отменить <kbd>Esc</kbd> / ПКМ</button>
+          <button className="btn small primary" onClick={() => finishRef.current()} disabled={draftCount < 2}>
+            Готово <kbd>Enter</kbd>
+          </button>
+        </div>
+      )}
+    </>
+  );
 });
+
+/** Map button: zoom back to the whole loaded area. */
+class FitControl implements maplibregl.IControl {
+  private el: HTMLDivElement | null = null;
+  constructor(private onFit: () => void) {}
+  onAdd() {
+    const el = document.createElement('div');
+    el.className = 'maplibregl-ctrl maplibregl-ctrl-group';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.title = 'Показать весь участок (0)';
+    b.setAttribute('aria-label', 'Показать весь участок');
+    b.className = 'fit-btn';
+    b.textContent = '⤢';
+    b.onclick = () => this.onFit();
+    el.appendChild(b);
+    this.el = el;
+    return el;
+  }
+  onRemove() {
+    this.el?.remove();
+  }
+}
 
 function findVertex(geo: Geo | null, nodeId: number): number[] | undefined {
   if (!geo) return undefined;

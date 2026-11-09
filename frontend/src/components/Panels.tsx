@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useState, type ReactNode } from 'react';
 import type { HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
 
@@ -61,6 +61,19 @@ export function LayersPanel({ layers, onLayers, baseOpacity, onBaseOpacity, canA
     <aside className="left" aria-label="Слои и шаблоны">
       <h3 className="section">Слои</h3>
       <div className="layer-list">
+        {(() => {
+          const all = LAYERS.every((l) => layers[l.key]);
+          const some = !all && LAYERS.some((l) => layers[l.key]);
+          return (
+            <label className="layer layer-all">
+              <input type="checkbox" checked={all}
+                ref={(el) => { if (el) el.indeterminate = some; }}
+                onChange={() => onLayers(Object.fromEntries(LAYERS.map((l) => [l.key, !all])) as unknown as LayerVisibility)} />
+              <span className="sw" aria-hidden="true" />
+              <span><b>Выбрать все</b></span>
+            </label>
+          );
+        })()}
         {LAYERS.map((l) => (
           <label key={l.key} className="layer">
             <input type="checkbox" checked={layers[l.key]} onChange={() => onLayers({ ...layers, [l.key]: !layers[l.key] })} />
@@ -97,10 +110,14 @@ const SEV_LABEL = { critical: 'критично', warning: 'предупрежд
 
 const ISSUES_PAGE = 200;
 
-export const BottomPanel = memo(function BottomPanel({ validation, history, tab, onTab, onShow, onFix, validating }: {
+export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
+
+export const BottomPanel = memo(function BottomPanel({ validation, history, tab, onTab, onShow, onFix, validating, children }: {
   validation: ValidationResult | null; history: HistoryInfo | null;
-  tab: 'issues' | 'history'; onTab: (t: 'issues' | 'history') => void;
+  tab: BottomTab; onTab: (t: BottomTab) => void;
   onShow: (i: Issue) => void; onFix: (i: Issue) => void; validating: boolean;
+  /** content of the "load" and "changes" tabs */
+  children?: ReactNode;
 }) {
   const issues = validation?.issues ?? [];
   // thousands of DOM rows make every re-render slow; show a page, load more on demand
@@ -110,6 +127,8 @@ export const BottomPanel = memo(function BottomPanel({ validation, history, tab,
       <div className="tabs" role="tablist">
         <button role="tab" aria-selected={tab === 'issues'} onClick={() => onTab('issues')}>Проблемы графа · {issues.length}</button>
         <button role="tab" aria-selected={tab === 'history'} onClick={() => onTab('history')}>История правок · {history?.entries.length ?? 0}</button>
+        <button role="tab" aria-selected={tab === 'changes'} onClick={() => onTab('changes')}>До / после</button>
+        <button role="tab" aria-selected={tab === 'load'} onClick={() => onTab('load')}>Нагрузка</button>
         <span className="grow" />
         {validation && (
           <span className="levels">
@@ -139,6 +158,7 @@ export const BottomPanel = memo(function BottomPanel({ validation, history, tab,
             Показать ещё {Math.min(ISSUES_PAGE, issues.length - limit)} из {issues.length - limit}
           </button>
         )}
+        {(tab === 'load' || tab === 'changes') && children}
         {tab === 'history' && (history?.entries.length
           ? history.entries.map((e, idx) => <div key={idx} className="hist">{idx === 0 ? '● ' : ''}{e}</div>)
           : <p className="muted pad">Правок пока нет</p>)}

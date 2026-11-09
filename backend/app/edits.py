@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from .geo import LocalProjection, dist, project_on_segment
 from .osm_model import Element, Kind, Member, Node, OsmDocument, Relation, Way, clone
-from .roads import direction, lane_tags, reversed_tags
+from .roads import direction, is_drivable, lane_tags, parse_int, reversed_tags
 
 
 class OpError(ValueError):
@@ -558,7 +558,121 @@ def op_reverse_way(doc, tx, id: int):
     return {"id": w.id}
 
 
+ATTACH_MAX_M = 30.0
+
+
+def op_attach_to_road(doc, tx, node_id: int, way_id: int | None = None, max_m: float = ATTACH_MAX_M):
+    """Move a free-standing node (signal, crossing, stop line) onto the nearest road and
+    make it part of that way, so SUMO sees it on the edge. Tags are kept."""
+    n = _node(doc, int(node_id))
+    if any(is_drivable(w.tags) for w in doc.ways_of_node(n.id)):
+        raise OpError("узел уже стоит на дороге")
+    proj = _proj(doc)
+    p = proj.to_xy(n.lat, n.lon)
+    candidates = [_way(doc, int(way_id))] if way_id is not None else [
+        w for w in doc.ways.values() if is_drivable(w.tags) and len(w.nodes) >= 2]
+    best: tuple[float, int] | None = None
+    for w in candidates:
+        for a, b in zip(w.nodes, w.nodes[1:]):
+            if a not in doc.nodes or b not in doc.nodes:
+                continue
+            na, nb = doc.nodes[a], doc.nodes[b]
+            _, _, d = project_on_segment(p, proj.to_xy(na.lat, na.lon), proj.to_xy(nb.lat, nb.lon))
+            if best is None or d < best[0]:
+                best = (d, w.id)
+    if best is None or best[0] > float(max_m):
+        raise OpError(f"рядом нет дороги (ближе {float(max_m):.0f} м)")
+    target = _insert_on_way(doc, tx, best[1], n.lat, n.lon, None, snap_m=1.5)
+    if target != n.id:
+        _merge_nodes(doc, tx, target, n.id)  # keeps the node's tags on the road vertex
+    return {"id": target, "way_id": best[1], "distance_m": round(best[0], 1)}
+
+
+LEVEL_HEIGHT_M = 5.0  # height of one OSM layer step
+RAMP_M = 60.0         # length of the approach ramp on each side
+
+
+def way_level(tags: dict[str, str]) -> int:
+    layer = parse_int(tags.get("layer"))
+    if layer is not None:
+        return layer
+    if tags.get("bridge") not in (None, "no"):
+        return 1
+    if tags.get("tunnel") not in (None, "no"):
+        return -1
+    return 0
+
+
+def _set_ele(doc: OsmDocument, tx: Transaction, nid: int, value: float) -> None:
+    n = doc.nodes[nid]
+    text = f"{value:.1f}"
+    if n.tags.get("ele") != text:
+        tx.touch("node", nid)
+        n.tags["ele"] = text
+
+
+def op_smooth_z(doc, tx, way_id: int, ramp_m: float = RAMP_M, level_height: float = LEVEL_HEIGHT_M):
+    """Smooth Z: bridge/tunnel nodes get ele = layer x level_height and the
+    approaches descend linearly to 0 over ``ramp_m`` metres on each side,
+    so 3D models do not jump from ground to deck in one segment.
+
+    Heights are relative to the surrounding ground (nodes without ``ele``).
+    """
+    w = _way(doc, int(way_id))
+    level = way_level(w.tags)
+    if level == 0:
+        raise OpError("у ребра нет уровня: сначала задайте мост или тоннель (layer)")
+    ramp_m = float(ramp_m)
+    if ramp_m <= 0:
+        raise OpError("длина съезда должна быть больше нуля")
+    height = level * float(level_height)
+    for nid in dict.fromkeys(w.nodes):
+        if nid in doc.nodes:
+            _set_ele(doc, tx, nid, height)
+    proj = _proj(doc)
+
+    def xy(nid: int) -> tuple[float, float]:
+        n = doc.nodes[nid]
+        return proj.to_xy(n.lat, n.lon)
+
+    ramps = 0
+    for end in dict.fromkeys((w.nodes[0], w.nodes[-1])):
+        for other in doc.ways_of_node(end):
+            if other.id == w.id or "highway" not in other.tags or way_level(other.tags) != 0:
+                continue
+            idx = other.nodes.index(end)
+            for step in (1, -1):
+                if not 0 <= idx + step < len(other.nodes):
+                    continue
+                ramps += 1
+                acc, j = 0.0, idx
+                while 0 <= j + step < len(other.nodes):
+                    a, b = other.nodes[j], other.nodes[j + step]
+                    if a not in doc.nodes or b not in doc.nodes:
+                        break
+                    seg = dist(xy(a), xy(b))
+                    if acc + seg < ramp_m - 0.5:
+                        acc += seg
+                        _set_ele(doc, tx, b, height * (1 - acc / ramp_m))
+                        j += step
+                        continue
+                    if acc + seg <= ramp_m + 0.5:
+                        _set_ele(doc, tx, b, 0.0)
+                        break
+                    # ramp ends inside this segment: put a ground node there
+                    t = (ramp_m - acc) / seg
+                    pa, pb = xy(a), xy(b)
+                    lat, lon = proj.to_latlon(pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t)
+                    n = _create_node(doc, tx, lat, lon, {"ele": "0.0"})
+                    tx.touch("way", other.id)
+                    other.nodes.insert(j + 1 if step == 1 else j, n.id)
+                    break
+    return {"id": w.id, "height": height, "ramps": ramps}
+
+
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
+    "smooth_z": (op_smooth_z, "Плавный Z-переход"),
+    "attach_to_road": (op_attach_to_road, "Узел привязан к дороге"),
     "set_tags": (op_set_tags, "Изменены теги"),
     "set_lanes": (op_set_lanes, "Изменены полосы"),
     "move_node": (op_move_node, "Перемещён узел"),

@@ -27,7 +27,7 @@ export default function StartScreen({ onLoaded }: { onLoaded: (d: DocState) => v
   return (
     <div className="start">
       <div className="start-card">
-        <h1>УДС·Редактор</h1>
+        <h1>Редактор УДС</h1>
         <p className="muted">Откройте .osm, исправьте граф и сохраните файл, который проходит MatSim → SUMO → Webots.</p>
         <label className={`drop ${over ? 'over' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setOver(true); }}

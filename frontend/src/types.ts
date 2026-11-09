@@ -61,6 +61,8 @@ export type DiffCounts = Record<Kind, { added: number; modified: number; deleted
 
 export interface DocState {
   doc_id: string;
+  /** server revision; collaborators' patches are applied strictly in this order */
+  rev: number;
   filename: string;
   stats: { nodes: number; ways: number; relations: number; signals: number };
   diff: DiffCounts;
@@ -136,4 +138,120 @@ export interface LayerVisibility {
   stops: boolean;
   buildings: boolean;
   issues: boolean;
+}
+
+// ------------------------------------------------------------ load model
+export type Los = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
+
+export interface LoadRow {
+  id: number;
+  name: string;
+  highway: string;
+  lanes: number;
+  length_m: number;
+  speed: number;
+  capacity: number;
+  volume: number;
+  base_volume: number;
+  custom: boolean;
+  vc: number;
+  los: Los;
+  t0_s: number;
+  t_s: number;
+}
+
+export interface LoadSummary {
+  roads: number;
+  length_km: number;
+  veh_km: number;
+  veh_hours: number;
+  delay_hours: number;
+  avg_vc: number;
+  congested_km: number;
+  overloaded: number;
+  by_los: Record<Los, number>;
+}
+
+export interface SnapshotMeta {
+  id: string;
+  name: string;
+  created: string;
+  multiplier: number;
+  summary: LoadSummary;
+}
+
+export interface LoadState {
+  multiplier: number;
+  rows: LoadRow[];
+  summary: LoadSummary;
+  snapshots: SnapshotMeta[];
+}
+
+export interface Comparison {
+  a: { id: string; name: string; created: string };
+  b: { id: string; name: string; created: string };
+  totals: Record<string, { before: number; after: number; delta: number }>;
+  los_before: Record<Los, number>;
+  los_after: Record<Los, number>;
+  changed: {
+    id: number; name: string; highway: string; status: 'added' | 'removed' | 'changed';
+    lanes_before: number | null; lanes_after: number | null;
+    capacity_before: number | null; capacity_after: number | null;
+    volume_before: number | null; volume_after: number | null;
+    vc_before: number | null; vc_after: number | null;
+    los_before: Los | null; los_after: Los | null;
+  }[];
+}
+
+// --------------------------------------------------------- before / after
+export interface ChangeEntry {
+  kind: Kind;
+  id: number;
+  status: 'added' | 'modified' | 'deleted';
+  name: string;
+  highway: string;
+  tags: { key: string; before: string | null; after: string | null }[];
+  geometry: boolean;
+  before_coords?: number[][] | number[] | null;
+  after_coords?: number[][] | number[] | null;
+}
+
+export interface ChangesResult {
+  changes: ChangeEntry[];
+  before: ValidationResult['summary'];
+  after: ValidationResult['summary'];
+}
+
+// ---------------------------------------------------------------- report
+export interface ReportData {
+  title: string;
+  filename: string;
+  generated: string;
+  stats: {
+    classes: { highway: string; label: string; count: number; length_km: number; lane_km: number }[];
+    road_km: number;
+    lane_km: number;
+    buildings: { count: number; footprint_m2: number; floor_area_m2: number; with_levels: number };
+    signals: number;
+    crossings: number;
+    stops: number;
+    bridges: number;
+  };
+  validation: {
+    summary: ValidationResult['summary'];
+    matrix: { category: string; critical: number; warning: number; info: number }[];
+  };
+  changes: { added: number; modified: number; deleted: number };
+  load: { multiplier: number; summary: LoadSummary };
+  comparison: Comparison | null;
+}
+
+// ---------------------------------------------------------- collaboration
+export interface Peer {
+  id: string;
+  name: string;
+  color: string;
+  cursor?: [number, number] | null;
+  selection?: Selection;
+  tool?: string;
 }

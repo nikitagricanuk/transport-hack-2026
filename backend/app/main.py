@@ -2,23 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__
+from . import __version__, report
+from .collab import HUB, Peer, clean_presence
+from .analysis import (
+    changes as list_changes,
+    compare_snapshots,
+    load_summary,
+    make_snapshot,
+    network_stats,
+    original_document,
+    road_rows,
+)
 from .edits import History, OpError, apply_op, apply_ops
 from .geojson import geo_patch, to_geojson, vertices
 from .organizer import OrganizerError, credentials, upload_osm
@@ -43,11 +55,17 @@ class Session:
     # graph while an edit is half applied. Every endpoint takes this lock.
     lock: threading.RLock = field(default_factory=threading.RLock)
     journal_len: int = 0
+    revision: int = 0  # bumped on every edit; clients apply broadcast patches in this order
+    # load scenario: per-way volume overrides (veh/h), a demand multiplier and fixed snapshots
+    loads: dict[int, float] = field(default_factory=dict)
+    multiplier: float = 1.0
+    snapshots: list[dict[str, Any]] = field(default_factory=list)
+    original_validation: dict[str, Any] | None = None
 
 
 SESSIONS: dict[str, Session] = {}
 
-app = FastAPI(title="УДС-редактор", version=__version__)
+app = FastAPI(title="Редактор УДС", version=__version__)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -73,6 +91,17 @@ class BatchRequest(BaseModel):
     label: str | None = None
 
 
+class LoadRequest(BaseModel):
+    way_id: int | None = None
+    volume: float | None = Field(default=None, ge=0, le=20000)  # veh/h; null resets the way to its default
+    multiplier: float | None = Field(default=None, gt=0, le=5)
+    reset_all: bool = False
+
+
+class SnapshotRequest(BaseModel):
+    name: str = Field(default="", max_length=80)
+
+
 # ----------------------------------------------------------------- helpers
 def _session(doc_id: str) -> Session:
     s = SESSIONS.get(doc_id)
@@ -95,6 +124,7 @@ def _state(s: Session, include_geo: bool = True) -> dict[str, Any]:
         "stats": s.doc.stats(),
         "diff": s.doc.diff_summary(),
         "history": s.history.info(),
+        "rev": s.revision,
     }
     if include_geo:
         out["geo"] = to_geojson(s.doc)
@@ -189,6 +219,36 @@ def _write_draft_base(s: Session, base: bytes) -> None:
         journal.write_text("", encoding="utf-8")
         s.journal_len = 0
     except OSError:
+        return
+
+
+def _analysis_path(doc_id: str) -> Path | None:
+    paths = _draft_paths(doc_id)
+    return paths[0].with_suffix(".analysis.json") if paths else None
+
+
+def _save_analysis(s: Session) -> None:
+    path = _analysis_path(s.id)
+    if path is None:
+        return
+    data = {"loads": {str(k): v for k, v in s.loads.items()}, "multiplier": s.multiplier, "snapshots": s.snapshots}
+    try:
+        DRAFT_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _load_analysis(s: Session) -> None:
+    path = _analysis_path(s.id)
+    if path is None or not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        s.loads = {int(k): float(v) for k, v in data.get("loads", {}).items()}
+        s.multiplier = float(data.get("multiplier", 1.0))
+        s.snapshots = list(data.get("snapshots", []))
+    except (OSError, ValueError, TypeError, AttributeError):
         return
 
 
@@ -294,6 +354,7 @@ def _materialize_draft(doc_id: str) -> Session:
         raise HTTPException(400, f"не удалось прочитать черновик: {e}") from e
     s = Session(id=doc_id, filename=str(meta.get("filename") or "draft.osm"), doc=doc)
     _replay_journal(s)
+    _load_analysis(s)
     SESSIONS[doc_id] = s
     return s
 
@@ -302,17 +363,23 @@ def _delete_draft_files(doc_id: str) -> None:
     paths = _draft_paths(doc_id)
     if paths is None:
         return
-    for path in (*paths, _journal_path(doc_id)):
+    for path in (*paths, _journal_path(doc_id), _analysis_path(doc_id)):
         if path is not None and path.is_file():
             path.unlink()
 
 
-def _changed(s: Session, tx: Any, entry: dict[str, Any] | None) -> dict[str, Any]:
-    """Journal the edit and answer with only the map features it touched."""
-    if entry is not None:
+def _changed(s: Session, tx: Any, entry: dict[str, Any] | None, client: str | None = None) -> dict[str, Any]:
+    """Journal the edit, answer with only the map features it touched and send the
+    same patch to everyone else editing this document."""
+    changed = tx is not None and not tx.is_empty
+    if entry is not None and tx is not None:
         _journal(s, entry)
+    if changed:
+        s.revision += 1
     out = _state(s, include_geo=False)
-    out["patch"] = geo_patch(s.doc, tx.before, tx.after) if tx is not None else None
+    out["patch"] = geo_patch(s.doc, tx.before, tx.after) if changed else None
+    if changed:
+        HUB.publish(s.id, {"type": "patch", "by": client, **out}, exclude=client)
     return out
 
 
@@ -380,7 +447,7 @@ def get_element(doc_id: str, kind: Literal["node", "way", "relation"], eid: int)
 
 
 @app.post("/api/documents/{doc_id}/ops")
-def run_op(doc_id: str, req: OpRequest) -> Response:
+def run_op(doc_id: str, req: OpRequest, x_client_id: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
         try:
@@ -388,11 +455,11 @@ def run_op(doc_id: str, req: OpRequest) -> Response:
         except OpError as e:
             raise HTTPException(422, str(e)) from e
         entry = {"t": "ops", "ops": [[req.op, req.args]], "label": req.label}
-        return _json({"result": result, **_changed(s, s.history.last_tx, entry)})
+        return _json({"result": result, **_changed(s, s.history.last_tx, entry, x_client_id)})
 
 
 @app.post("/api/documents/{doc_id}/batch")
-def run_batch(doc_id: str, req: BatchRequest) -> Response:
+def run_batch(doc_id: str, req: BatchRequest, x_client_id: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
         try:
@@ -400,23 +467,23 @@ def run_batch(doc_id: str, req: BatchRequest) -> Response:
         except OpError as e:
             raise HTTPException(422, str(e)) from e
         entry = {"t": "ops", "ops": [[o.op, o.args] for o in req.ops], "label": req.label}
-        return _json({"results": results, **_changed(s, s.history.last_tx, entry)})
+        return _json({"results": results, **_changed(s, s.history.last_tx, entry, x_client_id)})
 
 
 @app.post("/api/documents/{doc_id}/undo")
-def undo(doc_id: str) -> Response:
+def undo(doc_id: str, x_client_id: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
         tx = s.history.undo()
-        return _json(_changed(s, tx, {"t": "undo"} if tx else None))
+        return _json(_changed(s, tx, {"t": "undo"} if tx else None, x_client_id))
 
 
 @app.post("/api/documents/{doc_id}/redo")
-def redo(doc_id: str) -> Response:
+def redo(doc_id: str, x_client_id: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
         tx = s.history.redo()
-        return _json(_changed(s, tx, {"t": "redo"} if tx else None))
+        return _json(_changed(s, tx, {"t": "redo"} if tx else None, x_client_id))
 
 
 @app.get("/api/draft")
@@ -486,6 +553,200 @@ def check_organizer(doc_id: str) -> dict[str, Any]:
     except OrganizerError as e:
         status = e.status if 400 <= e.status < 500 else 502
         raise HTTPException(status, e.message) from e
+
+
+# ------------------------------------------------------------ load model
+def _load_state(s: Session) -> dict[str, Any]:
+    rows = road_rows(s.doc, s.loads, s.multiplier)
+    return {
+        "multiplier": s.multiplier,
+        "rows": rows,
+        "summary": load_summary(rows),
+        "snapshots": [{k: v for k, v in snap.items() if k != "rows"} for snap in s.snapshots],
+    }
+
+
+def _snapshot(s: Session, sid: str) -> dict[str, Any]:
+    if sid == "current":
+        return make_snapshot("Текущее состояние", road_rows(s.doc, s.loads, s.multiplier), s.multiplier) | {"id": "current"}
+    for snap in s.snapshots:
+        if snap["id"] == sid:
+            return snap
+    raise HTTPException(404, "снимок не найден")
+
+
+@app.get("/api/documents/{doc_id}/load")
+def get_load(doc_id: str) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        return _json(_load_state(s))
+
+
+@app.post("/api/documents/{doc_id}/load")
+def set_load(doc_id: str, req: LoadRequest, x_client_id: str | None = Header(default=None)) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        if req.reset_all:
+            s.loads.clear()
+            s.multiplier = 1.0
+        if req.multiplier is not None:
+            s.multiplier = round(req.multiplier, 3)
+        if req.way_id is not None:
+            if req.way_id not in s.doc.ways:
+                raise HTTPException(404, "ребро не найдено")
+            if req.volume is None:
+                s.loads.pop(req.way_id, None)
+            else:
+                s.loads[req.way_id] = float(req.volume)
+        _save_analysis(s)
+        HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
+        return _json(_load_state(s))
+
+
+@app.post("/api/documents/{doc_id}/load/snapshots")
+def add_snapshot(doc_id: str, req: SnapshotRequest, x_client_id: str | None = Header(default=None)) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        name = req.name.strip() or f"Состояние {len(s.snapshots) + 1}"
+        s.snapshots.append(make_snapshot(name, road_rows(s.doc, s.loads, s.multiplier), s.multiplier))
+        s.snapshots = s.snapshots[-20:]
+        _save_analysis(s)
+        HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
+        return _json(_load_state(s))
+
+
+@app.delete("/api/documents/{doc_id}/load/snapshots/{sid}")
+def delete_snapshot(doc_id: str, sid: str, x_client_id: str | None = Header(default=None)) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        s.snapshots = [snap for snap in s.snapshots if snap["id"] != sid]
+        _save_analysis(s)
+        HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
+        return _json(_load_state(s))
+
+
+@app.get("/api/documents/{doc_id}/load/compare")
+def compare_load(doc_id: str, a: str, b: str = "current") -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        return _json(compare_snapshots(_snapshot(s, a), _snapshot(s, b)))
+
+
+# ------------------------------------------------------ before / after
+def _original_validation(s: Session) -> dict[str, Any]:
+    if s.original_validation is None:
+        s.original_validation = validate(original_document(s.doc))["summary"]
+    return s.original_validation
+
+
+@app.get("/api/documents/{doc_id}/changes")
+def get_changes(doc_id: str) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        return _json({
+            "changes": list_changes(s.doc),
+            "before": _original_validation(s),
+            "after": validate(s.doc)["summary"],
+        })
+
+
+# -------------------------------------------------------------- reports
+def _report_data(s: Session, a: str | None, b: str | None) -> dict[str, Any]:
+    comparison = None
+    if a:
+        comparison = compare_snapshots(_snapshot(s, a), _snapshot(s, b or "current"))
+    elif len(s.snapshots) >= 2:
+        comparison = compare_snapshots(s.snapshots[-2], s.snapshots[-1])
+    elif len(s.snapshots) == 1:
+        comparison = compare_snapshots(s.snapshots[0], _snapshot(s, "current"))
+    rows = road_rows(s.doc, s.loads, s.multiplier)
+    return {
+        "title": "Отчёт по улично-дорожной сети",
+        "filename": s.filename,
+        "generated": time.strftime("%Y-%m-%d %H:%M"),
+        "stats": network_stats(s.doc),
+        "validation": validate(s.doc),
+        "changes": list_changes(s.doc),
+        "load": {"multiplier": s.multiplier, "rows": rows, "summary": load_summary(rows)},
+        "comparison": comparison,
+    }
+
+
+@app.get("/api/documents/{doc_id}/report")
+def report_data(doc_id: str, a: str | None = None, b: str | None = None) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        data = _report_data(s, a, b)
+    data["validation"] = {"summary": data["validation"]["summary"],
+                          "matrix": report.issue_matrix(data["validation"]["issues"])}
+    data["changes"] = {st: sum(1 for c in data["changes"] if c["status"] == st) for st in ("added", "modified", "deleted")}
+    data["load"].pop("rows")
+    return _json(data)
+
+
+def _report_file(doc_id: str, a: str | None, b: str | None, kind: str) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        data = _report_data(s, a, b)
+    stem = _safe_filename(s.filename).removesuffix(".osm")
+    if kind == "xlsx":
+        body = report.build_xlsx(data)
+        media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        body = report.build_docx(data)
+        media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return Response(content=body, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="report_{stem}.{kind}"'})
+
+
+@app.get("/api/documents/{doc_id}/report.xlsx")
+def report_xlsx(doc_id: str, a: str | None = None, b: str | None = None) -> Response:
+    return _report_file(doc_id, a, b, "xlsx")
+
+
+@app.get("/api/documents/{doc_id}/report.docx")
+def report_docx(doc_id: str, a: str | None = None, b: str | None = None) -> Response:
+    return _report_file(doc_id, a, b, "docx")
+
+
+# --------------------------------------------------------- collaboration
+@app.get("/api/documents/{doc_id}/peers")
+def get_peers(doc_id: str) -> dict[str, Any]:
+    _session(doc_id)
+    return {"peers": HUB.peers(doc_id)}
+
+
+@app.websocket("/api/documents/{doc_id}/ws")
+async def collaborate(ws: WebSocket, doc_id: str, client: str = "", name: str = "") -> None:
+    """Presence and edit stream for one document. Edits themselves go through HTTP."""
+    s = SESSIONS.get(doc_id)
+    if s is None and _draft_exists(doc_id):
+        s = await asyncio.to_thread(_materialize_draft, doc_id)
+    if s is None:
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    peer = Peer(id=client[:40] or uuid.uuid4().hex[:8], name=(name.strip() or "Участник")[:32],
+                color=HUB.next_color(), queue=asyncio.Queue(), loop=asyncio.get_running_loop())
+    others = HUB.join(doc_id, peer)
+    await ws.send_json({"type": "hello", "you": peer.public(), "peers": others, "rev": s.revision})
+
+    async def writer() -> None:
+        while True:
+            msg = await peer.queue.get()
+            await ws.send_text(json.dumps(msg, ensure_ascii=False, separators=(",", ":")))
+
+    task = asyncio.create_task(writer())
+    try:
+        while True:
+            data = await ws.receive_json()
+            if isinstance(data, dict) and data.get("type") == "presence":
+                HUB.update_presence(doc_id, peer.id, clean_presence(data))
+    except (WebSocketDisconnect, RuntimeError, ValueError):
+        pass
+    finally:
+        task.cancel()
+        HUB.leave(doc_id, peer.id)
 
 
 # --------------------------------------------------------- static frontend

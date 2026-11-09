@@ -2,10 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type OpResponse } from './api';
 import MapView, { type MapHandle } from './components/MapView';
 import Inspector from './components/Inspector';
-import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail } from './components/Panels';
+import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail, type BottomTab } from './components/Panels';
+import { ChangesPanel, ExportCheck, LoadPanel, ReportModal } from './components/Analysis';
 import StartScreen from './components/StartScreen';
-import type { DocState, Geo, GeoDiff, Issue, LayerVisibility, NodeProps, Op, OrganizerResult, Selection, SumoResult, Tool, ValidationResult, WayProps } from './types';
+import type {
+  ChangesResult, Comparison, DocState, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
+  ReportData, Selection, SumoResult, Tool, ValidationResult, WayProps,
+} from './types';
 import { applyPatch } from './utils/geoPatch';
+import { saveName, savedName, useCollab, type CollabMessage } from './utils/collab';
 import { TEMPLATES, templateOps, type RoadTemplate } from './utils/osm';
 
 const DEFAULT_LAYERS: LayerVisibility = {
@@ -22,18 +27,36 @@ export default function App() {
   const [validating, setValidating] = useState(false);
   const [layers, setLayers] = useState(DEFAULT_LAYERS);
   const [baseOpacity, setBaseOpacity] = useState(50);
-  const [bottomTab, setBottomTab] = useState<'issues' | 'history'>('issues');
+  const [bottomTab, setBottomTab] = useState<BottomTab>('issues');
+  const [load, setLoad] = useState<LoadState | null>(null);
+  const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [loadColor, setLoadColor] = useState(false);
+  const [changesData, setChangesData] = useState<ChangesResult | null>(null);
+  const [changesOverlay, setChangesOverlay] = useState(true);
+  const [exportCheck, setExportCheck] = useState(false);
+  const [report, setReport] = useState<ReportData | null | 'error' | undefined>(undefined);
   const [hint, setHint] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Cursor coordinates are written straight into the status bar. Keeping them in
   // React state re-rendered the whole editor on every mouse move.
   const cursorEl = useRef<HTMLSpanElement>(null);
   const onCursor = useCallback((ll: [number, number] | null, zoom: number) => {
+    sendRef.current({ cursor: ll });
     if (cursorEl.current) {
       cursorEl.current.textContent = (ll ? `${ll[1].toFixed(5)}° N · ${ll[0].toFixed(5)}° E   ` : '') + `z ${zoom.toFixed(1)}`;
     }
   }, []);
   const [mapDiff, setMapDiff] = useState<GeoDiff | null>(null);
+  // ---- collaboration
+  const [myName, setMyName] = useState(savedName);
+  const [peerList, setPeerList] = useState<Peer[]>([]);
+  const [nameEdit, setNameEdit] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const peersRef = useRef(new Map<string, Peer>());
+  const sendRef = useRef<(p: Record<string, unknown>) => void>(() => undefined);
+  const revRef = useRef(0);
+  const pendingRef = useRef(new Map<number, OpResponse>());
+  const resyncTimer = useRef<number>(0);
   // latest map data, updated synchronously so back-to-back patches never merge onto a stale base
   const geoRef = useRef<Geo | null>(null);
   const [team, setTeam] = useState('team1');
@@ -65,6 +88,26 @@ export default function App() {
     return undefined;
   }, [doc, selection]);
   const selectedWay = selection?.kind === 'way' ? wayIndex.get(selection.id) : undefined;
+  const selectedGeometry = useMemo(() => {
+    if (!doc || selection?.kind !== 'way') return undefined;
+    const line = doc.geo.ways.features.find((f) => f.properties.id === selection.id);
+    if (line) return line.geometry.coordinates;
+    return doc.geo.areas.features.find((f) => f.properties.id === selection.id)?.geometry.coordinates[0];
+  }, [doc, selection]);
+  const nodeOnRoad = useMemo(() => {
+    if (!doc || selection?.kind !== 'node') return true;
+    const tagged = selectedNode?.tags.highway === 'traffic_signals' || selectedNode?.tags.highway === 'crossing';
+    if (!tagged) return true;  // only signals and crossings need to sit on the carriageway
+    return doc.geo.ways.features.some((f) => f.properties.layer === 'road' && f.properties.nodes.includes(selection.id));
+  }, [doc, selection, selectedNode]);
+  const loadRow = useMemo(
+    () => (selection?.kind === 'way' ? load?.rows.find((r) => r.id === selection.id) : undefined),
+    [load, selection],
+  );
+  const loadVc = useMemo(
+    () => (loadColor && load ? new Map(load.rows.map((r) => [r.id, r.vc])) : null),
+    [loadColor, load],
+  );
 
   // --------------------------------------------------------- validation
   const validateTimer = useRef<number>();
@@ -84,6 +127,13 @@ export default function App() {
 
   const loadDoc = useCallback((d: DocState) => {
     geoRef.current = d.geo;
+    revRef.current = d.rev ?? 0;
+    pendingRef.current.clear();
+    try {
+      window.history.replaceState(null, '', `${location.pathname}?doc=${encodeURIComponent(d.doc_id)}`);
+    } catch {
+      /* sandboxed iframe */
+    }
     setMapDiff(null);
     setDoc(d);
     setSelection(null);
@@ -92,13 +142,15 @@ export default function App() {
   }, [scheduleValidate]);
 
   useEffect(() => {
+    // a shared link (?doc=...) wins over the last document of this browser
+    const shared = new URLSearchParams(location.search).get('doc');
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) { setBooting(false); return; }
     let saved: { doc_id?: string; team?: string } = {};
-    try { saved = JSON.parse(raw); } catch { setBooting(false); return; }
+    try { saved = raw ? JSON.parse(raw) : {}; } catch { saved = {}; }
     if (saved.team) setTeam(saved.team);
-    if (!saved.doc_id) { setBooting(false); return; }
-    api.restore(saved.doc_id)
+    const target = shared || saved.doc_id;
+    if (!target) { setBooting(false); return; }
+    api.restore(target)
       .then((d) => { loadDoc(d); setError(null); })
       .catch((e: Error) => {
         const msg = e?.message ?? '';
@@ -112,6 +164,70 @@ export default function App() {
     if (!doc) return;
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ doc_id: doc.doc_id, team, filename: doc.filename }));
   }, [doc, team]);
+
+  const docId = doc?.doc_id;
+  const analysisTimer = useRef<number>();
+  const wantChanges = bottomTab === 'changes';
+  useEffect(() => {
+    if (!doc) return;
+    const id = doc.doc_id;
+    window.clearTimeout(analysisTimer.current);
+    analysisTimer.current = window.setTimeout(() => {
+      api.load(id).then(setLoad).catch(() => undefined);
+      if (wantChanges) api.changes(id).then(setChangesData).catch(() => undefined);
+    }, 300);
+  }, [doc, wantChanges]);
+
+  const loadAction = useCallback(async (p: Promise<LoadState>) => {
+    try {
+      setLoad(await p);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+  const onMultiplier = useCallback((m: number) => { if (docId) loadAction(api.setLoad(docId, { multiplier: m })); }, [docId, loadAction]);
+  const onSnapshot = useCallback((name: string) => { if (docId) loadAction(api.addSnapshot(docId, name)); }, [docId, loadAction]);
+  const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
+  const onResetLoad = useCallback(() => {
+    if (docId) loadAction(api.setLoad(docId, { reset_all: true }));
+    setComparison(null);
+  }, [docId, loadAction]);
+  const onSetLoad = useCallback((wayId: number, volume: number | null) => {
+    if (docId) loadAction(api.setLoad(docId, { way_id: wayId, volume }));
+  }, [docId, loadAction]);
+  const onCompare = useCallback(async (a: string, b: string) => {
+    if (!docId) return;
+    try {
+      setComparison(await api.compare(docId, a, b));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [docId]);
+  const showElement = useCallback((kind: 'way' | 'node', id: number) => {
+    const geo = geoRef.current;
+    setSelection({ kind, id });
+    if (!geo) return;
+    if (kind === 'way') {
+      const f = geo.ways.features.find((w) => w.properties.id === id) ?? geo.areas.features.find((w) => w.properties.id === id);
+      const coords = f ? ('nodes' in f.properties && f.geometry.type === 'Polygon' ? f.geometry.coordinates[0] : f.geometry.coordinates) : null;
+      const mid = coords ? (coords as number[][])[Math.floor((coords as number[][]).length / 2)] : null;
+      if (mid) mapRef.current?.flyTo(mid[0], mid[1], 18);
+    } else {
+      const f = geo.nodes.features.find((n) => n.properties.id === id);
+      if (f) mapRef.current?.flyTo(f.geometry.coordinates[0], f.geometry.coordinates[1], 19);
+    }
+  }, []);
+  const onShowRoad = useCallback((id: number) => showElement('way', id), [showElement]);
+
+  const openReport = async () => {
+    if (!doc) return;
+    setReport(null);
+    try {
+      setReport(await api.report(doc.doc_id));
+    } catch {
+      setReport('error');
+    }
+  };
 
   const applyState = useCallback((res: OpResponse) => {
     const { patch, geo: fullGeo, ...state } = res;
@@ -128,6 +244,101 @@ export default function App() {
     scheduleValidate(res.doc_id);
   }, [scheduleValidate]);
 
+  // Own responses and broadcast patches carry the server revision. Apply them strictly
+  // in order; if one goes missing (socket hiccup), reload the full document.
+  const resync = useCallback(async () => {
+    const id = geoRef.current ? docIdRef.current : undefined;
+    if (!id) return;
+    try {
+      const d = await api.restore(id);
+      geoRef.current = d.geo;
+      revRef.current = d.rev ?? 0;
+      pendingRef.current.clear();
+      setMapDiff(null);
+      setDoc(d);
+      scheduleValidate(d.doc_id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [scheduleValidate]);
+  const ingest = useCallback((res: OpResponse) => {
+    if (res.geo) {
+      revRef.current = res.rev ?? revRef.current;
+      pendingRef.current.clear();
+      applyState(res);
+      return;
+    }
+    if (!res.patch) {
+      applyState(res);  // nothing changed on the map (e.g. nothing to undo)
+      return;
+    }
+    if (res.rev <= revRef.current) return;  // already applied
+    const pending = pendingRef.current;
+    pending.set(res.rev, res);
+    while (pending.has(revRef.current + 1)) {
+      const next = pending.get(revRef.current + 1)!;
+      pending.delete(revRef.current + 1);
+      revRef.current += 1;
+      applyState(next);
+    }
+    window.clearTimeout(resyncTimer.current);
+    if (pending.size) resyncTimer.current = window.setTimeout(resync, 1500);
+  }, [applyState, resync]);
+
+  const publishPeers = useCallback((membership: boolean) => {
+    const list = [...peersRef.current.values()];
+    mapRef.current?.updatePeers(list);
+    if (membership) setPeerList(list);
+  }, []);
+  const onCollab = useCallback((m: CollabMessage) => {
+    const peers = peersRef.current;
+    if (m.type === 'hello') {
+      peers.clear();
+      m.peers.forEach((p) => peers.set(p.id, p));
+      publishPeers(true);
+      if (m.rev !== revRef.current) resync();
+    } else if (m.type === 'join' || m.type === 'presence') {
+      const before = peers.get(m.peer.id);
+      peers.set(m.peer.id, m.peer);
+      publishPeers(!before || before.name !== m.peer.name || before.selection?.id !== m.peer.selection?.id);
+    } else if (m.type === 'leave') {
+      peers.delete(m.id);
+      publishPeers(true);
+    } else if (m.type === 'patch') {
+      ingest(m as unknown as OpResponse);
+    } else if (m.type === 'load') {
+      const id = docIdRef.current;
+      if (id) api.load(id).then(setLoad).catch(() => undefined);
+    }
+  }, [ingest, publishPeers, resync]);
+  const docIdRef = useRef<string | undefined>(undefined);
+  docIdRef.current = doc?.doc_id;
+  const collab = useCollab(doc?.doc_id, myName, onCollab);
+  sendRef.current = collab.send;
+  useEffect(() => { collab.send({ selection }); }, [collab, selection]);
+  useEffect(() => { collab.send({ tool }); }, [collab, tool]);
+  useEffect(() => { if (!doc) { peersRef.current.clear(); setPeerList([]); } }, [doc]);
+
+  const shareLink = async () => {
+    if (!doc) return;
+    const link = `${location.origin}${location.pathname}?doc=${encodeURIComponent(doc.doc_id)}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      setNotice('Ссылка скопирована — отправьте её коллеге');
+    } catch {
+      setNotice(link);
+    }
+  };
+  const commitName = () => {
+    const n = (nameEdit ?? '').trim().slice(0, 32);
+    if (n) {
+      setMyName(n);
+      saveName(n);
+      collab.send({ name: n });
+    }
+    setNameEdit(null);
+  };
+
   // keep selection valid after the document changes
   useEffect(() => {
     if (!doc || !selection) return;
@@ -136,7 +347,6 @@ export default function App() {
   }, [doc, selection, wayIndex, selectedNode]);
 
   // -------------------------------------------------------------- ops
-  const docId = doc?.doc_id;
   const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }): Promise<boolean> => {
     if (!docId) return false;
     setError(null);
@@ -145,21 +355,23 @@ export default function App() {
       const list = Array.isArray(ops) ? ops : [ops];
       if (list.length === 1) res = await api.op(docId, list[0], opts?.label);
       else res = await api.batch(docId, list, opts?.label);
-      applyState(res);
+      ingest(res);
       if (opts?.select === 'result') {
         const id = res.result?.id ?? res.results?.[res.results.length - 1]?.id;
         const op = list[list.length - 1].op;
         if (id !== undefined) setSelection({ kind: op === 'add_way' ? 'way' : 'node', id });
+        else if (list[0].op === 'set_tags' && list[0].args.kind === 'node') setSelection({ kind: 'node', id: Number(list[0].args.id) });
       }
       return true;
     } catch (e) {
       setError((e as Error).message);
       return false;
     }
-  }, [docId, applyState]);
+  }, [docId, ingest]);
 
   // stable callbacks so memoized panels and the map skip unrelated re-renders
-  const onMapOp = useCallback((op: Op, o?: { select?: 'result' | 'keep' }) => runOps(op, { select: o?.select }), [runOps]);
+  const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
+    runOps(op, { select: o?.select, label: o?.label }), [runOps]);
   const onFix = useCallback((i: Issue) => {
     if (i.fix) runOps({ op: i.fix.op, args: i.fix.args }, { label: i.fix.label + ': ' + i.title });
   }, [runOps]);
@@ -167,11 +379,11 @@ export default function App() {
   const mapIssues = layers.issues ? validation?.issues ?? NO_ISSUES : NO_ISSUES;
 
   const undo = useCallback(async () => {
-    if (doc?.history.can_undo) applyState(await api.undo(doc.doc_id));
-  }, [doc, applyState]);
+    if (doc?.history.can_undo) ingest(await api.undo(doc.doc_id));
+  }, [doc, ingest]);
   const redo = useCallback(async () => {
-    if (doc?.history.can_redo) applyState(await api.redo(doc.doc_id));
-  }, [doc, applyState]);
+    if (doc?.history.can_redo) ingest(await api.redo(doc.doc_id));
+  }, [doc, ingest]);
 
   const applyTemplate = useCallback((t: RoadTemplate) => {
     if (selection?.kind === 'way') runOps(templateOps(selection.id, t), { label: `Шаблон «${t.name}»` });
@@ -197,6 +409,9 @@ export default function App() {
         runOps({ op: 'delete', args: { kind: selection.kind, id: selection.id } });
         return;
       }
+      if (e.key === '+' || e.key === '=' || e.code === 'NumpadAdd') { mapRef.current?.zoomBy(1); return; }
+      if (e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract') { mapRef.current?.zoomBy(-1); return; }
+      if (e.key === '0') { mapRef.current?.fitData(); return; }
       const byCode = TOOLS.find((x) => e.code === `Key${x.key}`);
       if (byCode) { setTool(byCode.id); return; }
       const tpl = TEMPLATES.find((x) => x.key === e.key);
@@ -243,12 +458,21 @@ export default function App() {
   const closeDocument = () => {
     const closingId = doc?.doc_id;
     localStorage.removeItem(STORAGE_KEY);
-    if (closingId) api.discardDraft(closingId).catch(() => undefined);
+    // others may still be editing this document: then leave it, do not delete it
+    if (closingId && peerList.length === 0) api.discardDraft(closingId).catch(() => undefined);
+    try {
+      window.history.replaceState(null, '', location.pathname);
+    } catch {
+      /* sandboxed iframe */
+    }
     geoRef.current = null;
     setMapDiff(null);
     setDoc(null);
     setValidation(null);
     setSelection(null);
+    setLoad(null);
+    setComparison(null);
+    setChangesData(null);
   };
 
   if (booting) return <div className="start"><p className="muted">Восстановление правок…</p></div>;
@@ -264,13 +488,16 @@ export default function App() {
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
             <circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="18" r="2" /><path d="M7 6h10M6 8l5 8M18 8l-5 8" />
           </svg>
-          <b>УДС·Редактор</b>
+          <b>Редактор УДС</b>
         </div>
         <div className="file-chip mono">
           {doc.filename}
           {changes > 0 && <><span className="dot" aria-hidden="true" /><span className="muted">изменено объектов: {changes}</span></>}
         </div>
-        <button className="btn ghost" onClick={closeDocument}>Открыть другой</button>
+        <button className="btn ghost" onClick={closeDocument}
+          title={peerList.length ? 'Выйти из документа (он останется у коллег)' : 'Закрыть документ и удалить черновик'}>
+          Открыть другой
+        </button>
         <div className="row gap2">
           <button className="icon-btn" aria-label="Отменить" title={`Отменить${doc.history.undo_label ? ': ' + doc.history.undo_label : ''} · Ctrl+Z`}
             disabled={!doc.history.can_undo} onClick={undo}>↶</button>
@@ -278,6 +505,22 @@ export default function App() {
             disabled={!doc.history.can_redo} onClick={redo}>↷</button>
         </div>
         <span className="grow" />
+        <div className="peers" aria-label={`В документе: ${[myName, ...peerList.map((p) => p.name)].join(', ')}`}>
+          <button className="peer-avatar me" style={{ background: '#334155' }} title={`${myName} (вы) — изменить имя`}
+            onClick={() => setNameEdit(myName)}>{initials(myName)}</button>
+          {peerList.map((p) => (
+            <button key={p.id} className="peer-avatar" style={{ background: p.color }} title={`${p.name} — показать`}
+              onClick={() => p.selection && showElement(p.selection.kind, p.selection.id)}>{initials(p.name)}</button>
+          ))}
+        </div>
+        <button className="btn" onClick={shareLink} title="Скопировать ссылку для совместной работы">Поделиться</button>
+        {nameEdit !== null && (
+          <div className="name-pop">
+            <input autoFocus value={nameEdit} onChange={(e) => setNameEdit(e.target.value)} aria-label="Ваше имя"
+              onKeyDown={(e) => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setNameEdit(null); }} />
+            <button className="btn small primary" onClick={commitName}>OK</button>
+          </div>
+        )}
         <button className="btn" onClick={() => { setBottomTab('issues'); if (doc) scheduleValidate(doc.doc_id); }}>
           Проверить
           {counts && <span className={`count ${counts.critical ? 'crit' : counts.warning ? 'warn' : 'ok'}`}>
@@ -290,7 +533,8 @@ export default function App() {
           <input value={team} onChange={(e) => setTeam(e.target.value.replace(/[^\w\-]/g, ''))} aria-label="Название команды" />
           <span className="muted mono">.osm</span>
         </label>
-        <button className="btn primary" onClick={exportOsm}>Экспорт .osm</button>
+        <button className="btn" onClick={openReport} title="Отчёт с графиками, выгрузка в Word и Excel">Отчёт</button>
+        <button className="btn primary" onClick={() => { setExportCheck(true); scheduleValidate(doc.doc_id); }}>Экспорт .osm</button>
       </header>
 
       <div className="body">
@@ -300,15 +544,30 @@ export default function App() {
         <main className="center">
           <div className="map-wrap">
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
-              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection}
+              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
+              changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
             <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
+            {notice && !error && (
+              <div className="toast notice" role="status">{notice}
+                <button className="icon-btn" aria-label="Закрыть" onClick={() => setNotice(null)}>×</button></div>
+            )}
             {error && <div className="toast error" role="alert">{error}<button className="icon-btn" aria-label="Закрыть" onClick={() => setError(null)}>×</button></div>}
           </div>
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
-            validating={validating} onShow={showIssue} onFix={onFix} />
+            validating={validating} onShow={showIssue} onFix={onFix}>
+            {bottomTab === 'load' && (
+              <LoadPanel load={load} comparison={comparison} onMultiplier={onMultiplier} onSnapshot={onSnapshot}
+                onDeleteSnapshot={onDeleteSnapshot} onCompare={onCompare} onReset={onResetLoad} onShowRoad={onShowRoad}
+                colorOn={loadColor} onColor={setLoadColor} />
+            )}
+            {bottomTab === 'changes' && (
+              <ChangesPanel data={changesData} onShow={showElement} overlay={changesOverlay} onOverlay={setChangesOverlay} />
+            )}
+          </BottomPanel>
         </main>
-        <Inspector way={selectedWay} node={selectedNode} onOp={onInspectorOp} />
+        <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
+          onSetLoad={onSetLoad} onOp={onInspectorOp} />
       </div>
 
       <footer className="status mono">
@@ -338,6 +597,17 @@ export default function App() {
         </div>
       )}
 
+      {exportCheck && (
+        <ExportCheck validation={validating ? null : validation} filename={`${team || 'team'}.osm`}
+          onClose={() => setExportCheck(false)}
+          onFixList={() => { setExportCheck(false); setBottomTab('issues'); }}
+          onExport={() => { setExportCheck(false); exportOsm(); }} />
+      )}
+      {report !== undefined && (
+        <ReportModal data={report} onClose={() => setReport(undefined)}
+          xlsxUrl={api.reportUrl(doc.doc_id, 'xlsx')} docxUrl={api.reportUrl(doc.doc_id, 'docx')} />
+      )}
+
       {sumo && (
         <div className="modal-back" onClick={() => sumo !== 'running' && setSumo(null)}>
           <div className="modal" role="dialog" aria-label="Результат SUMO netconvert" onClick={(e) => e.stopPropagation()}>
@@ -357,4 +627,10 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const text = parts.length > 1 ? parts[0][0] + parts[1][0] : (parts[0] ?? '?').slice(0, 2);
+  return text.toUpperCase();
 }

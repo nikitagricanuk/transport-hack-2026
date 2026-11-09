@@ -10,6 +10,7 @@ import networkx as nx
 from .geo import GridIndex, LocalProjection, dist, project_on_segment
 from .osm_model import OsmDocument
 from .roads import ONEWAY_VALID, default_turns, direction, is_drivable, parse_int
+from .edits import ATTACH_MAX_M, way_level
 
 Severity = Literal["critical", "warning", "info"]
 Category = Literal["connectivity", "direction", "junction", "lanes", "geometry", "data"]
@@ -18,6 +19,7 @@ GAP_M = 8.0          # dangling end closer than this to another road = broken ju
 CLOSE_JUNCTION_M = 2.0
 BOUNDARY_M = 40.0    # dead ends near the extract border are expected
 STOP_FAR_M = 25.0
+MAX_GRADE = 0.12    # steeper than 12 % between two nodes is a Z jump
 
 
 @dataclass
@@ -132,6 +134,7 @@ class _Validator:
         self.check_directions()
         self.check_lanes()
         self.check_geometry()
+        self.check_elevation()
         self.check_signals_and_stops()
 
     def check_data(self) -> None:
@@ -440,16 +443,70 @@ class _Validator:
                          fix={"label": "layer=-1", "op": "set_tags",
                               "args": {"kind": "way", "id": w.id, "tags": {"layer": "-1"}}})
 
+    def check_elevation(self) -> None:
+        """Z jumps: a bridge raised with ele next to ground nodes, or a level change with no ramp."""
+        has_ele = {nid for nid, n in self.doc.nodes.items() if "ele" in n.tags}
+
+        def ele(nid: int) -> float:
+            try:
+                return float(self.doc.nodes[nid].tags.get("ele", "0").replace(",", "."))
+            except (KeyError, ValueError):
+                return 0.0
+
+        reported: set[int] = set()
+        for w in self.road_ways:
+            level = way_level(w.tags)
+            if level != 0 and not has_ele.intersection(w.nodes):
+                self.add(category="geometry", severity="info", title="Резкий Z-переход",
+                         description=f"{self.name(w.id)}: уровень {level}, но у узлов нет высоты ele — "
+                                     "съезд с моста получится ступенькой.",
+                         refs=[{"kind": "way", "id": w.id}], location=self.loc(w.nodes[len(w.nodes) // 2]),
+                         levels=["webots"],
+                         fix={"label": "Плавный Z", "op": "smooth_z", "args": {"way_id": w.id}})
+                continue
+            if not has_ele.intersection(w.nodes):
+                continue
+            for a, b in zip(w.nodes, w.nodes[1:]):
+                pa, pb = self.xy(a), self.xy(b)
+                if pa is None or pb is None:
+                    continue
+                run = dist(pa, pb)
+                rise = abs(ele(a) - ele(b))
+                if run < 0.5 or rise / run <= MAX_GRADE or w.id in reported:
+                    continue
+                reported.add(w.id)
+                bridge = next((o for o in (self.doc.ways.get(x) for x in self.road_node_ways.get(a, []) +
+                                           self.road_node_ways.get(b, []))
+                               if o is not None and way_level(o.tags) != 0), None)
+                self.add(category="geometry", severity="warning", title="Резкий перепад высоты",
+                         description=f"{self.name(w.id)}: уклон {rise / run:.0%} на {run:.0f} м "
+                                     f"(допустимо до {MAX_GRADE:.0%}).",
+                         refs=[{"kind": "way", "id": w.id}], location=self.loc(a), levels=["webots"],
+                         fix={"label": "Плавный Z", "op": "smooth_z", "args": {"way_id": bridge.id}} if bridge else None)
+
     def check_signals_and_stops(self) -> None:
         any_way_nodes = {r for w in self.doc.ways.values() for r in w.nodes}
         seg_idx = None
         for n in self.doc.nodes.values():
             hw = n.tags.get("highway")
-            if hw == "traffic_signals":
-                if n.id not in any_way_nodes:
+            if hw in ("traffic_signals", "crossing") and n.id not in self.road_node_ways:
+                if seg_idx is None:
+                    seg_idx = self._segment_index()
+                p = self.proj.to_xy(n.lat, n.lon)
+                near = [project_on_segment(p, self.xy(a), self.xy(b))[2]  # type: ignore[arg-type]
+                        for (_w, a, b) in seg_idx.query(p[0], p[1], ATTACH_MAX_M)]
+                close = bool(near) and min(near) <= ATTACH_MAX_M
+                fix = {"label": "Привязать к дороге", "op": "attach_to_road", "args": {"node_id": n.id}} if close else None
+                if hw == "traffic_signals":
                     self.add(category="junction", severity="warning", title="Светофор вне дороги",
-                             description="Узел traffic_signals не входит ни в одно ребро — SUMO его не увидит.",
-                             refs=[{"kind": "node", "id": n.id}], location=[n.lon, n.lat], levels=["sumo"])
+                             description="Узел traffic_signals не стоит на проезжей части — SUMO его не увидит."
+                                         + (f" Ближайшая дорога в {min(near):.0f} м." if close else ""),
+                             refs=[{"kind": "node", "id": n.id}], location=[n.lon, n.lat], levels=["sumo"], fix=fix)
+                elif close and n.id not in any_way_nodes:
+                    self.add(category="junction", severity="warning", title="Переход вне проезжей части",
+                             description=f"Пешеходный переход не стоит на дороге (ближайшая в {min(near):.0f} м) — "
+                                         "SUMO не создаст переход.",
+                             refs=[{"kind": "node", "id": n.id}], location=[n.lon, n.lat], levels=["sumo"], fix=fix)
             elif hw == "bus_stop" or n.tags.get("public_transport") == "platform":
                 if n.id in any_way_nodes:
                     continue

@@ -101,19 +101,26 @@ def geo_patch(doc: OsmDocument, before: dict, after: dict) -> dict[str, Any]:
     returned ones, instead of reloading the whole map after each edit.
     """
     way_ids: set[int] = set()
-    node_ids: set[int] = set()
-    for states in (before, after):
-        for (kind, eid), el in states.items():
-            if kind == "way":
-                way_ids.add(eid)
-                if el is not None:
-                    node_ids.update(el.nodes)  # junction status of old and new vertices
-            elif kind == "node":
-                node_ids.add(eid)
-    if node_ids:
-        # a moved node changes the geometry of every way that uses it
+    node_ids: set[int] = set()   # nodes whose own feature may have changed
+    moved: set[int] = set()      # nodes edited directly: every way using them must be redrawn
+    for key in set(before) | set(after):
+        kind, eid = key
+        old, new = before.get(key), after.get(key)
+        if kind == "way":
+            way_ids.add(eid)
+            old_nodes = old.nodes if old is not None else []
+            new_nodes = new.nodes if new is not None else []
+            road_changed = (old is not None and is_drivable(old.tags)) != (new is not None and is_drivable(new.tags))
+            if old_nodes != new_nodes or road_changed:
+                # junction status of the old and new vertices may have changed
+                node_ids.update(old_nodes)
+                node_ids.update(new_nodes)
+        elif kind == "node":
+            node_ids.add(eid)
+            moved.add(eid)
+    if moved:
         for w in doc.ways.values():
-            if w.id not in way_ids and not node_ids.isdisjoint(w.nodes):
+            if w.id not in way_ids and not moved.isdisjoint(w.nodes):
                 way_ids.add(w.id)
     feats: dict[str, list[dict]] = {"ways": [], "areas": [], "nodes": []}
     for wid in way_ids:
