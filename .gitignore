@@ -226,3 +226,5 @@ frontend/dist/
 
 # Local OSM working files
 data/*.osm
+*.log
+!data/README.md
