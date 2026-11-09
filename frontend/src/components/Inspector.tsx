@@ -1,5 +1,6 @@
 import { memo, useState } from 'react';
-import type { LoadRow, NodeProps, Op, Tags, WayProps } from '../types';
+import type { LoadRow, NodeProps, Op, RouteDetail, Tags, WayProps } from '../types';
+import { SignalPanel, StopPanel } from './Transit';
 import TagEditor from './TagEditor';
 import { RoadLoad } from './Analysis';
 import { areaM2, fmt, lengthM } from '../utils/geom';
@@ -18,6 +19,12 @@ interface Props {
   canSeparate?: boolean;
   /** shared junctions on the selected road, drawn as orange points */
   sharedJunctions?: number;
+  /** for the signal and stop panels */
+  docId?: string;
+  rev?: number;
+  openRoute?: RouteDetail | null;
+  onOpenRoute?: (r: RouteDetail | null) => void;
+  onScenarioChanged?: () => void;
   onOp: (op: Op | Op[], label?: string) => void;
 }
 
@@ -27,7 +34,10 @@ const BUILDING_TYPES: [string, string][] = [
   ['university', 'университет'], ['hospital', 'больница'], ['industrial', 'промышленное'], ['garage', 'гараж'],
 ];
 
-export default memo(function Inspector({ way, node, geometry, loadRow, onSetLoad, nodeOnRoad, canSeparate, sharedJunctions, onOp }: Props) {
+export default memo(function Inspector({
+  way, node, geometry, loadRow, onSetLoad, nodeOnRoad, canSeparate, sharedJunctions, docId, rev = 0, openRoute = null,
+  onOpenRoute, onScenarioChanged, onOp,
+}: Props) {
   const [tab, setTab] = useState<'attr' | 'tags'>('attr');
   if (!way && !node) {
     return (
@@ -76,6 +86,14 @@ export default memo(function Inspector({ way, node, geometry, loadRow, onSetLoad
               Привязать к ближайшей дороге
             </button>
           </div>
+        )}
+        {tab === 'attr' && node && docId && (tags.highway === 'traffic_signals' || tags.crossing === 'traffic_signals') && (
+          <SignalPanel docId={docId} nodeId={node.id} rev={rev} onChanged={() => onScenarioChanged?.()} />
+        )}
+        {tab === 'attr' && node && docId && (tags.highway === 'bus_stop' || tags.public_transport === 'platform'
+          || tags.public_transport === 'stop_position' || tags.railway === 'tram_stop') && (
+          <StopPanel docId={docId} nodeId={node.id} rev={rev} openRoute={openRoute}
+            onOpenRoute={(r) => onOpenRoute?.(r)} onChanged={() => onScenarioChanged?.()} />
         )}
         {tab === 'attr' && node && <NodeAttributes tags={tags} setTags={setTags} />}
       </div>
@@ -136,6 +154,12 @@ function AreaAttributes({ way, tags, setTags, area }: {
         </>
       )}
       <NameField value={tags.name ?? ''} onCommit={(v) => setTags({ name: v || null })} />
+      <div className="field"><span>Порядок над соседями (OSM layer = {tags.layer ?? 0})</span>
+        <div className="grid2">
+          <button className="btn" onClick={() => setTags({ layer: zStep(tags.layer, 1) }, 'Объект поднят')}>▲ Выше</button>
+          <button className="btn" onClick={() => setTags({ layer: zStep(tags.layer, -1) }, 'Объект опущен')}>▼ Ниже</button>
+        </div>
+      </div>
       <p className="muted small">Контур можно перетащить целиком или за одну вершину инструментом «Выбор».</p>
     </div>
   );
@@ -336,4 +360,11 @@ function Stepper({ label, value, onChange, disabled, max = 6 }: {
       </div>
     </div>
   );
+}
+
+/** next OSM layer value for a zone or building; 0 removes the tag */
+function zStep(layer: string | undefined, delta: number): string | null {
+  const cur = parseInt(layer ?? '0', 10) || 0;
+  const next = Math.max(-5, Math.min(5, cur + delta));
+  return next === 0 ? null : String(next);
 }

@@ -1,5 +1,6 @@
 import type {
-  ChangesResult, Comparison, DocState, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, SumoResult,
+  ChangesResult, Comparison, DocState, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
+  SignalPlan, StopInfo, SumoResult,
   ValidationResult,
 } from './types';
 
@@ -123,6 +124,13 @@ export const api = {
   changes: (docId: string) => request<ChangesResult>(`/api/documents/${docId}/changes`),
   report: (docId: string) => request<ReportData>(`/api/documents/${docId}/report`),
   reportUrl: (docId: string, kind: 'xlsx' | 'docx') => `/api/documents/${docId}/report.${kind}`,
+  stop: (docId: string, nodeId: number) => request<StopInfo>(`/api/documents/${docId}/transit/stops/${nodeId}`),
+  route: (docId: string, routeId: number) => request<RouteDetail>(`/api/documents/${docId}/transit/routes/${routeId}`),
+  setRouteFrequency: (docId: string, routeId: number, vehiclesPerHour: number | null) =>
+    request<RouteDetail>(`/api/documents/${docId}/transit/routes/${routeId}`, json({ vehicles_per_hour: vehiclesPerHour })),
+  signal: (docId: string, nodeId: number) => request<SignalPlan>(`/api/documents/${docId}/signals/${nodeId}`),
+  setSignal: (docId: string, nodeId: number, body: { cycle?: number; main_share?: number; optimize?: boolean; reset?: boolean }) =>
+    request<SignalPlan>(`/api/documents/${docId}/signals/${nodeId}`, json(body)),
   exportUrl: (docId: string, filename: string) =>
     `/api/documents/${docId}/export?filename=${encodeURIComponent(filename)}`,
 };

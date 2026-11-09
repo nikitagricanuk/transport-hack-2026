@@ -1,4 +1,5 @@
 import { memo, useState, type ReactNode } from 'react';
+import type { DrawGroup } from './MapView';
 import type { Fix, HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
 import { ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, issueVisible } from '../utils/layers';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
@@ -53,8 +54,14 @@ const LAYERS: { key: keyof LayerVisibility; name: string; sw: string }[] = [
   { key: 'issues', name: 'Ошибки графа', sw: '#EA580C' },
 ];
 
-export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBaseOpacity, canApplyTemplate, onTemplate }: {
+const GROUP_LABEL: Record<DrawGroup, string> = {
+  zones: 'Зоны (газоны, парки)', buildings: 'Здания', paths: 'Пешеходные', roads: 'Дороги', rail: 'Трамвай / ж/д',
+};
+
+export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBaseOpacity, canApplyTemplate, onTemplate,
+  drawOrder, onDrawOrder }: {
   layers: LayerVisibility; onLayers: (l: LayerVisibility) => void; onSelectAll: () => void;
+  drawOrder: DrawGroup[]; onDrawOrder: (order: DrawGroup[]) => void;
   baseOpacity: number; onBaseOpacity: (v: number) => void;
   canApplyTemplate: boolean; onTemplate: (t: RoadTemplate) => void;
 }) {
@@ -79,6 +86,24 @@ export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBase
           <input type="range" min={0} max={100} value={baseOpacity} onChange={(e) => onBaseOpacity(Number(e.target.value))} />
         </label>
       </div>
+      <h3 className="section">Порядок отрисовки <span className="muted">сверху — выше</span></h3>
+      <ol className="draw-order" aria-label="Порядок слоёв на карте">
+        {[...drawOrder].reverse().map((g, i, arr) => {
+          const idx = drawOrder.indexOf(g);
+          const move = (delta: number) => {
+            const next = [...drawOrder];
+            [next[idx], next[idx + delta]] = [next[idx + delta], next[idx]];
+            onDrawOrder(next);
+          };
+          return (
+            <li key={g}>
+              <span className="grow">{GROUP_LABEL[g]}</span>
+              <button className="icon-btn" aria-label={`${GROUP_LABEL[g]} выше`} disabled={i === 0} onClick={() => move(1)}>▲</button>
+              <button className="icon-btn" aria-label={`${GROUP_LABEL[g]} ниже`} disabled={i === arr.length - 1} onClick={() => move(-1)}>▼</button>
+            </li>
+          );
+        })}
+      </ol>
       <h3 className="section">Шаблоны дорог <span className="muted">{canApplyTemplate ? 'к выбранному' : 'выберите ребро'}</span></h3>
       <div className="stack6 px14">
         {TEMPLATES.map((t) => (

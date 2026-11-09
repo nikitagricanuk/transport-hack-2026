@@ -270,3 +270,44 @@ export interface Peer {
   selection?: Selection;
   tool?: string;
 }
+
+// ------------------------------------------------------- transit, signals
+export interface RouteSummary {
+  id: number;
+  ref: string;
+  name: string;
+  mode: string;
+  mode_label: string;
+  from: string;
+  to: string;
+  colour: string;
+  stops: number;
+  frequency: number;
+  custom_frequency: boolean;
+}
+
+export interface RouteDetail extends RouteSummary {
+  lines: number[][][];
+  stop_list: { id: number; name: string; coord: number[] }[];
+}
+
+export interface StopInfo {
+  id: number;
+  name: string;
+  routes: RouteSummary[];
+  vehicles_per_hour: number;
+  residents_400m: number;
+  load_label: string;
+}
+
+export interface SignalPlan {
+  node_id: number;
+  cycle: number;
+  main_share: number;
+  custom: boolean;
+  approaches: { way_id: number; name: string; highway: string; bearing: number; group: 'main' | 'cross';
+    volume: number | null; capacity: number | null; vc: number | null }[];
+  phases: { name: string; group: 'main' | 'cross'; green_s: number; yellow_s: number }[];
+  flow_ratio: { main: number; cross: number };
+  webster: { cycle: number; main_share: number; saturated: boolean };
+}

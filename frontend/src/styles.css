@@ -275,3 +275,23 @@ html.map-is-fullscreen, html.map-is-fullscreen body { overflow: hidden; }
   border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
 .top { position: relative; }
 .toast.notice { background: #13261a; border-color: #2f5a36; color: #bbf7d0; word-break: break-all; }
+
+/* ------------------------------------------------ draw order, transit, signals */
+.draw-order { list-style: none; margin: 0; padding: 0 10px; display: flex; flex-direction: column; gap: 2px; }
+.draw-order li { display: flex; align-items: center; gap: 2px; padding: 3px 6px; border-radius: 6px; background: #171e27; }
+.draw-order .icon-btn { width: 26px; height: 26px; font-size: 12px; }
+.route-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.route-chip { min-width: 36px; padding: 4px 8px; border-radius: 6px; border: 2px solid var(--route); background: transparent;
+  color: var(--text); font: 600 12px var(--mono); }
+.route-chip[aria-pressed='true'] { background: var(--route); color: #fff; }
+.route-card { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; border-left: 4px solid var(--route);
+  background: #0e1218; }
+.load-pill { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.load-pill.lo { background: #14321d; color: var(--good); }
+.load-pill.mid { background: #3a2f12; color: #fbbf24; }
+.load-pill.hi { background: #3b1a12; color: var(--bad); }
+.phase-bar { display: flex; height: 22px; border-radius: 4px; overflow: hidden; font: 600 11px var(--mono); }
+.phase-bar .ph { display: flex; align-items: center; justify-content: center; color: #fff; min-width: 0; }
+.phase-bar .main { background: #16a34a; }
+.phase-bar .cross { background: #2563eb; }
+.phase-bar .yellow { background: #ca8a04; }

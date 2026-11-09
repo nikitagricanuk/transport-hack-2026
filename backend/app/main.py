@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 
 from . import __version__, report
 from .collab import HUB, Peer, clean_presence
+from . import signals as signal_plans
+from . import transit
 from .analysis import (
     changes as list_changes,
     compare_snapshots,
@@ -60,6 +62,9 @@ class Session:
     loads: dict[int, float] = field(default_factory=dict)
     multiplier: float = 1.0
     snapshots: list[dict[str, Any]] = field(default_factory=list)
+    # vehicles/h per transit route (overrides of the OSM interval) and signal timing per node
+    transit_freq: dict[int, float] = field(default_factory=dict)
+    signal_timing: dict[int, dict[str, Any]] = field(default_factory=dict)
     original_validation: dict[str, Any] | None = None
 
 
@@ -238,7 +243,9 @@ def _save_analysis(s: Session) -> None:
     path = _analysis_path(s.id)
     if path is None:
         return
-    data = {"loads": {str(k): v for k, v in s.loads.items()}, "multiplier": s.multiplier, "snapshots": s.snapshots}
+    data = {"loads": {str(k): v for k, v in s.loads.items()}, "multiplier": s.multiplier, "snapshots": s.snapshots,
+            "transit_freq": {str(k): v for k, v in s.transit_freq.items()},
+            "signal_timing": {str(k): v for k, v in s.signal_timing.items()}}
     try:
         DRAFT_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -255,6 +262,8 @@ def _load_analysis(s: Session) -> None:
         s.loads = {int(k): float(v) for k, v in data.get("loads", {}).items()}
         s.multiplier = float(data.get("multiplier", 1.0))
         s.snapshots = list(data.get("snapshots", []))
+        s.transit_freq = {int(k): float(v) for k, v in data.get("transit_freq", {}).items()}
+        s.signal_timing = {int(k): dict(v) for k, v in data.get("signal_timing", {}).items()}
     except (OSError, ValueError, TypeError, AttributeError):
         return
 
@@ -576,7 +585,7 @@ def check_organizer(doc_id: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------ load model
 def _load_state(s: Session) -> dict[str, Any]:
-    rows = road_rows(s.doc, s.loads, s.multiplier)
+    rows = _rows(s)
     return {
         "multiplier": s.multiplier,
         "rows": rows,
@@ -587,7 +596,7 @@ def _load_state(s: Session) -> dict[str, Any]:
 
 def _snapshot(s: Session, sid: str) -> dict[str, Any]:
     if sid == "current":
-        return make_snapshot("Текущее состояние", road_rows(s.doc, s.loads, s.multiplier), s.multiplier) | {"id": "current"}
+        return make_snapshot("Текущее состояние", _rows(s), s.multiplier) | {"id": "current"}
     for snap in s.snapshots:
         if snap["id"] == sid:
             return snap
@@ -627,7 +636,7 @@ def add_snapshot(doc_id: str, req: SnapshotRequest, x_client_id: str | None = He
     s = _session(doc_id)
     with s.lock:
         name = req.name.strip() or f"Состояние {len(s.snapshots) + 1}"
-        s.snapshots.append(make_snapshot(name, road_rows(s.doc, s.loads, s.multiplier), s.multiplier))
+        s.snapshots.append(make_snapshot(name, _rows(s), s.multiplier))
         s.snapshots = s.snapshots[-20:]
         _save_analysis(s)
         HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
@@ -649,6 +658,107 @@ def compare_load(doc_id: str, a: str, b: str = "current") -> Response:
     s = _session(doc_id)
     with s.lock:
         return _json(compare_snapshots(_snapshot(s, a), _snapshot(s, b)))
+
+
+def _rows(s: Session) -> list[dict[str, Any]]:
+    """Load model with scheduled transit vehicles and signal green shares."""
+    timing = {nid: cfg for nid, cfg in s.signal_timing.items() if nid in s.doc.nodes}
+    return road_rows(s.doc, s.loads, s.multiplier,
+                     transit_pcu=transit.bus_pcu_by_way(s.doc, s.transit_freq),
+                     capacity_factor=signal_plans.capacity_factors(s.doc, timing))
+
+
+# ---------------------------------------------------------- transit
+class FrequencyRequest(BaseModel):
+    vehicles_per_hour: float | None = Field(default=None, ge=0, le=120)  # null: back to the OSM value
+
+
+@app.get("/api/documents/{doc_id}/transit/routes")
+def transit_routes(doc_id: str) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        return _json({"routes": transit.routes(s.doc, s.transit_freq)})
+
+
+@app.get("/api/documents/{doc_id}/transit/routes/{route_id}")
+def transit_route(doc_id: str, route_id: int) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        try:
+            return _json(transit.route_geometry(s.doc, route_id, s.transit_freq))
+        except KeyError as e:
+            raise HTTPException(404, "маршрут не найден") from e
+
+
+@app.post("/api/documents/{doc_id}/transit/routes/{route_id}")
+def set_route_frequency(doc_id: str, route_id: int, req: FrequencyRequest,
+                        x_client_id: str | None = Header(default=None)) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        if route_id not in s.doc.relations:
+            raise HTTPException(404, "маршрут не найден")
+        if req.vehicles_per_hour is None:
+            s.transit_freq.pop(route_id, None)
+        else:
+            s.transit_freq[route_id] = float(req.vehicles_per_hour)
+        _save_analysis(s)
+        HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
+        return _json(transit.route_geometry(s.doc, route_id, s.transit_freq))
+
+
+@app.get("/api/documents/{doc_id}/transit/stops/{node_id}")
+def transit_stop(doc_id: str, node_id: int) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        try:
+            return _json(transit.stop_info(s.doc, node_id, s.transit_freq))
+        except KeyError as e:
+            raise HTTPException(404, "остановка не найдена") from e
+
+
+# ---------------------------------------------------------- signal timing
+class SignalRequest(BaseModel):
+    cycle: int | None = Field(default=None, ge=30, le=180)
+    main_share: float | None = Field(default=None, ge=0.2, le=0.8)
+    optimize: bool = False
+    reset: bool = False
+
+
+def _signal_plan(s: Session, node_id: int) -> dict[str, Any]:
+    n = s.doc.nodes.get(node_id)
+    if n is None or (n.tags.get("highway") != "traffic_signals" and n.tags.get("crossing") != "traffic_signals"):
+        raise HTTPException(404, "на узле нет светофора")
+    rows = {r["id"]: r for r in _rows(s)}
+    return signal_plans.plan(s.doc, node_id, s.signal_timing.get(node_id), rows)
+
+
+@app.get("/api/documents/{doc_id}/signals/{node_id}")
+def get_signal(doc_id: str, node_id: int) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        return _json(_signal_plan(s, node_id))
+
+
+@app.post("/api/documents/{doc_id}/signals/{node_id}")
+def set_signal(doc_id: str, node_id: int, req: SignalRequest, x_client_id: str | None = Header(default=None)) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        plan = _signal_plan(s, node_id)
+        if req.reset:
+            s.signal_timing.pop(node_id, None)
+        else:
+            cfg = dict(s.signal_timing.get(node_id, {"cycle": plan["cycle"], "main_share": plan["main_share"]}))
+            if req.optimize:
+                cfg.update(plan["webster"])
+                cfg.pop("saturated", None)
+            if req.cycle is not None:
+                cfg["cycle"] = req.cycle
+            if req.main_share is not None:
+                cfg["main_share"] = round(req.main_share, 2)
+            s.signal_timing[node_id] = cfg
+        _save_analysis(s)
+        HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
+        return _json(_signal_plan(s, node_id))
 
 
 # ------------------------------------------------------ before / after
@@ -678,7 +788,7 @@ def _report_data(s: Session, a: str | None, b: str | None) -> dict[str, Any]:
         comparison = compare_snapshots(s.snapshots[-2], s.snapshots[-1])
     elif len(s.snapshots) == 1:
         comparison = compare_snapshots(s.snapshots[0], _snapshot(s, "current"))
-    rows = road_rows(s.doc, s.loads, s.multiplier)
+    rows = _rows(s)
     return {
         "title": "Отчёт по улично-дорожной сети",
         "filename": s.filename,

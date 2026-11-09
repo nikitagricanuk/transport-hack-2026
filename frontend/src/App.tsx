@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, downloadFile, type OpResponse } from './api';
-import MapView, { type MapHandle } from './components/MapView';
+import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
+import { routeColour } from './components/Transit';
 import Inspector from './components/Inspector';
 import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail, type BottomTab } from './components/Panels';
 import { ChangesPanel, ExportCheck, LoadPanel, ReportModal } from './components/Analysis';
 import StartScreen from './components/StartScreen';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
-  ReportData, Selection, SumoResult, Tool, ValidationResult, WayProps,
+  ReportData, RouteDetail, Selection, SumoResult, Tool, ValidationResult, WayProps,
 } from './types';
 import { applyPatch } from './utils/geoPatch';
 import { sharedHighwayNodes } from './utils/joins';
@@ -53,6 +54,12 @@ export default function App() {
     }
   }, []);
   const [mapDiff, setMapDiff] = useState<GeoDiff | null>(null);
+  // houses above lawns by default; the layers panel reorders the groups
+  const [drawOrder, setDrawOrder] = useState<DrawGroup[]>(['zones', 'buildings', 'paths', 'roads', 'rail']);
+  const [openRoute, setOpenRoute] = useState<RouteDetail | null>(null);
+  const routeOverlay = useMemo<RouteOverlay | null>(() => (openRoute
+    ? { colour: routeColour(openRoute), lines: openRoute.lines, stops: openRoute.stop_list }
+    : null), [openRoute]);
   // ---- collaboration
   const [myName, setMyName] = useState(savedName);
   const [peerList, setPeerList] = useState<Peer[]>([]);
@@ -221,6 +228,10 @@ export default function App() {
     } catch (e) {
       setError((e as Error).message);
     }
+  }, []);
+  const refreshLoad = useCallback(() => {
+    const id = docIdRef.current;
+    if (id) api.load(id).then(setLoad).catch(() => undefined);
   }, []);
   const onMultiplier = useCallback((m: number) => { if (docId) loadAction(api.setLoad(docId, { multiplier: m })); }, [docId, loadAction]);
   const onSnapshot = useCallback((name: string) => { if (docId) loadAction(api.addSnapshot(docId, name)); }, [docId, loadAction]);
@@ -554,6 +565,7 @@ export default function App() {
     setLoad(null);
     setComparison(null);
     setChangesData(null);
+    setOpenRoute(null);
   };
 
   const versionNotice = stale ? <VersionNotice /> : null;
@@ -638,10 +650,12 @@ export default function App() {
         <ToolRail tool={tool} onTool={setTool} />
         <LayersPanel layers={layers} onLayers={onLayers} onSelectAll={onSelectAllLayers}
           baseOpacity={baseOpacity} onBaseOpacity={setBaseOpacity}
-          canApplyTemplate={selectedWay?.layer === 'road'} onTemplate={applyTemplate} />
+          canApplyTemplate={selectedWay?.layer === 'road'} onTemplate={applyTemplate}
+          drawOrder={drawOrder} onDrawOrder={setDrawOrder} />
         <main className="center">
           <div className="map-wrap">
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
+              drawOrder={drawOrder} route={routeOverlay}
               baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
@@ -667,7 +681,8 @@ export default function App() {
         </main>
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
-          onSetLoad={onSetLoad} onOp={onInspectorOp} />
+          onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}
+          onOpenRoute={setOpenRoute} onScenarioChanged={refreshLoad} />
       </div>
 
       <footer className="status mono">

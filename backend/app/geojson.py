@@ -57,6 +57,7 @@ def way_feature(doc: OsmDocument, w: Way) -> tuple[str, dict] | None:
         "lanes": _lanes(w.tags),
         "dir": direction(w.tags),
         "bridge": w.tags.get("bridge", "no") not in ("no", ""),
+        "z": _z(w.tags),  # OSM layer: draw order among overlapping zones/buildings
         "nodes": w.nodes,
         "tags": w.tags,
         "permissions": road_permissions(w.tags),
@@ -171,3 +172,10 @@ def _node_category(tags: dict[str, str]) -> str:
     if tags:
         return "tagged"
     return "junction"
+
+
+def _z(tags: dict[str, str]) -> int:
+    try:
+        return max(-5, min(5, int(tags.get("layer", "0"))))
+    except ValueError:
+        return 0

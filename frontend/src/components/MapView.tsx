@@ -3,6 +3,7 @@ import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEv
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import { LANE_MINZOOM, buildLanes, laneSplit, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
@@ -23,8 +24,20 @@ export interface MapHandle {
   fitBounds: (b: [number, number, number, number]) => void;
 }
 
+export type DrawGroup = 'zones' | 'buildings' | 'paths' | 'roads' | 'rail';
+
+/** Transit route drawn over the map while a stop's route is opened. */
+export interface RouteOverlay {
+  colour: string;
+  lines: number[][][];
+  stops: { id: number; name: string; coord: number[] }[];
+}
+
 interface Props {
   geo: Geo | null;
+  /** map groups from bottom to top */
+  drawOrder: DrawGroup[];
+  route: RouteOverlay | null;
   /** set when `geo` came from a patch: lets the map update only the touched features */
   diff: GeoDiff | null;
   selection: Selection;
@@ -69,13 +82,13 @@ const showIf = (map: maplibregl.Map, ids: string[], on: boolean) => {
   for (const id of ids) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visibility);
 };
 
-function arrowImage(): ImageData {
+function arrowImage(color = '#3F4652'): ImageData {
   const s = 24;
   const c = document.createElement('canvas');
   c.width = s;
   c.height = s;
   const ctx = c.getContext('2d')!;
-  ctx.strokeStyle = '#3F4652';
+  ctx.strokeStyle = color;
   ctx.lineWidth = 2.5;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -224,7 +237,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       },
       center: [104.28, 52.28],
       zoom: 15,
-      maxZoom: 21,
+      maxZoom: 22,
       doubleClickZoom: false,
       attributionControl: { compact: true },
     });
@@ -236,6 +249,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     map.addControl(new ResetViewControl(() => resetView()), 'bottom-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
     mapRef.current = map;
+    if (import.meta.env.DEV || localStorage.getItem('uds-debug')) (window as unknown as { __udsMap?: maplibregl.Map }).__udsMap = map;
     const onFullscreenEscape = (e: KeyboardEvent) => {
       if (!mapIsFullscreen(map)) return;
       if (!isEscapeKey(e)) return;
@@ -248,15 +262,23 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     map.on('load', () => {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
-      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after', 'peer-sel']) {
+      map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
+      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
+        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
       // translucent plans: the base map stays readable under buildings and zones
-      map.addLayer({ id: 'areas-fill', type: 'fill', source: 'areas',
-        paint: { 'fill-color': ['match', ['get', 'layer'], 'building', '#B8B2A6', '#9CCB86'], 'fill-opacity': 0.45 } });
-      map.addLayer({ id: 'areas-line', type: 'line', source: 'areas',
-        paint: { 'line-color': ['match', ['get', 'layer'], 'building', '#8A8273', '#6A9E55'], 'line-width': 1, 'line-opacity': 0.8 } });
+      map.addLayer({ id: 'zones-fill', type: 'fill', source: 'areas', filter: ['!=', ['get', 'layer'], 'building'],
+        layout: { 'fill-sort-key': ['coalesce', ['get', 'z'], 0] },
+        paint: { 'fill-color': '#9CCB86', 'fill-opacity': 0.45 } });
+      map.addLayer({ id: 'zones-line', type: 'line', source: 'areas', filter: ['!=', ['get', 'layer'], 'building'],
+        paint: { 'line-color': '#6A9E55', 'line-width': 1, 'line-opacity': 0.8 } });
+      map.addLayer({ id: 'buildings-fill', type: 'fill', source: 'areas', filter: ['==', ['get', 'layer'], 'building'],
+        layout: { 'fill-sort-key': ['coalesce', ['get', 'z'], 0] },
+        paint: { 'fill-color': '#B8B2A6', 'fill-opacity': 0.6 } });
+      map.addLayer({ id: 'buildings-line', type: 'line', source: 'areas', filter: ['==', ['get', 'layer'], 'building'],
+        paint: { 'line-color': '#8A8273', 'line-width': 1, 'line-opacity': 0.9 } });
       map.addLayer({ id: 'area-selected', type: 'line', source: 'areas', filter: ['==', ['get', 'id'], 0],
         paint: { 'line-color': '#2563EB', 'line-width': 2.5 } });
       for (const style of PATH_STYLES) {
@@ -284,6 +306,17 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addLayer({ id: 'road-link', type: 'line', source: 'ways', filter: linkFilter(),
         layout: { 'line-cap': 'butt', 'line-join': 'round' },
         paint: { 'line-color': roadLineColor(), 'line-width': laneWidth(), 'line-dasharray': [2, 1.4] } });
+      map.addLayer({ id: 'lane-surface', type: 'fill', source: 'lane-surface', minzoom: LANE_MINZOOM,
+        paint: { 'fill-color': '#3F4652', 'fill-opacity': ['interpolate', ['linear'], ['zoom'], LANE_MINZOOM, 0, LANE_MINZOOM + 0.5, 0.92] } });
+      map.addLayer({ id: 'lane-marks', type: 'line', source: 'lane-marks', minzoom: LANE_MINZOOM,
+        filter: ['!=', ['get', 'kind'], 'lane'],
+        paint: { 'line-color': '#F8FAFC', 'line-width': ['match', ['get', 'kind'], 'center', 2.2, 1.4] } });
+      map.addLayer({ id: 'lane-dashes', type: 'line', source: 'lane-marks', minzoom: LANE_MINZOOM,
+        filter: ['==', ['get', 'kind'], 'lane'],
+        paint: { 'line-color': '#F8FAFC', 'line-width': 1.4, 'line-dasharray': [4, 4] } });
+      map.addLayer({ id: 'lane-arrows', type: 'symbol', source: 'lane-arrows', minzoom: LANE_MINZOOM + 0.5,
+        layout: { 'symbol-placement': 'line', 'symbol-spacing': 70, 'icon-image': 'arrow-white', 'icon-size': 0.85,
+                  'icon-rotation-alignment': 'map', 'icon-allow-overlap': true } });
       map.addLayer({ id: 'rail', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'rail'],
         paint: { 'line-color': '#7C3AED', 'line-width': 2, 'line-dasharray': [3, 2] } });
       map.addLayer({ id: 'way-selected', type: 'line', source: 'ways', filter: ['==', ['get', 'id'], 0],
@@ -291,7 +324,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': '#2563EB', 'line-width': laneWidth(6), 'line-opacity': 0.35 } });
       map.addLayer({ id: 'way-selected-core', type: 'line', source: 'ways', filter: ['==', ['get', 'id'], 0],
         paint: { 'line-color': '#2563EB', 'line-width': 2.5 } });
-      map.addLayer({ id: 'oneway', type: 'symbol', source: 'ways', minzoom: 15,
+      map.addLayer({ id: 'oneway', type: 'symbol', source: 'ways', minzoom: 15, maxzoom: LANE_MINZOOM + 0.5,
         filter: ['all', ['==', ['get', 'layer'], 'road'], ['!=', ['get', 'dir'], 0]],
         layout: { 'symbol-placement': 'line', 'symbol-spacing': 60, 'icon-image': 'arrow', 'icon-size': 0.9,
                   'icon-rotate': ['case', ['==', ['get', 'dir'], -1], 180, 0], 'icon-rotation-alignment': 'map',
@@ -334,6 +367,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': ['get', 'color'], 'line-width': 7, 'line-opacity': 0.45 } });
       map.addLayer({ id: 'peer-sel-pt', type: 'circle', source: 'peer-sel', filter: ['==', ['geometry-type'], 'Point'],
         paint: { 'circle-radius': 9, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': ['get', 'color'], 'circle-stroke-width': 3 } });
+      map.addLayer({ id: 'route-lines', type: 'line', source: 'route-lines',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': ['get', 'colour'], 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 4, 18, 9], 'line-opacity': 0.75 } });
+      map.addLayer({ id: 'route-stops', type: 'circle', source: 'route-stops',
+        paint: { 'circle-radius': 6, 'circle-color': '#FFFFFF', 'circle-stroke-color': ['get', 'colour'], 'circle-stroke-width': 3 } });
       map.addLayer({ id: 'issues', type: 'circle', source: 'issues',
         paint: {
           'circle-radius': 9,
@@ -435,6 +473,54 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     (map.getSource('cmp-after') as GeoJSONSource).setData({ type: 'FeatureCollection', features: after });
   }, [ready, props.changes]);
 
+  // groups from bottom to top: each is moved just under the selection highlight, so the
+  // last one ends up on top
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const ids: Record<DrawGroup, string[]> = {
+      zones: ['zones-fill', 'zones-line'],
+      buildings: ['buildings-fill', 'buildings-line'],
+      paths: PATH_LAYER_IDS,
+      roads: ['road-casing', 'road-fill', 'road-link', 'lane-surface', 'lane-marks', 'lane-dashes', 'lane-arrows', 'oneway', 'road-label'],
+      rail: ['rail'],
+    };
+    for (const g of props.drawOrder) {
+      for (const id of ids[g]) if (map.getLayer(id)) map.moveLayer(id, 'way-selected');
+    }
+    if (map.getLayer('area-selected')) map.moveLayer('area-selected', 'way-selected');
+  }, [ready, props.drawOrder]);
+
+  // physical view: roads at real width with lanes, markings and travel direction
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map || !props.geo) return;
+    const roads: LaneRoad[] = props.geo.ways.features
+      .filter((f) => f.properties.layer === 'road')
+      .map((f) => ({ id: f.properties.id, coords: f.geometry.coordinates, ...laneSplit(f.properties.tags, f.properties.dir) }));
+    const g = buildLanes(roads);
+    (map.getSource('lane-surface') as GeoJSONSource).setData(g.surface);
+    (map.getSource('lane-marks') as GeoJSONSource).setData(g.marks);
+    (map.getSource('lane-arrows') as GeoJSONSource).setData(g.arrows);
+  }, [ready, props.geo]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const r = props.route;
+    const colour = r?.colour || '#E11D48';
+    (map.getSource('route-lines') as GeoJSONSource).setData({ type: 'FeatureCollection', features: (r?.lines ?? []).map((c) => ({
+      type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: { colour } })) });
+    (map.getSource('route-stops') as GeoJSONSource).setData({ type: 'FeatureCollection', features: (r?.stops ?? []).map((st) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: st.coord }, properties: { colour, name: st.name } })) });
+    if (r && r.lines.length) {
+      const all = r.lines.flat();
+      const lons = all.map((c) => c[0]);
+      const lats = all.map((c) => c[1]);
+      map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 60, duration: 500, maxZoom: 17 });
+    }
+  }, [ready, props.route]);
+
   const clearDrag = () => {
     const src = mapRef.current?.getSource('drag') as GeoJSONSource | undefined;
     src?.setData(EMPTY);
@@ -501,10 +587,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const map = mapRef.current;
     if (!ready || !map) return;
     const L = props.layers;
-    showIf(map, ['road-casing', 'road-fill', 'road-link', 'oneway', 'road-label', 'junctions'], L.roads);
+    showIf(map, ['road-casing', 'road-fill', 'road-link', 'oneway', 'road-label', 'junctions',
+      'lane-surface', 'lane-marks', 'lane-dashes', 'lane-arrows'], L.roads);
     showIf(map, PATH_LAYER_IDS, L.paths);
     showIf(map, ['rail'], L.rail);
-    showIf(map, ['areas-fill', 'areas-line'], L.buildings);
+    showIf(map, ['zones-fill', 'zones-line', 'buildings-fill', 'buildings-line'], L.buildings);
     showIf(map, ['issues'], L.issues);
     const cats = [L.signals && 'signal', L.crossings && 'crossing', L.stops && 'stop', 'tagged'].filter(Boolean);
     filterIf(map, 'pois', ['in', ['get', 'category'], ['literal', cats]]);
@@ -545,11 +632,14 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const pick = (e: MapMouseEvent) => {
       const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
         [e.point.x - HIT_PX, e.point.y - HIT_PX], [e.point.x + HIT_PX, e.point.y + HIT_PX]];
-      const feats = map.queryRenderedFeatures(bbox, { layers: ['join-handles', 'verts', 'pois', 'junctions', 'ways-hit', 'areas-fill'] });
+      const feats = map.queryRenderedFeatures(bbox, {
+        layers: ['join-handles', 'verts', 'pois', 'junctions', 'ways-hit', 'buildings-fill', 'zones-fill'] });
       const byLayer = (ids: string[]) => feats.find((f: MapGeoJSONFeature) => ids.includes(f.layer.id));
       const vert = byLayer(['verts']);
       const node = vert ?? byLayer(['pois', 'junctions']);
-      const way = byLayer(['ways-hit']) ?? byLayer(['areas-fill']);
+      // the topmost area under the cursor wins, so a house over a lawn picks the house
+      const area = feats.find((f: MapGeoJSONFeature) => f.layer.id === 'buildings-fill' || f.layer.id === 'zones-fill');
+      const way = byLayer(['ways-hit']) ?? area;
       const join = byLayer(['join-handles']);
       return {
         nodeId: node ? Number(node.properties.id) : undefined,
@@ -590,8 +680,14 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
           else p.onOp({ op: 'add_node', args: { lat, lon: lng } }, { select: 'result' });
           break;
         case 'signal':
+          // only junctions and crossings; a click near one snaps to it (server rule)
+          if (nodeId !== undefined) p.onOp({ op: 'place_signal', args: { node_id: nodeId } }, { select: 'result', label: 'Светофор' });
+          else if (wayId !== undefined && p.wayById(wayId)?.layer === 'road') {
+            p.onOp({ op: 'place_signal', args: { way_id: wayId, lat, lon: lng } }, { select: 'result', label: 'Светофор' });
+          } else p.onHint('Светофор ставится на перекрёсток или пешеходный переход — кликните по дороге рядом с ним');
+          break;
         case 'crossing': {
-          const signal = p.tool === 'signal';
+          const signal = false;
           if (nodeId !== undefined) {
             const cur = p.geo?.nodes.features.find((n) => n.properties.id === nodeId)?.properties.tags ?? {};
             // a signal on a crossing makes it a signalised crossing instead of erasing the crossing

@@ -88,15 +88,21 @@ def los(vc: float) -> str:
     return "F"
 
 
-def road_rows(doc: OsmDocument, loads: dict[int, float], multiplier: float) -> list[dict[str, Any]]:
+def road_rows(doc: OsmDocument, loads: dict[int, float], multiplier: float,
+              transit_pcu: dict[int, float] | None = None,
+              capacity_factor: dict[int, float] | None = None) -> list[dict[str, Any]]:
+    """transit_pcu: car equivalents of scheduled buses per way (not scaled by the demand
+    multiplier); capacity_factor: signal green-share multiplier per way."""
     proj = projection(doc)
+    transit_pcu = transit_pcu or {}
+    capacity_factor = capacity_factor or {}
     rows: list[dict[str, Any]] = []
     for w in doc.ways.values():
         if not is_drivable(w.tags) or len(w.nodes) < 2:
             continue
         hw = w.tags.get("highway", "")
         lanes = _lanes(w.tags)
-        cap = lanes * LANE_CAPACITY.get(hw, 500)
+        cap = lanes * LANE_CAPACITY.get(hw, 500) * capacity_factor.get(w.id, 1.0)
         custom = w.id in loads
         # Demand belongs to the corridor, not to its lane count: the default comes from the
         # road as it was loaded, so adding a lane lowers v/c instead of attracting more cars.
@@ -105,7 +111,8 @@ def road_rows(doc: OsmDocument, loads: dict[int, float], multiplier: float) -> l
         src_hw = src_tags.get("highway", "")
         src_cap = _lanes(src_tags) * LANE_CAPACITY.get(src_hw, 500)
         base = loads[w.id] if custom else src_cap * DEFAULT_VC.get(_base_class(src_hw), 0.2)
-        volume = base * multiplier
+        transit = transit_pcu.get(w.id, 0.0)
+        volume = base * multiplier + transit
         vc = volume / cap if cap else 0.0
         length = way_length_m(doc, w, proj)
         speed = _speed(w.tags)
@@ -114,7 +121,7 @@ def road_rows(doc: OsmDocument, loads: dict[int, float], multiplier: float) -> l
         rows.append({
             "id": w.id, "name": w.tags.get("name", ""), "highway": hw, "lanes": lanes,
             "length_m": round(length, 1), "speed": speed, "capacity": round(cap),
-            "volume": round(volume), "base_volume": round(base), "custom": custom,
+            "volume": round(volume), "base_volume": round(base), "custom": custom, "transit_pcu": round(transit),
             "vc": round(vc, 3), "los": los(vc), "t0_s": round(t0, 1), "t_s": round(t, 1),
         })
     return rows

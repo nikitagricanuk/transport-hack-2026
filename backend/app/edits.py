@@ -828,6 +828,82 @@ def op_attach_to_road(doc, tx, node_id: int, way_id: int | None = None, max_m: f
     return {"id": target, "way_id": best[1], "distance_m": round(best[0], 1)}
 
 
+SIGNAL_SNAP_M = 30.0
+SIGNAL_MOVE_M = 120.0
+
+
+def signal_spot(doc: OsmDocument, nid: int) -> str | None:
+    """'junction' or 'crossing' when a traffic signal may stand on this node, else None."""
+    n = doc.nodes.get(nid)
+    if n is None:
+        return None
+    ways = [w for w in doc.ways_of_node(nid) if is_drivable(w.tags)]
+    if not ways:
+        return None
+    if n.tags.get("highway") == "crossing" or "crossing" in n.tags:
+        return "crossing"
+    arms = 0
+    for w in ways:
+        for i, ref in enumerate(w.nodes):
+            if ref == nid:
+                arms += (i > 0) + (i < len(w.nodes) - 1)
+    return "junction" if arms >= 3 or len(ways) >= 2 else None
+
+
+def op_place_signal(doc, tx, node_id: int | None = None, way_id: int | None = None,
+                    lat: float | None = None, lon: float | None = None, move_from: int | None = None,
+                    snap_m: float = SIGNAL_SNAP_M):
+    """Put a traffic signal only where one belongs: a road junction or a crossing.
+
+    A click near such a node (on the clicked road, within ``snap_m``) snaps to it.
+    A signal on a crossing turns it into a signalised crossing. ``move_from``
+    moves an existing signal tag from a misplaced node to the nearest valid spot.
+    """
+    proj = _proj(doc)
+    target: int | None = None
+    if node_id is not None and signal_spot(doc, int(node_id)):
+        target = int(node_id)
+    else:
+        src = int(move_from) if move_from is not None else (int(node_id) if node_id is not None else None)
+        if src is not None:
+            n = _node(doc, src)
+            lat, lon = n.lat, n.lon
+            cand = {r for w in doc.ways_of_node(src) if is_drivable(w.tags) for r in w.nodes}
+        elif way_id is not None and lat is not None and lon is not None:
+            cand = set(_way(doc, int(way_id)).nodes)
+        else:
+            raise OpError("укажите узел или точку на дороге")
+        p = proj.to_xy(float(lat), float(lon))  # type: ignore[arg-type]
+        if move_from is not None:
+            snap_m = max(float(snap_m), SIGNAL_MOVE_M)  # a misplaced signal may sit mid-block
+        best = None
+        for r in cand:
+            if r == src or r not in doc.nodes or not signal_spot(doc, r):
+                continue
+            d = dist(p, proj.to_xy(doc.nodes[r].lat, doc.nodes[r].lon))
+            if d <= float(snap_m) and (best is None or d < best[0]):
+                best = (d, r)
+        if best is None:
+            raise OpError("светофор ставится только на перекрёстке или пешеходном переходе — "
+                          f"рядом (до {float(snap_m):.0f} м) их нет")
+        target = best[1]
+    if move_from is not None:
+        old = _node(doc, int(move_from))
+        if old.tags.get("highway") == "traffic_signals":
+            tx.touch("node", old.id)
+            old.tags.pop("highway", None)
+            old.tags.pop("traffic_signals", None)
+            old.tags.pop("traffic_signals:direction", None)
+    t = doc.nodes[target]
+    tx.touch("node", target)
+    if signal_spot(doc, target) == "crossing":
+        t.tags["highway"] = "crossing"
+        t.tags["crossing"] = "traffic_signals"
+    else:
+        t.tags["highway"] = "traffic_signals"
+    return {"id": target, "spot": signal_spot(doc, target)}
+
+
 LEVEL_HEIGHT_M = 5.0  # height of one OSM layer step
 RAMP_M = 60.0         # length of the approach ramp on each side
 
@@ -1139,6 +1215,7 @@ def op_smooth_z(doc, tx, way_id: int, ramp_m: float = RAMP_M, level_height: floa
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
     "smooth_z": (op_smooth_z, "Плавный Z-переход"),
     "attach_to_road": (op_attach_to_road, "Узел привязан к дороге"),
+    "place_signal": (op_place_signal, "Светофор установлен"),
     "set_tags": (op_set_tags, "Изменены теги"),
     "set_lanes": (op_set_lanes, "Изменены полосы"),
     "move_node": (op_move_node, "Перемещён узел"),

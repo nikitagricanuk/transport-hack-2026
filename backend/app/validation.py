@@ -10,7 +10,7 @@ import networkx as nx
 from .geo import GridIndex, LocalProjection, dist, project_on_segment
 from .osm_model import OsmDocument
 from .roads import ONEWAY_VALID, can_connect, default_turns, direction, is_access_way, is_drivable, parse_int
-from .edits import ATTACH_MAX_M, way_level
+from .edits import ATTACH_MAX_M, signal_spot, way_level
 
 Severity = Literal["critical", "warning", "info"]
 Category = Literal["connectivity", "direction", "junction", "lanes", "geometry", "data"]
@@ -716,6 +716,13 @@ class _Validator:
         seg_idx = None
         for n in self.doc.nodes.values():
             hw = n.tags.get("highway")
+            if hw == "traffic_signals" and n.id in self.road_node_ways and not signal_spot(self.doc, n.id):
+                self.add(category="junction", severity="warning", title="Светофор не на перекрёстке",
+                         description="Светофор стоит посреди перегона: SUMO создаст отдельный регулируемый узел "
+                                     "и остановит поток без пересекающего движения.",
+                         refs=[{"kind": "node", "id": n.id}], location=[n.lon, n.lat], levels=["sumo"],
+                         fix={"label": "Перенести на перекрёсток", "op": "place_signal", "args": {"move_from": n.id}})
+                continue
             if hw in ("traffic_signals", "crossing") and n.id not in self.road_node_ways:
                 if seg_idx is None:
                     seg_idx = self._segment_index()
