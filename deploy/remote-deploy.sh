@@ -32,6 +32,8 @@ cd "$DEPLOY_DIR"
 echo "deploy dir: ${DEPLOY_DIR}"
 
 umask 022
+# Rewrite only docker-compose.yml. app.env (ORGANIZER_TOKEN, TEAM_NAME) lives
+# in this directory and must survive every deploy — do not delete or truncate it.
 printf '%s' "$COMPOSE_B64" | base64 -d > docker-compose.yml
 
 # Credentials are written only under this directory, never ~/.docker.

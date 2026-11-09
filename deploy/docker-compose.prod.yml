@@ -18,6 +18,11 @@ services:
     environment:
       UDS_DATA_DIR: /data
       UDS_STATIC_DIR: /app/static
+    # app.env sits next to this file on the server (mode 600) and is not
+    # rewritten by deploy. required: false so a missing file still starts.
+    env_file:
+      - path: app.env
+        required: false
     volumes:
       - transport-hack-data:/data
     healthcheck:
