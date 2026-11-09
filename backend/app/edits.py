@@ -796,6 +796,27 @@ def _join_crossings(doc: OsmDocument, tx: Transaction, way_ids: list[int]) -> li
             nid = alias[nid]
         return nid
 
+    def blocked_merge(keep_id: int, remove_id: int) -> bool:
+        """True when merging would tie a highway to one it must not meet.
+
+        Snapping to a vertex is not enough: that vertex may already sit on a
+        motorway while the segment we crossed is only its link.
+        """
+        blocked = False
+        for a in _link_ways(doc, keep_id):
+            for b in _link_ways(doc, remove_id):
+                if a.id == b.id:
+                    continue
+                msg = can_connect(a.tags, b.tags)
+                if not msg:
+                    continue
+                blocked = True
+                key = (min(a.id, b.id), max(a.id, b.id))
+                if key not in warned:
+                    warned.add(key)
+                    warnings.append(msg)
+        return blocked
+
     def thread(wid: int, nid: int) -> int:
         nid = resolve(nid)
         w = doc.ways.get(wid)
@@ -804,6 +825,8 @@ def _join_crossings(doc: OsmDocument, tx: Transaction, way_ids: list[int]) -> li
         n = doc.nodes[nid]
         placed = _insert_on_way(doc, tx, wid, n.lat, n.lon, None, snap_m=0.8)
         if placed != nid and placed in doc.nodes and nid in doc.nodes:
+            if blocked_merge(placed, nid):
+                return nid  # the snap target is shared with a forbidden road
             _merge_nodes(doc, tx, placed, nid)
             alias[nid] = placed
             return placed
@@ -817,8 +840,9 @@ def _join_crossings(doc: OsmDocument, tx: Transaction, way_ids: list[int]) -> li
             prefer_id = None
         nid = _insert_on_way(doc, tx, wa, lat, lon, None, snap_m=0.8)
         if prefer_id is not None and prefer_id != nid and prefer_id in doc.nodes and nid in doc.nodes:
-            _merge_nodes(doc, tx, nid, prefer_id)
-            alias[prefer_id] = nid
+            if not blocked_merge(nid, prefer_id):
+                _merge_nodes(doc, tx, nid, prefer_id)
+                alias[prefer_id] = nid
         if nid not in doc.nodes:
             nid = resolve(nid)
         if nid in doc.nodes:

@@ -248,6 +248,82 @@ def test_driveway_and_sidewalk_at_an_entrance_are_not_connectivity_errors(doc):
     assert any(i["title"] == "Изолированное ребро" for i in field)
 
 
+def test_crossing_near_a_motorway_junction_does_not_adopt_that_node(doc):
+    """A link may cross a motorway, but a residential must not snap onto that junction."""
+    h = History()
+    motorway = apply_op(doc, h, "add_way", {"points": [
+        {"lat": 52.2830, "lon": 104.2840}, {"lat": 52.2830, "lon": 104.2860},
+    ], "tags": {"highway": "motorway"}})["id"]
+    link = apply_op(doc, h, "add_way", {"points": [
+        {"lat": 52.2825, "lon": 104.2850}, {"lat": 52.2835, "lon": 104.2850},
+    ], "tags": {"highway": "motorway_link"}})["id"]
+    junction = _shared(doc, motorway, link)
+    assert len(junction) == 1
+    # 0.6 m north of the junction: inside the 0.8 m snap, still on the link.
+    residential = apply_op(doc, h, "add_way", {"points": [
+        {"lat": 52.2830054, "lon": 104.2847}, {"lat": 52.2830054, "lon": 104.2853},
+    ], "tags": {"highway": "residential"}})["id"]
+    assert not (set(doc.ways[residential].nodes) & set(doc.ways[motorway].nodes))
+    assert not (set(doc.ways[residential].nodes) & junction)
+    assert not _shared(doc, residential, link)
+
+
+def test_trap_connect_ignores_the_road_that_already_contains_the_node():
+    doc = OsmDocument.parse(b"""<?xml version="1.0"?><osm version="0.6">
+      <node id="1" lat="52.2800" lon="104.2800"/>
+      <node id="2" lat="52.2804" lon="104.2800"/>
+      <node id="7" lat="52.2804" lon="104.2796"/>
+      <node id="3" lat="52.2808" lon="104.2800"/>
+      <node id="4" lat="52.2812" lon="104.2800"/>
+      <node id="5" lat="52.2808" lon="104.2802"/>
+      <node id="6" lat="52.2810" lon="104.2802"/>
+      <way id="1"><nd ref="1"/><nd ref="2"/><nd ref="7"/><tag k="highway" v="residential"/></way>
+      <way id="2"><nd ref="2"/><nd ref="3"/>
+        <tag k="highway" v="residential"/><tag k="oneway" v="yes"/></way>
+      <way id="3"><nd ref="3"/><nd ref="4"/><tag k="highway" v="residential"/></way>
+      <way id="4"><nd ref="5"/><nd ref="6"/><tag k="highway" v="residential"/></way>
+    </osm>""")
+    traps = [i for i in validate(doc)["issues"] if "ловуш" in i["title"].lower()]
+    assert traps
+    connect = next(f for f in traps[0]["fixes"] if f["op"] == "connect_endpoint")
+    assert connect["args"]["node_id"] == 3
+    assert connect["args"]["way_id"] == 4
+    assert not (set(doc.ways[2].nodes) & set(doc.ways[4].nodes))
+    apply_op(doc, History(), connect["op"], connect["args"])
+    # connecting must actually tie the trap to way 4, not no-op on the road it already touches
+    assert set(doc.ways[2].nodes) & set(doc.ways[4].nodes)
+
+
+def test_gap_connect_fix_does_not_target_a_motorway(doc):
+    h = History()
+    apply_op(doc, h, "add_way", {"points": [
+        {"lat": 52.2860, "lon": 104.2860}, {"lat": 52.2860, "lon": 104.2880},
+    ], "tags": {"highway": "motorway"}})
+    service = apply_op(doc, h, "add_way", {"points": [
+        {"lat": 52.28610, "lon": 104.2872}, {"lat": 52.28610, "lon": 104.2878},
+    ], "tags": {"highway": "service"}})["id"]
+    # south end is ~4.4 m from the motorway and ~6.6 m from the service road
+    near_both = apply_op(doc, h, "add_way", {"points": [
+        {"lat": 52.28604, "lon": 104.2875}, {"lat": 52.28620, "lon": 104.2875},
+    ], "tags": {"highway": "residential"}})["id"]
+    only_motorway = apply_op(doc, h, "add_way", {"points": [
+        {"lat": 52.28604, "lon": 104.2863}, {"lat": 52.28620, "lon": 104.2863},
+    ], "tags": {"highway": "residential"}})["id"]
+    issues = validate(doc)["issues"]
+
+    def gap(nid):
+        return next(i for i in issues if i["title"] == "Разорванный перекрёсток"
+                    and any(r["kind"] == "node" and r["id"] == nid for r in i["refs"]))
+
+    south = doc.ways[near_both].nodes[0]
+    chosen = gap(south)
+    connects = [f for f in chosen["fixes"] if f["op"] == "connect_endpoint"]
+    assert len(connects) == 1 and connects[0]["args"]["way_id"] == service
+    apply_op(doc, h, connects[0]["op"], connects[0]["args"])
+    far = doc.ways[only_motorway].nodes[0]
+    assert not any(f["op"] == "connect_endpoint" for f in gap(far)["fixes"])
+
+
 def test_oneway_driveway_into_an_entrance_is_not_a_trap(doc):
     doc.nodes[70] = Node(70, 52.2804, 104.280, {"entrance": "main"})
     # node 1 is the west end of the primary, two-way. The spur runs north, one-way.

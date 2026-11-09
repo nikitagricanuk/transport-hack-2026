@@ -241,18 +241,32 @@ class _Validator:
             p = self.xy(nid)
             if p is None:
                 continue
-            best = None
+            nearest = None
+            allowed = None
             for (owid, a, b) in seg_idx.query(p[0], p[1], GAP_M):
                 if owid == w.id:
                     continue
+                other = self.doc.ways.get(owid)
                 pa, pb = self.xy(a), self.xy(b)
-                _, _, d = project_on_segment(p, pa, pb)  # type: ignore[arg-type]
-                if d <= GAP_M and (best is None or d < best[0]):
-                    best = (d, owid)
-            if best is None:
+                if other is None or pa is None or pb is None:
+                    continue
+                _, _, d = project_on_segment(p, pa, pb)
+                if d > GAP_M:
+                    continue
+                if nearest is None or d < nearest[0]:
+                    nearest = (d, owid)
+                # «Соединить» must be a target op_connect_endpoint will accept.
+                if can_connect(w.tags, other.tags):
+                    continue
+                if allowed is None or d < allowed[0]:
+                    allowed = (d, owid)
+            if nearest is None:
                 continue
-            d, owid = best
-            fixes = [{"label": "Соединить", "op": "connect_endpoint", "args": {"node_id": nid, "way_id": owid}}]
+            d, owid = nearest
+            fixes = []
+            if allowed is not None:
+                fixes.append({"label": "Соединить", "op": "connect_endpoint",
+                              "args": {"node_id": nid, "way_id": allowed[1]}})
             if self._fully_dangling(w):
                 fixes.append({"label": "Удалить", "op": "delete", "args": {"kind": "way", "id": w.id}})
             self.add(category="junction", severity="warning", title="Разорванный перекрёсток",
@@ -610,7 +624,7 @@ class _Validator:
         src = [self.doc.ways[w] for w in self.road_node_ways.get(nid, []) if w in self.doc.ways]
         best: tuple[float, int] | None = None
         for w in self.road_ways:
-            if w.id in exclude:
+            if w.id in exclude or nid in w.nodes:
                 continue
             if any(can_connect(s.tags, w.tags) for s in src):
                 continue
