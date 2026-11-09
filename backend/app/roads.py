@@ -15,6 +15,46 @@ ONEWAY_BACKWARD = {"-1", "reverse"}
 ONEWAY_VALID = ONEWAY_FORWARD | ONEWAY_BACKWARD | {"no", "false", "0", "reversible", "alternating"}
 
 
+# Pedestrian and cycle ways must not be tied into a controlled-access road.
+_NONMOTOR = frozenset({
+    "footway", "pedestrian", "path", "cycleway", "steps", "bridleway", "corridor",
+})
+# motorway_link is the only ramp that may touch a motorway; trunk_link is not.
+_FAST = frozenset({"motorway", "motorway_link", "trunk", "trunk_link"})
+
+
+def can_connect(a: dict[str, str], b: dict[str, str]) -> str | None:
+    """``None`` when two highways may share a node, otherwise a Russian reason.
+
+    A footway (and the other walking/cycling classes) must not merge into a
+    motorway or trunk. A motorway itself only connects to another motorway or
+    to ``motorway_link`` — a primary, a residential street or a driveway has to
+    meet the motorway through a link road. Same class, and every ordinary
+    urban pair (footway × residential, service × primary), is allowed.
+    """
+    ha = a.get("highway") or ""
+    hb = b.get("highway") or ""
+    if not ha or not hb or ha == hb:
+        return None
+    pair = {ha, hb}
+    if (pair & _NONMOTOR) and (pair & _FAST):
+        return "Пешеходная или велосипедная дорога не соединяется с магистралью"
+    if "motorway" in pair and not pair <= {"motorway", "motorway_link"}:
+        return "Автомагистраль соединяется только через съезд (motorway_link)"
+    return None
+
+
+def is_access_way(tags: dict[str, str]) -> bool:
+    """Driveway or sidewalk: a local access link that may end at a building door.
+
+    ``service=driveway`` and ``footway=sidewalk`` are the OSM tags for the spur
+    that stops at an entrance. A generic footway or service road is not.
+    """
+    if tags.get("service") == "driveway":
+        return True
+    return tags.get("footway") == "sidewalk"
+
+
 def is_drivable(tags: dict[str, str]) -> bool:
     if tags.get("highway") not in DRIVABLE:
         return False

@@ -33,6 +33,36 @@ def dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+def segment_intersection(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+) -> tuple[float, float] | None:
+    """Parameters ``(t, u)`` where segment ``ab`` meets ``cd``, both in ``[0, 1]``.
+
+    ``None`` when the segments are parallel or do not meet. A shared endpoint is
+    a real hit (``t`` or ``u`` is 0 or 1); callers decide whether that counts as
+    a new junction.
+    """
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    dx, dy = d
+    rx, ry = bx - ax, by - ay
+    sx, sy = dx - cx, dy - cy
+    denom = rx * sy - ry * sx
+    if abs(denom) < 1e-9:
+        return None
+    qpx, qpy = cx - ax, cy - ay
+    t = (qpx * sy - qpy * sx) / denom
+    u = (qpx * ry - qpy * rx) / denom
+    eps = 1e-9
+    if -eps <= t <= 1.0 + eps and -eps <= u <= 1.0 + eps:
+        return (min(1.0, max(0.0, t)), min(1.0, max(0.0, u)))
+    return None
+
+
 def project_on_segment(
     p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
 ) -> tuple[tuple[float, float], float, float]:

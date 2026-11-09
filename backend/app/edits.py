@@ -11,9 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .geo import LocalProjection, dist, project_on_segment
+from .geo import GridIndex, LocalProjection, dist, project_on_segment, segment_intersection
 from .osm_model import Element, Kind, Member, Node, OsmDocument, Relation, Way, clone
-from .roads import direction, is_drivable, lane_tags, parse_int, reversed_tags
+from .roads import can_connect, direction, is_drivable, lane_tags, parse_int, reversed_tags
 
 
 class OpError(ValueError):
@@ -258,7 +258,9 @@ def op_move_node(doc, tx, id: int, lat: float, lon: float):
     n = _node(doc, int(id))
     tx.touch("node", n.id)
     n.set_position(float(lat), float(lon))
-    return {"id": n.id}
+    # Dragging a vertex across another road is an overlay: split both at the crossing.
+    warnings = _join_crossings(doc, tx, [w.id for w in doc.ways_of_node(n.id)])
+    return _with_warnings({"id": n.id}, warnings)
 
 
 def op_add_node(doc, tx, lat: float, lon: float, tags: dict | None = None):
@@ -273,6 +275,15 @@ def op_add_way(doc, tx, points: list[dict], tags: dict | None = None):
     """points: [{"id": node_id} | {"lat":..,"lon":..} | {"lat":..,"lon":..,"way_id":..}]"""
     if len(points) < 2:
         raise OpError("ребро должно содержать минимум две точки")
+    new_tags = _clean_tags(tags or {"highway": "residential"})
+    # Snapping to an existing node or way is an explicit connection: block it
+    # before any geometry is created. A free-drawn line that merely crosses an
+    # incompatible road is kept and reported by ``_join_crossings`` instead.
+    for p in points:
+        if p.get("id") is not None:
+            _assert_compatible_with(doc, new_tags, _link_ways(doc, int(p["id"])))
+        elif p.get("way_id") is not None:
+            _assert_compatible_with(doc, new_tags, [_way(doc, int(p["way_id"]))])
     refs: list[int] = []
     for p in points:
         if p.get("id") is not None:
@@ -286,8 +297,9 @@ def op_add_way(doc, tx, points: list[dict], tags: dict | None = None):
         raise OpError("ребро должно соединять минимум два разных узла")
     wid = doc.new_id()
     tx.touch("way", wid)
-    doc.ways[wid] = Way(id=wid, nodes=refs, tags=_clean_tags(tags or {"highway": "residential"}))
-    return {"id": wid}
+    doc.ways[wid] = Way(id=wid, nodes=refs, tags=new_tags)
+    warnings = _join_crossings(doc, tx, [wid])
+    return _with_warnings({"id": wid}, warnings)
 
 
 def op_delete(doc, tx, kind: Kind, id: int):
@@ -527,14 +539,23 @@ def op_split_way(doc, tx, way_id: int, node_id: int):
 
 
 def op_merge_nodes(doc, tx, keep_id: int, remove_id: int):
-    _merge_nodes(doc, tx, int(keep_id), int(remove_id))
-    return {"id": int(keep_id)}
+    keep_id, remove_id = int(keep_id), int(remove_id)
+    _assert_node_link(doc, keep_id, remove_id)
+    _merge_nodes(doc, tx, keep_id, remove_id)
+    return {"id": keep_id}
 
 
 def op_connect_endpoint(doc, tx, node_id: int, way_id: int):
     """Attach a dangling node to the nearest point of another way."""
     n = _node(doc, int(node_id))
-    target = _insert_on_way(doc, tx, int(way_id), n.lat, n.lon, None, snap_m=3.0)
+    target_way = _way(doc, int(way_id))
+    for w in _link_ways(doc, n.id):
+        if w.id == target_way.id:
+            continue
+        msg = can_connect(w.tags, target_way.tags)
+        if msg:
+            raise OpError(msg)
+    target = _insert_on_way(doc, tx, target_way.id, n.lat, n.lon, None, snap_m=3.0)
     if target != n.id:
         _merge_nodes(doc, tx, target, n.id)
     return {"id": target}
@@ -601,6 +622,232 @@ def way_level(tags: dict[str, str]) -> int:
     if tags.get("tunnel") not in (None, "no"):
         return -1
     return 0
+
+
+def same_grade(a: dict[str, str], b: dict[str, str]) -> bool:
+    """True when two ways may meet in plan: same level and the same bridge/tunnel flags.
+
+    ``layer=1`` does not meet a ground road, a bridge does not meet a road that
+    is not a bridge, and a tunnel does not meet either. Two bridges on the same
+    layer do meet.
+    """
+    def raised(tags: dict[str, str], key: str) -> bool:
+        return tags.get(key) not in (None, "no")
+
+    return (
+        way_level(a) == way_level(b)
+        and raised(a, "bridge") == raised(b, "bridge")
+        and raised(a, "tunnel") == raised(b, "tunnel")
+    )
+
+
+# Endpoint placed on another carriageway (a click a pixel off the line).
+# Interior vertices only snap when they are essentially on the line, so a
+# parallel carriageway a metre away is left alone.
+_ENDPOINT_SNAP_M = 1.0
+_VERTEX_ON_LINE_M = 0.35
+
+
+def _link_ways(doc: OsmDocument, nid: int) -> list[Way]:
+    return [w for w in doc.ways_of_node(nid) if "highway" in w.tags and w.tags.get("area") != "yes"]
+
+
+def _assert_compatible_with(doc: OsmDocument, tags: dict[str, str], others: list[Way]) -> None:
+    for w in others:
+        if w.tags.get("area") == "yes" or "highway" not in w.tags:
+            continue
+        msg = can_connect(tags, w.tags)
+        if msg:
+            raise OpError(msg)
+
+
+def _assert_node_link(doc: OsmDocument, a: int, b: int) -> None:
+    """Merging these nodes must not tie incompatible highway classes together."""
+    for wa in _link_ways(doc, a):
+        for wb in _link_ways(doc, b):
+            if wa.id == wb.id:
+                continue
+            msg = can_connect(wa.tags, wb.tags)
+            if msg:
+                raise OpError(msg)
+
+
+def _with_warnings(result: dict, warnings: list[str]) -> dict:
+    if warnings:
+        result = {**result, "warnings": warnings}
+    return result
+
+
+def _join_crossings(doc: OsmDocument, tx: Transaction, way_ids: list[int]) -> list[str]:
+    """Insert a shared node where ``way_ids`` cross another highway at the same grade.
+
+    A bridge, tunnel or different ``layer`` is left unsplit. Classes that
+    ``can_connect`` rejects are also left unsplit; the returned strings are
+    warnings for the UI. The roads themselves stay.
+    """
+    warnings: list[str] = []
+    warned: set[tuple[int, int]] = set()
+    ids = [
+        wid for wid in dict.fromkeys(int(w) for w in way_ids)
+        if (w := doc.ways.get(int(wid))) is not None and "highway" in w.tags
+        and w.tags.get("area") != "yes" and len(w.nodes) >= 2
+    ]
+    if not ids:
+        return warnings
+    proj = _proj(doc)
+
+    def xy_of(nid: int) -> tuple[float, float] | None:
+        n = doc.nodes.get(nid)
+        return None if n is None else proj.to_xy(n.lat, n.lon)
+
+    segments: list[tuple] = []
+    idx = GridIndex(cell=40.0)
+    for w in doc.ways.values():
+        if "highway" not in w.tags or w.tags.get("area") == "yes" or len(w.nodes) < 2:
+            continue
+        pts = [xy_of(nid) for nid in w.nodes]
+        for i in range(len(w.nodes) - 1):
+            pa, pb = pts[i], pts[i + 1]
+            if pa is None or pb is None or dist(pa, pb) < 0.05:
+                continue
+            item = (w.id, i, pa, pb)
+            segments.append(item)
+            idx.insert_box(pa[0], pa[1], pb[0], pb[1], item)
+
+    def skip(a: Way, b: Way) -> bool:
+        if not same_grade(a.tags, b.tags):
+            return True
+        msg = can_connect(a.tags, b.tags)
+        if not msg:
+            return False
+        key = (min(a.id, b.id), max(a.id, b.id))
+        if key not in warned:
+            warned.add(key)
+            warnings.append(msg)
+        return True
+
+    # (lat, lon, way a, way b, prefer existing node or None)
+    jobs: list[tuple[float, float, int, int, int | None]] = []
+    seen: set[tuple] = set()
+
+    def add_job(x: float, y: float, wa: int, wb: int, prefer: int | None) -> None:
+        key = (min(wa, wb), max(wa, wb), round(x * 2), round(y * 2))
+        if key in seen:
+            return
+        seen.add(key)
+        lat, lon = proj.to_latlon(x, y)
+        jobs.append((lat, lon, wa, wb, prefer))
+
+    for wid in ids:
+        w = doc.ways[wid]
+        ends = {w.nodes[0], w.nodes[-1]}
+        for nid in dict.fromkeys(w.nodes):
+            p = xy_of(nid)
+            if p is None:
+                continue
+            tol = _ENDPOINT_SNAP_M if nid in ends else _VERTEX_ON_LINE_M
+            for ow, _i, pa, pb in idx.query(p[0], p[1], tol):
+                if ow == wid or ow not in doc.ways:
+                    continue
+                other = doc.ways[ow]
+                q, _t, d = project_on_segment(p, pa, pb)
+                if d > tol or nid in other.nodes or skip(w, other):
+                    continue
+                add_job(q[0], q[1], wid, ow, nid)
+
+    for wid in ids:
+        w = doc.ways[wid]
+        for sw, i, pa, pb in segments:
+            if sw != wid:
+                continue
+            mid = ((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2)
+            for ow, j, qa, qb in idx.query(mid[0], mid[1], dist(pa, pb) / 2 + _ENDPOINT_SNAP_M):
+                if ow == wid or ow not in doc.ways:
+                    continue
+                other = doc.ways[ow]
+                hit = segment_intersection(pa, pb, qa, qb)
+                if hit is None:
+                    continue
+                t, u = hit
+                # Both hits hugging endpoints means the ways already meet, or the
+                # vertex pass above will snap them. Interior crossings fall through.
+                if min(t, 1 - t) * dist(pa, pb) < 0.3 and min(u, 1 - u) * dist(qa, qb) < 0.3:
+                    continue
+                if skip(w, other):
+                    continue
+                x = pa[0] + (pb[0] - pa[0]) * t
+                y = pa[1] + (pb[1] - pa[1]) * t
+                prefer = None
+                for nid, origin in (
+                    (w.nodes[i], pa), (w.nodes[min(i + 1, len(w.nodes) - 1)], pb),
+                    (other.nodes[j], qa), (other.nodes[min(j + 1, len(other.nodes) - 1)], qb),
+                ):
+                    if nid in doc.nodes and dist((x, y), origin) <= 0.5:
+                        prefer = nid
+                        break
+                add_job(x, y, wid, ow, prefer)
+
+    alias: dict[int, int] = {}
+
+    def resolve(nid: int) -> int:
+        seen_ids: set[int] = set()
+        while nid in alias and nid not in seen_ids:
+            seen_ids.add(nid)
+            nid = alias[nid]
+        return nid
+
+    def blocked_merge(keep_id: int, remove_id: int) -> bool:
+        """True when merging would tie a highway to one it must not meet.
+
+        Snapping to a vertex is not enough: that vertex may already sit on a
+        motorway while the segment we crossed is only its link.
+        """
+        blocked = False
+        for a in _link_ways(doc, keep_id):
+            for b in _link_ways(doc, remove_id):
+                if a.id == b.id:
+                    continue
+                msg = can_connect(a.tags, b.tags)
+                if not msg:
+                    continue
+                blocked = True
+                key = (min(a.id, b.id), max(a.id, b.id))
+                if key not in warned:
+                    warned.add(key)
+                    warnings.append(msg)
+        return blocked
+
+    def thread(wid: int, nid: int) -> int:
+        nid = resolve(nid)
+        w = doc.ways.get(wid)
+        if w is None or nid not in doc.nodes or nid in w.nodes:
+            return nid
+        n = doc.nodes[nid]
+        placed = _insert_on_way(doc, tx, wid, n.lat, n.lon, None, snap_m=0.8)
+        if placed != nid and placed in doc.nodes and nid in doc.nodes:
+            if blocked_merge(placed, nid):
+                return nid  # the snap target is shared with a forbidden road
+            _merge_nodes(doc, tx, placed, nid)
+            alias[nid] = placed
+            return placed
+        return placed if placed in doc.nodes else nid
+
+    for lat, lon, wa, wb, prefer in jobs:
+        if wa not in doc.ways or wb not in doc.ways:
+            continue
+        prefer_id = resolve(prefer) if prefer is not None else None
+        if prefer_id is not None and prefer_id not in doc.nodes:
+            prefer_id = None
+        nid = _insert_on_way(doc, tx, wa, lat, lon, None, snap_m=0.8)
+        if prefer_id is not None and prefer_id != nid and prefer_id in doc.nodes and nid in doc.nodes:
+            if not blocked_merge(nid, prefer_id):
+                _merge_nodes(doc, tx, nid, prefer_id)
+                alias[prefer_id] = nid
+        if nid not in doc.nodes:
+            nid = resolve(nid)
+        if nid in doc.nodes:
+            thread(wb, nid)
+    return warnings
 
 
 def _set_ele(doc: OsmDocument, tx: Transaction, nid: int, value: float) -> None:
