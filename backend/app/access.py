@@ -1,9 +1,11 @@
 """Boolean access flags for a way, stored as OSM access tags.
 
-A checkbox is true when the mode may use the way. The specific tag wins
+A checkbox is true when the mode may use the way. The mode's own tag wins
 (``foot=designated`` stays allowed and is not rewritten until the user edits
-it). Otherwise ``access=*`` applies, and otherwise the usual default for that
-``highway`` class. Editing a checkbox writes ``yes`` or ``no`` on that tag.
+it). Otherwise the OSM access hierarchy applies: parent tags such as
+``motor_vehicle`` and ``vehicle``, then ``access``, and only then the usual
+default for that ``highway`` class. Editing a checkbox writes ``yes`` or
+``no`` on that tag.
 """
 
 from __future__ import annotations
@@ -30,6 +32,22 @@ _ALLOWED = frozenset({
 _DENIED = frozenset({"no", "private", "use_sidepath", "separate", "dismount"})
 
 _OPEN: dict[str, bool] = {key: True for key in PERMISSIONS}
+
+# Nearest parent first; ``access`` is applied after these, then highway defaults.
+# Land-based tree: https://wiki.openstreetmap.org/wiki/Key:access#Land-based_transportation
+# Foot, horse, and wheelchair sit outside ``vehicle`` (wheelchair is a physical
+# restriction, not a child of ``foot``). Bicycle inherits ``vehicle`` only.
+# Motorcycle, moped, hgv, and psv inherit ``motor_vehicle``, then ``vehicle``.
+_PARENTS: dict[str, tuple[str, ...]] = {
+    "foot": (),
+    "bicycle": ("vehicle",),
+    "horse": (),
+    "motorcycle": ("motor_vehicle", "vehicle"),
+    "hgv": ("motor_vehicle", "vehicle"),
+    "psv": ("motor_vehicle", "vehicle"),
+    "moped": ("motor_vehicle", "vehicle"),
+    "wheelchair": (),
+}
 
 
 def _profile(**overrides: bool) -> dict[str, bool]:
@@ -86,13 +104,18 @@ def _defaults(highway: str) -> dict[str, bool]:
 
 
 def permission_allowed(tags: dict[str, str], key: str) -> bool:
-    """Whether ``key`` (an OSM access tag) is allowed on this way."""
-    specific = _flag(tags.get(key))
-    if specific is not None:
-        return specific
-    general = _flag(tags.get("access"))
-    if general is not None:
-        return general
+    """Whether ``key`` (an OSM access tag) is allowed on this way.
+
+    The first recognised value wins: the mode tag, then its parent tags, then
+    ``access``. An unrecognised token is skipped. Highway defaults apply only
+    when that chain has no recognised value, so ``motor_vehicle=no`` denies
+    motorcycle, hgv, psv, and moped, and ``motor_vehicle=yes`` allows them
+    even when ``access=no``.
+    """
+    for tag in (key, *_PARENTS.get(key, ()), "access"):
+        flag = _flag(tags.get(tag))
+        if flag is not None:
+            return flag
     return _defaults(tags.get("highway", "")).get(key, False)
 
 

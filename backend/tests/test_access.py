@@ -2,7 +2,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.access import PERMISSIONS, permission_allowed, road_permissions
+from app.access import PERMISSIONS, _PARENTS, permission_allowed, road_permissions
 from app.edits import History, apply_op
 from app.geojson import to_geojson
 from app.main import app
@@ -56,6 +56,82 @@ def test_specific_tag_wins_over_access_and_default():
     assert permission_allowed({"highway": "residential", "access": "private"}, "psv") is False
     # an unknown token is not guessed; the class default remains, and the tag is left alone
     assert permission_allowed({"highway": "residential", "foot": "sometimes"}, "foot") is True
+
+
+_MOTOR = ("motorcycle", "hgv", "psv", "moped")
+_OUTSIDE_VEHICLE = ("foot", "horse", "wheelchair")
+
+
+def _shown(tags: dict[str, str]) -> dict[str, bool]:
+    """Permissions the inspector reads from the way's GeoJSON properties."""
+    body = "\n".join(f'    <tag k="{k}" v="{v}"/>' for k, v in tags.items())
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="1" lat="52.28" lon="104.28"/>
+  <node id="2" lat="52.281" lon="104.281"/>
+  <way id="10"><nd ref="1"/><nd ref="2"/>
+{body}
+  </way>
+</osm>
+""".encode()
+    feature = to_geojson(OsmDocument.parse(xml))["ways"]["features"][0]
+    return feature["properties"]["permissions"]
+
+
+def test_every_mode_names_its_parents():
+    assert set(_PARENTS) == set(PERMISSIONS)
+
+
+def test_parent_tags_resolve_before_access_and_highway_defaults():
+    # The car-access control writes motor_vehicle. A residential ban must show
+    # those modes as prohibited; the modes outside that branch keep the default.
+    banned = road_permissions({"highway": "residential", "motor_vehicle": "no"})
+    assert {key: banned[key] for key in _MOTOR} == {key: False for key in _MOTOR}
+    assert banned["bicycle"] is True
+    assert {key: banned[key] for key in _OUTSIDE_VEHICLE} == {key: True for key in _OUTSIDE_VEHICLE}
+    assert _shown({"highway": "residential", "motor_vehicle": "no"}) == banned
+
+    # access=no does not hide an explicit motor_vehicle=yes.
+    opened = road_permissions({"highway": "residential", "access": "no", "motor_vehicle": "yes"})
+    assert {key: opened[key] for key in _MOTOR} == {key: True for key in _MOTOR}
+    assert opened["bicycle"] is False
+    assert {key: opened[key] for key in _OUTSIDE_VEHICLE} == {key: False for key in _OUTSIDE_VEHICLE}
+    assert _shown({"highway": "residential", "access": "no", "motor_vehicle": "yes"}) == opened
+
+    # vehicle sits between motor_vehicle and access. It covers bicycles too,
+    # and it does not cover foot, horse, or wheelchair.
+    vehicles_out = road_permissions({"highway": "residential", "vehicle": "no"})
+    assert vehicles_out["bicycle"] is False
+    assert {key: vehicles_out[key] for key in _MOTOR} == {key: False for key in _MOTOR}
+    assert {key: vehicles_out[key] for key in _OUTSIDE_VEHICLE} == {key: True for key in _OUTSIDE_VEHICLE}
+
+    both = {"highway": "residential", "access": "no", "vehicle": "yes", "motor_vehicle": "no"}
+    assert permission_allowed(both, "bicycle") is True
+    assert permission_allowed(both, "psv") is False
+    assert permission_allowed(both, "foot") is False
+    # the mode tag still beats its parents
+    assert permission_allowed({**both, "motorcycle": "yes"}, "motorcycle") is True
+    assert permission_allowed({**both, "motorcycle": "yes"}, "hgv") is False
+    # an unknown token is skipped, so the parent is not ignored
+    assert permission_allowed(
+        {"highway": "residential", "motorcycle": "sometimes", "motor_vehicle": "no"}, "motorcycle",
+    ) is False
+
+    # parents override the highway default in either direction
+    assert permission_allowed({"highway": "motorway", "motor_vehicle": "no"}, "motorcycle") is False
+    assert permission_allowed({"highway": "motorway"}, "motorcycle") is True
+    assert permission_allowed({"highway": "footway", "motor_vehicle": "yes"}, "moped") is True
+    assert permission_allowed({"highway": "footway"}, "moped") is False
+    assert permission_allowed({"highway": "motorway", "access": "no", "motor_vehicle": "yes"}, "moped") is True
+    # no highway: closed until a tag on the chain says otherwise
+    assert permission_allowed({"motor_vehicle": "yes"}, "hgv") is True
+    assert permission_allowed({"motor_vehicle": "yes"}, "foot") is False
+
+    # the control's other value, and a sibling tag that is not a parent
+    assert permission_allowed({"highway": "residential", "motor_vehicle": "destination"}, "hgv") is True
+    assert permission_allowed({"highway": "residential", "motor_vehicle": "private"}, "psv") is False
+    assert permission_allowed({"highway": "residential", "motorcar": "no"}, "motorcycle") is True
+    assert permission_allowed({"highway": "residential", "foot": "no"}, "wheelchair") is True
 
 
 def test_permissions_round_trip_through_valid_osm():
