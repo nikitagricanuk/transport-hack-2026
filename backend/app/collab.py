@@ -97,6 +97,9 @@ def clean_presence(data: dict[str, Any]) -> dict[str, Any]:
     sel = data.get("selection")
     if sel is None or (isinstance(sel, dict) and sel.get("kind") in ("way", "node") and isinstance(sel.get("id"), int)):
         out["selection"] = sel
+    view = data.get("view")
+    if isinstance(view, dict) and isinstance(view.get("zoom"), (int, float)) and isinstance(view.get("center"), list)             and len(view["center"]) == 2 and all(isinstance(v, (int, float)) for v in view["center"]):
+        out["view"] = {"center": view["center"], "zoom": view["zoom"]}  # camera, for "follow this editor"
     if isinstance(data.get("tool"), str):
         out["tool"] = data["tool"][:20]
     if isinstance(data.get("name"), str) and data["name"].strip():

@@ -1,5 +1,7 @@
 import { memo, useState, type ReactNode } from 'react';
 import type { DrawGroup } from './MapView';
+import { HistoryList } from './Extras';
+import type { Kind } from '../types';
 import type { Fix, HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
 import { ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, issueVisible } from '../utils/layers';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
@@ -59,8 +61,10 @@ const GROUP_LABEL: Record<DrawGroup, string> = {
 };
 
 export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBaseOpacity, canApplyTemplate, onTemplate,
-  drawOrder, onDrawOrder }: {
+  drawOrder, onDrawOrder, basemap }: {
   layers: LayerVisibility; onLayers: (l: LayerVisibility) => void; onSelectAll: () => void;
+  /** base map switch and the georeferenced screenshot */
+  basemap?: ReactNode;
   drawOrder: DrawGroup[]; onDrawOrder: (order: DrawGroup[]) => void;
   baseOpacity: number; onBaseOpacity: (v: number) => void;
   canApplyTemplate: boolean; onTemplate: (t: RoadTemplate) => void;
@@ -81,10 +85,11 @@ export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBase
         ))}
       </div>
       <div className="card stack10 m14">
-        <div className="row between"><b>Подложка OSM</b><span className="mono muted small">{baseOpacity}%</span></div>
+        <div className="row between"><b>Подложка</b><span className="mono muted small">{baseOpacity}%</span></div>
         <label className="small muted stack4">Прозрачность
           <input type="range" min={0} max={100} value={baseOpacity} onChange={(e) => onBaseOpacity(Number(e.target.value))} />
         </label>
+        {basemap}
       </div>
       <h3 className="section">Порядок отрисовки <span className="muted">сверху — выше</span></h3>
       <ol className="draw-order" aria-label="Порядок слоёв на карте">
@@ -130,7 +135,9 @@ export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
 
 export const BottomPanel = memo(function BottomPanel({
   validation, history, tab, onTab, onShow, onFix, validating, issueFilters, onIssueFilter, onSelectAllIssues, children,
+  onShowRefs,
 }: {
+  onShowRefs?: (refs: { kind: Kind; id: number }[]) => void;
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: BottomTab; onTab: (t: BottomTab) => void;
   onShow: (i: Issue) => void; onFix: (i: Issue, fix: Fix) => void; validating: boolean;
@@ -199,9 +206,9 @@ export const BottomPanel = memo(function BottomPanel({
           </button>
         )}
         {(tab === 'load' || tab === 'changes') && children}
-        {tab === 'history' && (history?.entries.length
-          ? history.entries.map((e, idx) => <div key={idx} className="hist">{idx === 0 ? '● ' : ''}{e}</div>)
-          : <p className="muted pad">Правок пока нет</p>)}
+        {tab === 'history' && (
+          <HistoryList details={history?.details} labels={history?.entries ?? []} onShow={(refs) => onShowRefs?.(refs)} />
+        )}
       </div>
     </section>
   );

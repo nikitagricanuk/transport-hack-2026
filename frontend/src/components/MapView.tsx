@@ -3,6 +3,7 @@ import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEv
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import type { BaseMap, ImageOverlay } from './Extras';
 import { LANE_MINZOOM, buildLanes, laneSplit, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
@@ -12,6 +13,10 @@ import { defaultCamera } from '../utils/view';
 export interface MapHandle {
   /** collaborators' cursors and selections; called often, does not re-render React */
   updatePeers: (peers: Peer[]) => void;
+  /** move the camera, e.g. to follow a collaborator */
+  jumpTo: (center: [number, number], zoom: number) => void;
+  /** visible area as [west, south, east, north] */
+  getBounds: () => [number, number, number, number] | undefined;
   zoomBy: (delta: number) => void;
   fitData: () => void;
   /** north-up, no tilt, and the default zoom (the loaded area, or the city view) */
@@ -38,6 +43,14 @@ interface Props {
   /** map groups from bottom to top */
   drawOrder: DrawGroup[];
   route: RouteOverlay | null;
+  base: BaseMap;
+  overlay: ImageOverlay | null;
+  onOverlay: (o: ImageOverlay | null) => void;
+  threeD: boolean;
+  /** elements to flash, e.g. those touched by a history entry */
+  highlight: { kind: string; id: number }[];
+  /** camera after each move, sent to collaborators who follow this editor */
+  onView?: (center: [number, number], zoom: number) => void;
   /** set when `geo` came from a patch: lets the map update only the touched features */
   diff: GeoDiff | null;
   selection: Selection;
@@ -204,6 +217,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
   useImperativeHandle(ref, () => ({
     updatePeers,
+    jumpTo: (center, zoom) => mapRef.current?.easeTo({ center, zoom, duration: 300 }),
+    getBounds: () => {
+      const b = mapRef.current?.getBounds();
+      return b ? [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()] : undefined;
+    },
     zoomBy: (delta) => mapRef.current?.easeTo({ zoom: (mapRef.current?.getZoom() ?? 15) + delta, duration: 200 }),
     fitData,
     resetView,
@@ -229,10 +247,18 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
             maxzoom: 19,
             attribution: '© участники <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
           },
+          sat: {
+            type: 'raster',
+            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+            tileSize: 256,
+            maxzoom: 19,
+            attribution: 'Снимки © Esri, Maxar, Earthstar Geographics',
+          },
         },
         layers: [
           { id: 'bg', type: 'background', paint: { 'background-color': '#ECEEE8' } },
           { id: 'base', type: 'raster', source: 'osm', paint: { 'raster-opacity': 0.5, 'raster-saturation': -0.6 } },
+          { id: 'base-sat', type: 'raster', source: 'sat', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.5 } },
         ],
       },
       center: [104.28, 52.28],
@@ -264,7 +290,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops']) {
+        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -367,6 +393,22 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': ['get', 'color'], 'line-width': 7, 'line-opacity': 0.45 } });
       map.addLayer({ id: 'peer-sel-pt', type: 'circle', source: 'peer-sel', filter: ['==', ['geometry-type'], 'Point'],
         paint: { 'circle-radius': 9, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': ['get', 'color'], 'circle-stroke-width': 3 } });
+      // 3D: buildings extruded by storeys (3 m each), only while the 3D view is on
+      map.addLayer({ id: 'buildings-3d', type: 'fill-extrusion', source: 'areas', filter: ['==', ['get', 'layer'], 'building'],
+        layout: { visibility: 'none' },
+        paint: { 'fill-extrusion-color': ['case', ['get', 'planned'], '#7DD3FC', '#C8C1B4'],
+                 'fill-extrusion-height': ['*', ['max', 1, ['coalesce', ['get', 'levels'], 3]], 3],
+                 'fill-extrusion-opacity': 0.85 } });
+      // planned objects (uds:planned=yes): dashed cyan outline over their translucent body
+      map.addLayer({ id: 'planned-line', type: 'line', source: 'ways', filter: ['==', ['get', 'planned'], true],
+        paint: { 'line-color': '#06B6D4', 'line-width': 2, 'line-dasharray': [2, 1.5] } });
+      map.addLayer({ id: 'planned-area', type: 'line', source: 'areas', filter: ['==', ['get', 'planned'], true],
+        paint: { 'line-color': '#06B6D4', 'line-width': 2, 'line-dasharray': [2, 1.5] } });
+      map.addLayer({ id: 'hist-hl', type: 'line', source: 'hist-hl', filter: ['==', ['geometry-type'], 'LineString'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': '#F59E0B', 'line-width': 9, 'line-opacity': 0.55 } });
+      map.addLayer({ id: 'hist-hl-pt', type: 'circle', source: 'hist-hl', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 10, 'circle-color': 'rgba(245,158,11,0.35)', 'circle-stroke-color': '#F59E0B', 'circle-stroke-width': 2 } });
       map.addLayer({ id: 'route-lines', type: 'line', source: 'route-lines',
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['get', 'colour'], 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 4, 18, 9], 'line-opacity': 0.75 } });
@@ -472,6 +514,119 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     (map.getSource('cmp-before') as GeoJSONSource).setData({ type: 'FeatureCollection', features: before });
     (map.getSource('cmp-after') as GeoJSONSource).setData({ type: 'FeatureCollection', features: after });
   }, [ready, props.changes]);
+
+  // base map: OSM scheme, satellite imagery or none
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    map.setLayoutProperty('base', 'visibility', props.base === 'osm' ? 'visible' : 'none');
+    map.setLayoutProperty('base-sat', 'visibility', props.base === 'sat' ? 'visible' : 'none');
+  }, [ready, props.base]);
+
+  // planned objects are drawn translucent
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const translucent = (solid: number, planned: number): maplibregl.ExpressionSpecification =>
+      ['case', ['==', ['get', 'planned'], true], planned, solid];
+    for (const id of ['road-fill', 'road-casing', 'road-link']) {
+      if (map.getLayer(id)) map.setPaintProperty(id, 'line-opacity', translucent(1, 0.4));
+    }
+    if (map.getLayer('buildings-fill')) map.setPaintProperty('buildings-fill', 'fill-opacity', translucent(0.6, 0.2));
+    if (map.getLayer('zones-fill')) map.setPaintProperty('zones-fill', 'fill-opacity', translucent(0.45, 0.15));
+  }, [ready]);
+
+  // 3D view: tilt the camera and extrude buildings
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    map.setLayoutProperty('buildings-3d', 'visibility', props.threeD ? 'visible' : 'none');
+    map.setLayoutProperty('buildings-fill', 'visibility', props.threeD || !props.layers.buildings ? 'none' : 'visible');
+    map.easeTo({ pitch: props.threeD ? 55 : 0, duration: 600 });
+  }, [ready, props.threeD, props.layers.buildings]);
+
+  // history highlight
+  useEffect(() => {
+    const map = mapRef.current;
+    const geo = props.geo;
+    if (!ready || !map || !geo) return;
+    const feats: Feature[] = [];
+    for (const r of props.highlight) {
+      if (r.kind === 'way') {
+        const line = geo.ways.features.find((f) => f.properties.id === r.id);
+        const area = line ? undefined : geo.areas.features.find((f) => f.properties.id === r.id);
+        const coords = line ? line.geometry.coordinates : area?.geometry.coordinates[0];
+        if (coords) feats.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} });
+      } else if (r.kind === 'node') {
+        const c = geo.nodes.features.find((f) => f.properties.id === r.id)?.geometry.coordinates ?? findVertex(geo, r.id);
+        if (c) feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: {} });
+      }
+    }
+    (map.getSource('hist-hl') as GeoJSONSource).setData({ type: 'FeatureCollection', features: feats });
+  }, [ready, props.highlight, props.geo]);
+
+  // camera for followers
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const onMoveEnd = () => {
+      const c = map.getCenter();
+      propsRef.current.onView?.([c.lng, c.lat], map.getZoom());
+    };
+    map.on('moveend', onMoveEnd);
+    return () => { map.off('moveend', onMoveEnd); };
+  }, [ready]);
+
+  // georeferenced screenshot: image source with four draggable corners
+  const overlayMarkers = useRef<maplibregl.Marker[]>([]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const o = props.overlay;
+    const src = map.getSource('overlay') as maplibregl.ImageSource | undefined;
+    if (!o) {
+      overlayMarkers.current.forEach((m) => m.remove());
+      overlayMarkers.current = [];
+      if (map.getLayer('overlay')) map.removeLayer('overlay');
+      if (src) map.removeSource('overlay');
+      return;
+    }
+    const coords = o.corners as [[number, number], [number, number], [number, number], [number, number]];
+    if (!src) {
+      map.addSource('overlay', { type: 'image', url: o.url, coordinates: coords });
+      map.addLayer({ id: 'overlay', type: 'raster', source: 'overlay', paint: { 'raster-opacity': o.opacity } }, 'zones-fill');
+    } else {
+      src.setCoordinates(coords);
+    }
+    map.setPaintProperty('overlay', 'raster-opacity', o.opacity);
+    if (overlayMarkers.current.length !== 4) {
+      overlayMarkers.current.forEach((m) => m.remove());
+      overlayMarkers.current = coords.map((c, i) => {
+        const el = document.createElement('div');
+        el.className = 'overlay-corner';
+        el.title = 'Перетащите, чтобы совместить снимок с картой';
+        const m = new maplibregl.Marker({ element: el, draggable: true }).setLngLat(c).addTo(map);
+        const update = () => {
+          const cur = propsRef.current.overlay;
+          if (!cur) return;
+          const ll = m.getLngLat();
+          const corners = cur.corners.map((x, j) => (j === i ? [ll.lng, ll.lat] : x)) as [number, number][];
+          (map.getSource('overlay') as maplibregl.ImageSource | undefined)?.setCoordinates(
+            corners as [[number, number], [number, number], [number, number], [number, number]]);
+        };
+        m.on('drag', update);
+        m.on('dragend', () => {
+          const cur = propsRef.current.overlay;
+          if (!cur) return;
+          const ll = m.getLngLat();
+          propsRef.current.onOverlay({ ...cur, corners: cur.corners.map((x, j) => (j === i ? [ll.lng, ll.lat] : x)) as [number, number][] });
+        });
+        return m;
+      });
+    } else {
+      overlayMarkers.current.forEach((m, i) => m.setLngLat(coords[i]));
+    }
+  }, [ready, props.overlay]);
 
   // groups from bottom to top: each is moved just under the selection highlight, so the
   // last one ends up on top
@@ -601,6 +756,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const map = mapRef.current;
     if (!ready || !map) return;
     map.setPaintProperty('base', 'raster-opacity', props.baseOpacity / 100);
+    map.setPaintProperty('base-sat', 'raster-opacity', props.baseOpacity / 100);
   }, [ready, props.baseOpacity]);
 
   // tool change resets transient state

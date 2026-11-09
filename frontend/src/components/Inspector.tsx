@@ -25,6 +25,14 @@ interface Props {
   openRoute?: RouteDetail | null;
   onOpenRoute?: (r: RouteDetail | null) => void;
   onScenarioChanged?: () => void;
+  /** the selected road is closed in the scenario (accident, works) */
+  closed?: boolean;
+  onClosure?: (wayId: number, closed: boolean) => void;
+  onObjectReport?: (kind: string, id: number, fmt: 'xlsx' | 'pdf') => void;
+  /** apply building tags to every building of a type that has no storeys */
+  onAutofill?: (buildingType: string, tags: Record<string, string>) => void;
+  /** analytics mode: show information, hide editing */
+  readOnly?: boolean;
   onOp: (op: Op | Op[], label?: string) => void;
 }
 
@@ -36,7 +44,7 @@ const BUILDING_TYPES: [string, string][] = [
 
 export default memo(function Inspector({
   way, node, geometry, loadRow, onSetLoad, nodeOnRoad, canSeparate, sharedJunctions, docId, rev = 0, openRoute = null,
-  onOpenRoute, onScenarioChanged, onOp,
+  onOpenRoute, onScenarioChanged, onOp, closed = false, onClosure, onObjectReport, onAutofill, readOnly = false,
 }: Props) {
   const [tab, setTab] = useState<'attr' | 'tags'>('attr');
   if (!way && !node) {
@@ -69,10 +77,28 @@ export default memo(function Inspector({
         <button role="tab" aria-selected={tab === 'attr'} onClick={() => setTab('attr')}>Атрибуты</button>
         <button role="tab" aria-selected={tab === 'tags'} onClick={() => setTab('tags')}>Теги OSM · {Object.keys(tags).length}</button>
       </div>
-      <div className="insp-body">
+      <div className={`insp-body ${readOnly ? 'read-only' : ''}`}>
+        {readOnly && <p className="small muted">Режим аналитики: объект только для просмотра. Править — в режиме «Редактирование».</p>}
+        <label className="check card planned-check">
+          <input type="checkbox" disabled={readOnly} checked={tags['uds:planned'] === 'yes'}
+            onChange={() => setTags({ 'uds:planned': tags['uds:planned'] === 'yes' ? null : 'yes' },
+              tags['uds:planned'] === 'yes' ? 'Объект построен' : 'Объект отмечен как планируемый')} />
+          <span><b>Планируемый объект</b><br /><small className="muted">ещё не построен: рисуется полупрозрачно с пунктиром (тег uds:planned)</small></span>
+        </label>
+        {way && way.layer === 'road' && onClosure && (
+          <div className={`card stack6 ${closed ? 'warn-card' : ''}`}>
+            <div className="row between">
+              <b>{closed ? 'Дорога перекрыта' : 'Сценарий ДТП / перекрытия'}</b>
+              <button className={`btn small ${closed ? 'primary' : 'danger'}`} onClick={() => onClosure(way.id, !closed)}>
+                {closed ? 'Открыть движение' : 'Перекрыть'}
+              </button>
+            </div>
+            <span className="small muted">Поток уходит на кратчайший объезд; в .osm перекрытие не записывается.</span>
+          </div>
+        )}
         {tab === 'tags' && <TagEditor tags={tags} onChange={(p) => setTags(p)} />}
         {tab === 'attr' && way && (way.layer === 'building' || way.layer === 'area')
-          && <AreaAttributes way={way} tags={tags} setTags={setTags} area={geometry ? areaM2(geometry) : 0} />}
+          && <AreaAttributes way={way} tags={tags} setTags={setTags} area={geometry ? areaM2(geometry) : 0} onAutofill={onAutofill} />}
         {tab === 'attr' && way && way.layer !== 'building' && way.layer !== 'area' && (
           <>
             <WayAttributes way={way} tags={tags} setTags={setTags} onOp={onOp} sharedJunctions={sharedJunctions} />
@@ -97,16 +123,22 @@ export default memo(function Inspector({
         )}
         {tab === 'attr' && node && <NodeAttributes tags={tags} setTags={setTags} />}
       </div>
-      <div className="insp-foot">
-        {node && canSeparate && (
+      <div className="insp-foot wrap">
+        {onObjectReport && (
+          <>
+            <button className="btn small" onClick={() => onObjectReport(kind, id, 'pdf')} title="Отчёт по объекту: характеристики, графики">Отчёт PDF</button>
+            <button className="btn small" onClick={() => onObjectReport(kind, id, 'xlsx')} title="Цифры и график в Excel">Excel</button>
+          </>
+        )}
+        {!readOnly && node && canSeparate && (
           <button className="btn" onClick={() => onOp({ op: 'separate_ways', args: { node_id: node.id } }, 'Дороги разъединены')}>
             Разделить дороги
           </button>
         )}
-        {way && way.layer !== 'building' && way.layer !== 'area' && (
+        {!readOnly && way && way.layer !== 'building' && way.layer !== 'area' && (
           <button className="btn" onClick={() => onOp({ op: 'reverse_way', args: { id } })}>Развернуть</button>
         )}
-        <button className="btn danger" onClick={() => onOp({ op: 'delete', args: { kind, id } })}>Удалить</button>
+        {!readOnly && <button className="btn danger" onClick={() => onOp({ op: 'delete', args: { kind, id } })}>Удалить</button>}
       </div>
     </aside>
   );
@@ -119,7 +151,18 @@ function metrics(way: WayProps, geometry: number[][]): string {
   return `длина ${fmt(lengthM(geometry))} м`;
 }
 
-function AreaAttributes({ way, tags, setTags, area }: {
+const BUILDING_TEMPLATES: { name: string; tags: Record<string, string> }[] = [
+  { name: 'Хрущёвка 5 эт.', tags: { building: 'apartments', 'building:levels': '5', 'building:flats': '80' } },
+  { name: 'Панель 9 эт.', tags: { building: 'apartments', 'building:levels': '9', 'building:flats': '144' } },
+  { name: 'Монолит 17 эт.', tags: { building: 'apartments', 'building:levels': '17', 'building:flats': '272' } },
+  { name: 'Частный дом', tags: { building: 'house', 'building:levels': '1', 'building:flats': '1' } },
+  { name: 'Офисный центр', tags: { building: 'office', 'building:levels': '8' } },
+  { name: 'Школа', tags: { building: 'school', 'building:levels': '3' } },
+];
+const PERSONS_PER_FLAT = 2.5;
+
+function AreaAttributes({ way, tags, setTags, area, onAutofill }: {
+  onAutofill?: (buildingType: string, tags: Record<string, string>) => void;
   way: WayProps; tags: Tags; area: number;
   setTags: (p: Record<string, string | null>, label?: string) => void;
 }) {
@@ -135,6 +178,25 @@ function AreaAttributes({ way, tags, setTags, area }: {
         <div><b>{Number.isFinite(levels) ? fmt(area * levels) : '—'}</b><span>м² этажей</span></div>
         <div><b>{Number.isFinite(levels) ? levels : '—'}</b><span>этажей</span></div>
       </div>
+      {way.layer === 'building' && (
+        <div className="field"><span>Шаблон здания</span>
+          <div className="preset-grid">
+            {BUILDING_TEMPLATES.map((t) => (
+              <button key={t.name} className="btn small" onClick={() => setTags(t.tags, `Шаблон «${t.name}»`)}>{t.name}</button>
+            ))}
+          </div>
+          {onAutofill && tags['building:levels'] && (
+            <button className="btn small" title="Записать этажность и квартиры этого здания всем зданиям того же типа без этажности"
+              onClick={() => onAutofill(tags.building ?? 'yes', {
+                'building:levels': tags['building:levels'], ...(tags['building:flats'] ? { 'building:flats': tags['building:flats'] } : {}) })}>
+              Заполнить так же все «{tags.building ?? 'yes'}» без этажности
+            </button>
+          )}
+          {tags['building:flats'] && (
+            <span className="small muted">Население ≈ {Math.round(Number(tags['building:flats']) * PERSONS_PER_FLAT)} чел. ({PERSONS_PER_FLAT} на квартиру)</span>
+          )}
+        </div>
+      )}
       {way.layer === 'building' && (
         <>
           <label className="field"><span>Тип здания</span>

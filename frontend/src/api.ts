@@ -1,6 +1,6 @@
 import type {
   ChangesResult, Comparison, DocState, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
-  SignalPlan, StopInfo, SumoResult,
+  SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
   ValidationResult,
 } from './types';
 
@@ -17,9 +17,13 @@ export const CLIENT_ID = (() => {
   }
 })();
 
+/** Author name sent with edits, for the change history of a shared document. */
+export const USER_NAME: { current: string } = { current: '' };
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set('X-Client-Id', CLIENT_ID);
+  if (USER_NAME.current) headers.set('X-User-Name', encodeURIComponent(USER_NAME.current));
   const res = await fetch(url, { ...init, headers });
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
@@ -123,7 +127,19 @@ export const api = {
     request<Comparison>(`/api/documents/${docId}/load/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
   changes: (docId: string) => request<ChangesResult>(`/api/documents/${docId}/changes`),
   report: (docId: string) => request<ReportData>(`/api/documents/${docId}/report`),
-  reportUrl: (docId: string, kind: 'xlsx' | 'docx') => `/api/documents/${docId}/report.${kind}`,
+  reportUrl: (docId: string, kind: 'xlsx' | 'docx' | 'pdf') => `/api/documents/${docId}/report.${kind}`,
+  objectReportUrl: (docId: string, kind: string, id: number, fmt: 'xlsx' | 'pdf') =>
+    `/api/documents/${docId}/objects/${kind}/${id}/report.${fmt}`,
+  setClosure: (docId: string, wayId: number, closed: boolean) =>
+    request<LoadState>(`/api/documents/${docId}/scenario/closures`, json({ way_id: wayId, closed })),
+  od: (docId: string, grid = 3) => request<OdMatrix>(`/api/documents/${docId}/od?grid=${grid}`),
+  tasks: (docId: string) => request<{ tasks: Task[] }>(`/api/documents/${docId}/tasks`),
+  createTask: (docId: string, body: { title: string; description: string; criteria: TaskCriterion[] }) =>
+    request<{ tasks: Task[] }>(`/api/documents/${docId}/tasks`, json(body)),
+  deleteTask: (docId: string, id: string) =>
+    request<{ tasks: Task[] }>(`/api/documents/${docId}/tasks/${id}`, { method: 'DELETE' }),
+  checkTask: (docId: string, id: string) =>
+    request<TaskResult>(`/api/documents/${docId}/tasks/${id}/check`, { method: 'POST' }),
   stop: (docId: string, nodeId: number) => request<StopInfo>(`/api/documents/${docId}/transit/stops/${nodeId}`),
   route: (docId: string, routeId: number) => request<RouteDetail>(`/api/documents/${docId}/transit/routes/${routeId}`),
   setRouteFrequency: (docId: string, routeId: number, vehiclesPerHour: number | null) =>

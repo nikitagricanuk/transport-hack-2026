@@ -343,3 +343,192 @@ def build_docx(data: dict[str, Any]) -> bytes:
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+# ======================================================================= PDF
+def _pdf_styles():
+    from pathlib import Path
+
+    import matplotlib
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # DejaVu ships with matplotlib and has Cyrillic glyphs
+    fonts = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+    if "DejaVu" not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont("DejaVu", str(fonts / "DejaVuSans.ttf")))
+        pdfmetrics.registerFont(TTFont("DejaVu-Bold", str(fonts / "DejaVuSans-Bold.ttf")))
+    base = getSampleStyleSheet()
+    return {
+        "title": ParagraphStyle("t", parent=base["Title"], fontName="DejaVu-Bold", fontSize=18),
+        "h1": ParagraphStyle("h1", parent=base["Heading2"], fontName="DejaVu-Bold", fontSize=13, spaceBefore=10),
+        "p": ParagraphStyle("p", parent=base["BodyText"], fontName="DejaVu", fontSize=9.5, leading=13),
+        "small": ParagraphStyle("s", parent=base["BodyText"], fontName="DejaVu", fontSize=8, leading=10),
+    }
+
+
+def _pdf_table(rows: list[list[Any]], st, widths: list[float] | None = None):
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table, TableStyle
+
+    data = [[Paragraph("" if v is None else str(v), st["small"]) for v in r] for r in rows]
+    t = Table(data, colWidths=widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F3A5F")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CBD5E1")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F1F5F9")]),
+    ]))
+    return t
+
+
+def _pdf_image(buf: io.BytesIO, width_cm: float):
+    from reportlab.lib.units import cm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image
+
+    w, h = ImageReader(buf).getSize()
+    buf.seek(0)
+    return Image(buf, width=width_cm * cm, height=width_cm * cm * h / w)
+
+
+def _pdf_build(story: list) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate
+
+    out = io.BytesIO()
+    SimpleDocTemplate(out, pagesize=A4, leftMargin=1.6 * cm, rightMargin=1.6 * cm,
+                      topMargin=1.4 * cm, bottomMargin=1.4 * cm, title="Отчёт УДС").build(story)
+    return out.getvalue()
+
+
+def build_pdf(data: dict[str, Any]) -> bytes:
+    from reportlab.platypus import Paragraph
+
+    st = _pdf_styles()
+    charts = _charts(data)
+    stats, val, load = data["stats"], data["validation"], data["load"]
+    s, ls = val["summary"], load["summary"]
+    story: list = [Paragraph(data["title"], st["title"]),
+                   Paragraph(f"Файл: {data['filename']} · сформирован {data['generated']}", st["p"])]
+
+    story += [Paragraph("1. Сеть", st["h1"]),
+              Paragraph(f"Дороги: {stats['road_km']} км ({stats['lane_km']} полосо-км). Светофоров — {stats['signals']}, "
+                        f"переходов — {stats['crossings']}, остановок — {stats['stops']}, мостов — {stats['bridges']}. "
+                        f"Зданий — {stats['buildings']['count']}.", st["p"]),
+              _pdf_table([["Класс", "Рёбер", "Длина, км", "Полосо-км"]]
+                         + [[c["label"], c["count"], c["length_km"], c["lane_km"]] for c in stats["classes"]], st)]
+    if "classes" in charts:
+        story.append(_pdf_image(charts["classes"], 16))
+
+    story += [Paragraph("2. Качество графа", st["h1"]),
+              Paragraph(f"Компонент связности: {s['components']}. Критичных: {s['counts']['critical']}, "
+                        f"предупреждений: {s['counts']['warning']}, замечаний: {s['counts']['info']}.", st["p"]),
+              _pdf_image(charts["issues"], 15),
+              _pdf_table([["Уровень", "Проблема", "Описание"]]
+                         + [[SEV_RU[i["severity"]], i["title"], i["description"]] for i in val["issues"][:30]],
+                         st, widths=[70, 130, 300])]
+
+    story += [Paragraph("3. Нагрузка", st["h1"]),
+              Paragraph(f"Множитель спроса ×{load['multiplier']}. Средняя v/c {ls['avg_vc']}, перегружено "
+                        f"{ls['congested_km']} км, рёбер с v/c ≥ 1: {ls['overloaded']}, задержка {ls['delay_hours']} авт·ч.",
+                        st["p"]),
+              _pdf_image(charts["los"], 14)]
+    top = sorted(load["rows"], key=lambda r: -r["vc"])[:15]
+    story.append(_pdf_table([["Название", "Класс", "Полос", "Нагрузка", "Пропускная", "v/c", "LOS"]]
+                            + [[r["name"] or f"#{r['id']}", r["highway"], r["lanes"], r["volume"], r["capacity"],
+                                r["vc"], r["los"]] for r in top], st))
+
+    cmp_ = data.get("comparison")
+    if cmp_:
+        story += [Paragraph("4. Сравнение состояний", st["h1"]),
+                  Paragraph(f"«{cmp_['a']['name']}» → «{cmp_['b']['name']}»", st["p"]),
+                  _pdf_table([["Показатель", "До", "После", "Изменение"]]
+                             + [[TOTALS_RU[k], v["before"], v["after"], v["delta"]] for k, v in cmp_["totals"].items()], st)]
+        if "compare" in charts:
+            story.append(_pdf_image(charts["compare"], 16))
+    od = data.get("od")
+    if od:
+        story += [Paragraph("5. Матрица корреспонденций, поездок/ч", st["h1"]),
+                  _pdf_table([["Из / В", *[z["name"] for z in od["zones"]]]]
+                             + [[z["name"], *row] for z, row in zip(od["zones"], od["trips"])], st)]
+    return _pdf_build(story)
+
+
+# =========================================================== object report
+# typical weekday traffic by hour, relative to the peak hour (1.0)
+HOURLY_PROFILE = [0.10, 0.06, 0.04, 0.04, 0.08, 0.25, 0.60, 0.95, 1.00, 0.80, 0.70, 0.72,
+                  0.75, 0.74, 0.76, 0.82, 0.92, 1.00, 0.95, 0.75, 0.55, 0.40, 0.28, 0.17]
+
+
+def build_object_xlsx(obj: dict[str, Any]) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.chart import LineChart, Reference
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Объект"
+    ws["A1"] = obj["title"]
+    ws["A1"].font = Font(bold=True, size=14)
+    r = 3
+    for k, v in obj["facts"]:
+        ws.cell(row=r, column=1, value=k).font = Font(bold=True)
+        ws.cell(row=r, column=2, value=v)
+        r += 1
+    ws.column_dimensions["A"].width = 32
+    ws.column_dimensions["B"].width = 40
+    if obj.get("hourly"):
+        top = r + 2
+        ws.cell(row=top, column=1, value="Час").font = Font(bold=True)
+        ws.cell(row=top, column=2, value="Нагрузка, авт/ч").font = Font(bold=True)
+        for h, v in enumerate(obj["hourly"]):
+            ws.cell(row=top + 1 + h, column=1, value=f"{h:02d}:00")
+            ws.cell(row=top + 1 + h, column=2, value=v)
+        ch = LineChart()
+        ch.title, ch.y_axis.title = "Суточный профиль нагрузки", "авт/ч"
+        ch.height, ch.width = 8, 18
+        ch.add_data(Reference(ws, min_col=2, min_row=top, max_row=top + 24), titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=top + 1, max_row=top + 24))
+        ws.add_chart(ch, "D3")
+    for name, headers, rows in obj.get("tables", []):
+        t = wb.create_sheet(name[:30])
+        for j, h in enumerate(headers, start=1):
+            t.cell(row=1, column=j, value=h).font = Font(bold=True)
+        for i, row in enumerate(rows, start=2):
+            for j, v in enumerate(row, start=1):
+                t.cell(row=i, column=j, value=v)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def build_object_pdf(obj: dict[str, Any]) -> bytes:
+    from reportlab.platypus import Paragraph
+
+    st = _pdf_styles()
+    story: list = [Paragraph(obj["title"], st["title"]),
+                   _pdf_table([["Параметр", "Значение"]] + [list(f) for f in obj["facts"]], st)]
+    if obj.get("hourly"):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(7, 2.8))
+        ax.plot(range(24), obj["hourly"], color="#2563EB", marker="o", markersize=3)
+        if obj.get("capacity"):
+            ax.axhline(obj["capacity"], color="#EA580C", linestyle="--", linewidth=1, label="пропускная способность")
+            ax.legend(frameon=False)
+        ax.set_xticks(range(0, 24, 2))
+        ax.set_xlabel("час")
+        ax.set_ylabel("авт/ч")
+        ax.spines[["top", "right"]].set_visible(False)
+        story += [Paragraph("Суточный профиль нагрузки", st["h1"]), _pdf_image(_png(fig), 16)]
+        plt.close(fig)
+    for name, headers, rows in obj.get("tables", []):
+        story += [Paragraph(name, st["h1"]), _pdf_table([headers] + rows, st)]
+    return _pdf_build(story)

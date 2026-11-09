@@ -23,7 +23,8 @@ from pydantic import BaseModel, Field
 from . import __version__, report
 from .collab import HUB, Peer, clean_presence
 from . import signals as signal_plans
-from . import transit
+from . import scenario, transit
+from urllib.parse import unquote
 from .analysis import (
     changes as list_changes,
     compare_snapshots,
@@ -65,6 +66,8 @@ class Session:
     # vehicles/h per transit route (overrides of the OSM interval) and signal timing per node
     transit_freq: dict[int, float] = field(default_factory=dict)
     signal_timing: dict[int, dict[str, Any]] = field(default_factory=dict)
+    closures: set[int] = field(default_factory=set)        # roads closed by an accident or works
+    tasks: list[dict[str, Any]] = field(default_factory=list)  # user-made Packet Tracer style tasks
     original_validation: dict[str, Any] | None = None
 
 
@@ -245,7 +248,8 @@ def _save_analysis(s: Session) -> None:
         return
     data = {"loads": {str(k): v for k, v in s.loads.items()}, "multiplier": s.multiplier, "snapshots": s.snapshots,
             "transit_freq": {str(k): v for k, v in s.transit_freq.items()},
-            "signal_timing": {str(k): v for k, v in s.signal_timing.items()}}
+            "signal_timing": {str(k): v for k, v in s.signal_timing.items()},
+            "closures": sorted(s.closures), "tasks": s.tasks}
     try:
         DRAFT_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -264,6 +268,8 @@ def _load_analysis(s: Session) -> None:
         s.snapshots = list(data.get("snapshots", []))
         s.transit_freq = {int(k): float(v) for k, v in data.get("transit_freq", {}).items()}
         s.signal_timing = {int(k): dict(v) for k, v in data.get("signal_timing", {}).items()}
+        s.closures = {int(x) for x in data.get("closures", [])}
+        s.tasks = list(data.get("tasks", []))
     except (OSError, ValueError, TypeError, AttributeError):
         return
 
@@ -308,7 +314,8 @@ def _replay_journal(s: Session) -> None:
             entry = json.loads(line)
             kind = entry.get("t")
             if kind == "ops":
-                apply_ops(s.doc, s.history, [(o[0], o[1]) for o in entry["ops"]], entry.get("label"))
+                apply_ops(s.doc, s.history, [(o[0], o[1]) for o in entry["ops"]], entry.get("label"),
+                          entry.get("author"), entry.get("at"))
             elif kind == "undo":
                 s.history.undo()
             elif kind == "redo":
@@ -475,26 +482,33 @@ def get_element(doc_id: str, kind: Literal["node", "way", "relation"], eid: int)
 
 
 @app.post("/api/documents/{doc_id}/ops")
-def run_op(doc_id: str, req: OpRequest, x_client_id: str | None = Header(default=None)) -> Response:
+def run_op(doc_id: str, req: OpRequest, x_client_id: str | None = Header(default=None),
+           x_user_name: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
         try:
-            result = apply_op(s.doc, s.history, req.op, req.args, req.label)
+            result = apply_op(s.doc, s.history, req.op, req.args, req.label, author=_author(x_user_name))
         except OpError as e:
             raise HTTPException(422, str(e)) from e
-        entry = {"t": "ops", "ops": [[req.op, req.args]], "label": req.label}
+        tx = s.history.last_tx
+        entry = {"t": "ops", "ops": [[req.op, req.args]], "label": req.label,
+                 "author": tx.author if tx else None, "at": tx.at if tx else None}
         return _json({"result": result, **_changed(s, s.history.last_tx, entry, x_client_id)})
 
 
 @app.post("/api/documents/{doc_id}/batch")
-def run_batch(doc_id: str, req: BatchRequest, x_client_id: str | None = Header(default=None)) -> Response:
+def run_batch(doc_id: str, req: BatchRequest, x_client_id: str | None = Header(default=None),
+              x_user_name: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
         try:
-            results = apply_ops(s.doc, s.history, [(o.op, o.args) for o in req.ops], req.label)
+            results = apply_ops(s.doc, s.history, [(o.op, o.args) for o in req.ops], req.label,
+                                author=_author(x_user_name))
         except OpError as e:
             raise HTTPException(422, str(e)) from e
-        entry = {"t": "ops", "ops": [[o.op, o.args] for o in req.ops], "label": req.label}
+        tx = s.history.last_tx
+        entry = {"t": "ops", "ops": [[o.op, o.args] for o in req.ops], "label": req.label,
+                 "author": tx.author if tx else None, "at": tx.at if tx else None}
         return _json({"results": results, **_changed(s, s.history.last_tx, entry, x_client_id)})
 
 
@@ -585,11 +599,13 @@ def check_organizer(doc_id: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------ load model
 def _load_state(s: Session) -> dict[str, Any]:
-    rows = _rows(s)
+    rows, det = _rows_detours(s)
+    names = {r["id"]: r["name"] for r in rows}
     return {
         "multiplier": s.multiplier,
         "rows": rows,
         "summary": load_summary(rows),
+        "closures": [{"id": wid, "name": names.get(wid, ""), **d} for wid, d in det.items()],
         "snapshots": [{k: v for k, v in snap.items() if k != "rows"} for snap in s.snapshots],
     }
 
@@ -660,12 +676,23 @@ def compare_load(doc_id: str, a: str, b: str = "current") -> Response:
         return _json(compare_snapshots(_snapshot(s, a), _snapshot(s, b)))
 
 
-def _rows(s: Session) -> list[dict[str, Any]]:
-    """Load model with scheduled transit vehicles and signal green shares."""
+def _author(header: str | None) -> str | None:
+    """Collaborator name from the X-User-Name header (URL-encoded so Cyrillic survives HTTP)."""
+    return unquote(header).strip()[:32] or None if header else None
+
+
+def _rows_detours(s: Session) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    """Load model with transit vehicles, signal green shares and closures with detours."""
     timing = {nid: cfg for nid, cfg in s.signal_timing.items() if nid in s.doc.nodes}
-    return road_rows(s.doc, s.loads, s.multiplier,
+    rows = road_rows(s.doc, s.loads, s.multiplier,
                      transit_pcu=transit.bus_pcu_by_way(s.doc, s.transit_freq),
                      capacity_factor=signal_plans.capacity_factors(s.doc, timing))
+    closed = {w for w in s.closures if w in s.doc.ways}
+    return rows, scenario.apply_closures(s.doc, rows, closed)
+
+
+def _rows(s: Session) -> list[dict[str, Any]]:
+    return _rows_detours(s)[0]
 
 
 # ---------------------------------------------------------- transit
@@ -797,6 +824,7 @@ def _report_data(s: Session, a: str | None, b: str | None) -> dict[str, Any]:
         "validation": validate(s.doc),
         "changes": list_changes(s.doc),
         "load": {"multiplier": s.multiplier, "rows": rows, "summary": load_summary(rows)},
+        "od": scenario.od_matrix(s.doc),
         "comparison": comparison,
     }
 
@@ -821,6 +849,9 @@ def _report_file(doc_id: str, a: str | None, b: str | None, kind: str) -> Respon
     if kind == "xlsx":
         body = report.build_xlsx(data)
         media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif kind == "pdf":
+        body = report.build_pdf(data)
+        media = "application/pdf"
     else:
         body = report.build_docx(data)
         media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -831,6 +862,142 @@ def _report_file(doc_id: str, a: str | None, b: str | None, kind: str) -> Respon
 @app.get("/api/documents/{doc_id}/report.xlsx")
 def report_xlsx(doc_id: str, a: str | None = None, b: str | None = None) -> Response:
     return _report_file(doc_id, a, b, "xlsx")
+
+
+@app.get("/api/documents/{doc_id}/report.pdf")
+def report_pdf(doc_id: str, a: str | None = None, b: str | None = None) -> Response:
+    return _report_file(doc_id, a, b, "pdf")
+
+
+# ------------------------------------------------------ object report
+def _object_report(s: Session, kind: str, eid: int) -> dict[str, Any]:
+    el = s.doc.get(kind, eid)  # type: ignore[arg-type]
+    if el is None:
+        raise HTTPException(404, "объект не найден")
+    name = el.tags.get("name", "")
+    facts: list[list[Any]] = [["Тип", kind], ["ID", eid], ["Название", name or "—"]]
+    obj: dict[str, Any] = {"title": f"{name or kind} ({kind}/{eid})", "facts": facts, "tables": []}
+    if kind == "way":
+        row = next((r for r in _rows(s) if r["id"] == eid), None)
+        if row:
+            facts += [["Класс", row["highway"]], ["Полос", row["lanes"]], ["Длина, м", row["length_m"]],
+                      ["Скорость, км/ч", row["speed"]], ["Пропускная, авт/ч", row["capacity"]],
+                      ["Нагрузка в пик, авт/ч", row["volume"]], ["v/c", row["vc"]], ["Уровень обслуживания", row["los"]],
+                      ["Время проезда свободно / с нагрузкой, с", f"{row['t0_s']} / {row['t_s']}"],
+                      ["Транспорт общего пользования, лег. экв./ч", row.get("transit_pcu", 0)]]
+            obj["hourly"] = [round(row["volume"] * k) for k in report.HOURLY_PROFILE]
+            obj["capacity"] = row["capacity"]
+        routes = [r for r in transit.routes(s.doc, s.transit_freq)
+                  if any(m.type == "way" and m.ref == eid for m in s.doc.relations[r["id"]].members)]
+        if routes:
+            obj["tables"].append(("Маршруты", ["Маршрут", "Вид", "Откуда", "Куда", "Машин/ч"],
+                                  [[r["ref"], r["mode_label"], r["from"], r["to"], r["frequency"]] for r in routes]))
+    elif kind == "node":
+        tags = el.tags
+        if tags.get("highway") == "traffic_signals" or tags.get("crossing") == "traffic_signals":
+            plan = signal_plans.plan(s.doc, eid, s.signal_timing.get(eid), {r["id"]: r for r in _rows(s)})
+            facts += [["Цикл, с", plan["cycle"]], ["Доля зелёного главному", plan["main_share"]]]
+            obj["tables"].append(("Фазы", ["Фаза", "Зелёный, с", "Жёлтый, с"],
+                                  [[p["name"], p["green_s"], p["yellow_s"]] for p in plan["phases"]]))
+            obj["tables"].append(("Подходы", ["Улица", "Фаза", "Азимут", "v/c"],
+                                  [[a["name"] or a["highway"], a["group"], a["bearing"], a["vc"]] for a in plan["approaches"]]))
+        try:
+            st = transit.stop_info(s.doc, eid, s.transit_freq)
+            if st["routes"]:
+                facts += [["Машин в час", st["vehicles_per_hour"]], ["Жителей в 400 м", st["residents_400m"]],
+                          ["Загруженность", st["load_label"]]]
+                obj["tables"].append(("Маршруты", ["Маршрут", "Вид", "Откуда", "Куда", "Машин/ч"],
+                                      [[r["ref"], r["mode_label"], r["from"], r["to"], r["frequency"]] for r in st["routes"]]))
+        except KeyError:
+            pass
+    obj["tables"].append(("Теги OSM", ["Ключ", "Значение"], [[k, v] for k, v in el.tags.items()]))
+    return obj
+
+
+@app.get("/api/documents/{doc_id}/objects/{kind}/{eid}/report.{fmt}")
+def object_report(doc_id: str, kind: Literal["node", "way", "relation"], eid: int, fmt: Literal["xlsx", "pdf"]) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        obj = _object_report(s, kind, eid)
+    body = report.build_object_xlsx(obj) if fmt == "xlsx" else report.build_object_pdf(obj)
+    media = "application/pdf" if fmt == "pdf" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return Response(content=body, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="object_{kind}_{eid}.{fmt}"'})
+
+
+# ---------------------------------------------------- closures (accidents)
+class ClosureRequest(BaseModel):
+    way_id: int
+    closed: bool = True
+
+
+@app.post("/api/documents/{doc_id}/scenario/closures")
+def set_closure(doc_id: str, req: ClosureRequest, x_client_id: str | None = Header(default=None)) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        if req.way_id not in s.doc.ways:
+            raise HTTPException(404, "ребро не найдено")
+        (s.closures.add if req.closed else s.closures.discard)(req.way_id)
+        _save_analysis(s)
+        HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
+        return _json(_load_state(s))
+
+
+# ------------------------------------------------------------ OD matrix
+@app.get("/api/documents/{doc_id}/od")
+def get_od(doc_id: str, grid: int = Query(3, ge=2, le=6), trip_rate: float = Query(scenario.PEAK_TRIP_RATE, gt=0, le=1),
+           beta: float = Query(scenario.BETA, gt=0, le=1)) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        return _json(scenario.od_matrix(s.doc, grid, trip_rate, beta))
+
+
+# ---------------------------------------------------------------- tasks
+class TaskRequest(BaseModel):
+    title: str = Field(default="", max_length=120)
+    description: str = Field(default="", max_length=1000)
+    criteria: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+
+
+def _all_tasks(s: Session) -> list[dict[str, Any]]:
+    return scenario.builtin_tasks(s.doc) + s.tasks
+
+
+@app.get("/api/documents/{doc_id}/tasks")
+def list_tasks(doc_id: str) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        return _json({"tasks": _all_tasks(s)})
+
+
+@app.post("/api/documents/{doc_id}/tasks")
+def create_task(doc_id: str, req: TaskRequest) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        if not req.criteria:
+            raise HTTPException(400, "добавьте хотя бы одно требование")
+        s.tasks.append(scenario.new_task(req.title, req.description, req.criteria))
+        _save_analysis(s)
+        return _json({"tasks": _all_tasks(s)})
+
+
+@app.delete("/api/documents/{doc_id}/tasks/{task_id}")
+def delete_task(doc_id: str, task_id: str) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        s.tasks = [t for t in s.tasks if t["id"] != task_id]
+        _save_analysis(s)
+        return _json({"tasks": _all_tasks(s)})
+
+
+@app.post("/api/documents/{doc_id}/tasks/{task_id}/check")
+def check_task(doc_id: str, task_id: str) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        task = next((t for t in _all_tasks(s) if t["id"] == task_id), None)
+        if task is None:
+            raise HTTPException(404, "задание не найдено")
+        return _json(scenario.check_task(s.doc, task, validate(s.doc), _rows(s)))
 
 
 @app.get("/api/documents/{doc_id}/report.docx")

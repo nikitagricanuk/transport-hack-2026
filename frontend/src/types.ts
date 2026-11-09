@@ -68,6 +68,16 @@ export interface HistoryInfo {
   undo_label: string | null;
   redo_label: string | null;
   entries: string[];
+  /** newest first: what changed, who changed it and when */
+  details?: HistoryEntry[];
+}
+
+export interface HistoryEntry {
+  label: string;
+  author: string | null;
+  at: number;
+  refs: { kind: Kind; id: number; status: 'added' | 'modified' | 'deleted'; name: string }[];
+  count: number;
 }
 
 export type DiffCounts = Record<Kind, { added: number; modified: number; deleted: number }>;
@@ -173,6 +183,12 @@ export interface LoadRow {
   los: Los;
   t0_s: number;
   t_s: number;
+  transit_pcu?: number;
+  /** added in the editor: no observed demand */
+  new?: boolean;
+  needs_intensity?: boolean;
+  closed?: boolean;
+  detour?: boolean;
 }
 
 export interface LoadSummary {
@@ -200,6 +216,53 @@ export interface LoadState {
   rows: LoadRow[];
   summary: LoadSummary;
   snapshots: SnapshotMeta[];
+  closures?: Closure[];
+}
+
+export interface Closure {
+  id: number;
+  name: string;
+  ways: number[];
+  volume: number;
+  found: boolean;
+  detour_s: number;
+  /** vehicles/h that found a detour */
+  moved?: number;
+  /** a two-way road where only one direction has a way round */
+  partial?: boolean;
+}
+
+export interface OdMatrix {
+  zones: { id: string; name: string; residents: number; jobs: number; center: [number, number] }[];
+  trips: number[][];
+  shares: number[][];
+  minutes: (number | null)[][];
+  total: number;
+  grid: number;
+  trip_rate: number;
+  beta: number;
+}
+
+export interface TaskCriterion {
+  type: 'no_issues' | 'components_max' | 'max_vc' | 'avg_vc' | 'tag' | 'signal_at' | 'lanes_min';
+  label?: string;
+  [k: string]: unknown;
+}
+
+export interface Task {
+  id: string;
+  builtin: boolean;
+  title: string;
+  description: string;
+  criteria: TaskCriterion[];
+}
+
+export interface TaskResult {
+  task_id: string;
+  passed: number;
+  total: number;
+  done: boolean;
+  results: { label: string; ok: boolean; detail: string }[];
 }
 
 export interface Comparison {

@@ -58,6 +58,8 @@ def way_feature(doc: OsmDocument, w: Way) -> tuple[str, dict] | None:
         "dir": direction(w.tags),
         "bridge": w.tags.get("bridge", "no") not in ("no", ""),
         "z": _z(w.tags),  # OSM layer: draw order among overlapping zones/buildings
+        "planned": w.tags.get("uds:planned") == "yes",  # designed, not built yet: drawn translucent
+        "levels": _levels(w.tags),
         "nodes": w.nodes,
         "tags": w.tags,
         "permissions": road_permissions(w.tags),
@@ -76,7 +78,8 @@ def node_feature(n: Node, junction_count: int) -> dict | None:
         "type": "Feature", "id": _fid("node", n.id),
         "geometry": {"type": "Point", "coordinates": [n.lon, n.lat]},
         "properties": {"id": n.id, "kind": "node", "junction": junction_count >= 2,
-                       "category": _node_category(n.tags), "tags": n.tags},
+                       "category": _node_category(n.tags), "tags": n.tags,
+                       "planned": n.tags.get("uds:planned") == "yes"},
     }
 
 
@@ -179,3 +182,12 @@ def _z(tags: dict[str, str]) -> int:
         return max(-5, min(5, int(tags.get("layer", "0"))))
     except ValueError:
         return 0
+
+
+def _levels(tags: dict[str, str]) -> int:
+    """Storeys for the 3D view (3 m each); a guess from the building type when untagged."""
+    try:
+        return max(1, min(60, int(tags.get("building:levels", ""))))
+    except ValueError:
+        b = tags.get("building")
+        return {"house": 1, "detached": 1, "garage": 1, "garages": 1, "shed": 1, "apartments": 9}.get(b or "", 3) if b else 0

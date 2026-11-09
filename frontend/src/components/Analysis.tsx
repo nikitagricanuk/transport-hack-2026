@@ -197,7 +197,9 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
   const los: Los = vc < 0.35 ? 'A' : vc < 0.55 ? 'B' : vc < 0.75 ? 'C' : vc < 0.9 ? 'D' : vc < 1 ? 'E' : 'F';
   const commit = () => { if (v !== null) { onSet(Math.round(v)); setV(null); } };
   return (
-    <div className="card stack10">
+    <div className={`card stack10 ${row.needs_intensity ? 'warn-card' : ''}`}>
+      {row.needs_intensity && <b className="small">Новая дорога: задайте интенсивность — без неё модель берёт оценку по классу</b>}
+      {row.closed && <b className="small">Дорога перекрыта: поток ушёл на объезд</b>}
       <div className="row between">
         <b>Интенсивность</b>
         <span className="los-dot" style={{ background: LOS_COLOR[los] }} title={LOS_TEXT[los]}>{los}</span>
@@ -333,7 +335,7 @@ export function ExportCheck({ validation, onFixList, onExport, onClose, filename
 export function ReportModal({ data, onClose, onDownload }: {
   data: ReportData | null | 'error';
   onClose: () => void;
-  onDownload: (kind: 'xlsx' | 'docx') => void;
+  onDownload: (kind: 'xlsx' | 'docx' | 'pdf') => void;
 }) {
   return (
     <div className="modal-back" onClick={onClose}>
@@ -341,6 +343,7 @@ export function ReportModal({ data, onClose, onDownload }: {
         <div className="row between">
           <h2>Отчёт по схеме</h2>
           <div className="row gap8">
+            <button className="btn" onClick={() => onDownload('pdf')}>PDF</button>
             <button className="btn" onClick={() => onDownload('docx')}>Word (.docx)</button>
             <button className="btn primary" onClick={() => onDownload('xlsx')}>Excel (.xlsx)</button>
           </div>

@@ -122,6 +122,8 @@ def road_rows(doc: OsmDocument, loads: dict[int, float], multiplier: float,
             "id": w.id, "name": w.tags.get("name", ""), "highway": hw, "lanes": lanes,
             "length_m": round(length, 1), "speed": speed, "capacity": round(cap),
             "volume": round(volume), "base_volume": round(base), "custom": custom, "transit_pcu": round(transit),
+            # a road added in the editor has no observed demand: its intensity must be entered
+            "new": src is None, "needs_intensity": src is None and not custom,
             "vc": round(vc, 3), "los": los(vc), "t0_s": round(t0, 1), "t_s": round(t, 1),
         })
     return rows

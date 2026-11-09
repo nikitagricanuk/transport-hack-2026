@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, downloadFile, type OpResponse } from './api';
+import { USER_NAME, api, downloadFile, type OpResponse } from './api';
 import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
 import { routeColour } from './components/Transit';
 import Inspector from './components/Inspector';
 import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail, type BottomTab } from './components/Panels';
 import { ChangesPanel, ExportCheck, LoadPanel, ReportModal } from './components/Analysis';
+import { AnalyticsPanel, BasemapControls, TasksModal, type BaseMap, type ImageOverlay } from './components/Extras';
 import StartScreen from './components/StartScreen';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
@@ -56,7 +57,26 @@ export default function App() {
   const [mapDiff, setMapDiff] = useState<GeoDiff | null>(null);
   // houses above lawns by default; the layers panel reorders the groups
   const [drawOrder, setDrawOrder] = useState<DrawGroup[]>(['zones', 'buildings', 'paths', 'roads', 'rail']);
+  // two ways of working: editing the graph, or analysing flows and scenarios
+  const [mode, setMode] = useState<'edit' | 'analytics'>('edit');
+  const [base, setBase] = useState<BaseMap>('osm');
+  const [overlay, setOverlay] = useState<ImageOverlay | null>(null);
+  const [threeD, setThreeD] = useState(false);
+  const [highlight, setHighlight] = useState<{ kind: string; id: number }[]>([]);
+  const [tasksOpen, setTasksOpen] = useState(false);
+  const [followId, setFollowId] = useState<string | null>(null);
+  const followRef = useRef<string | null>(null);
+  const modeRef = useRef<'edit' | 'analytics'>('edit');
+  modeRef.current = mode;
+  followRef.current = followId;
+  const highlightTimer = useRef<number>(0);
+  const flash = useCallback((refs: { kind: string; id: number }[], ms = 4000) => {
+    setHighlight(refs);
+    window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setHighlight([]), ms);
+  }, []);
   const [openRoute, setOpenRoute] = useState<RouteDetail | null>(null);
+  const runOpsRef = useRef<((ops: Op | Op[], opts?: { label?: string }) => Promise<boolean>) | null>(null);
   const routeOverlay = useMemo<RouteOverlay | null>(() => (openRoute
     ? { colour: routeColour(openRoute), lines: openRoute.lines, stops: openRoute.stop_list }
     : null), [openRoute]);
@@ -229,6 +249,41 @@ export default function App() {
       setError((e as Error).message);
     }
   }, []);
+  const onClosure = useCallback(async (wayId: number, closed: boolean) => {
+    const id = docIdRef.current;
+    if (!id) return;
+    try {
+      const state = await api.setClosure(id, wayId, closed);
+      setLoad(state);
+      const c = state.closures?.find((x) => x.id === wayId);
+      setNotice(!closed ? 'Перекрытие снято'
+        : c?.found ? `Дорога перекрыта: ${c.moved ?? 0} авт/ч ушли на объезд по ${c.ways.length} рёбрам`
+          + (c.partial ? ' (в обратную сторону объезда нет)' : '')
+        : 'Дорога перекрыта, но объезда в пределах карты нет — поток теряется');
+      if (c?.found) flash(c.ways.map((w) => ({ kind: 'way', id: w })), 8000);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [flash]);
+  const objectReport = useCallback(async (kind: string, eid: number, fmt: 'xlsx' | 'pdf') => {
+    const id = docIdRef.current;
+    if (!id) return;
+    try {
+      await downloadFile(api.objectReportUrl(id, kind, eid, fmt), `object_${kind}_${eid}.${fmt}`);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+  // apply a building template to every building of the same type that has no storeys yet
+  const autofillBuildings = useCallback((buildingType: string, tags: Record<string, string>) => {
+    const geo = geoRef.current;
+    if (!geo) return;
+    const targets = geo.areas.features.filter((f) => f.properties.layer === 'building'
+      && (f.properties.tags.building ?? 'yes') === buildingType && !f.properties.tags['building:levels']);
+    if (!targets.length) { setNotice('Нет зданий этого типа без этажности'); return; }
+    runOpsRef.current?.(targets.map((f) => ({ op: 'set_tags', args: { kind: 'way', id: f.properties.id, tags } })),
+      { label: `Шаблон здания для ${targets.length} зданий` });
+  }, []);
   const refreshLoad = useCallback(() => {
     const id = docIdRef.current;
     if (id) api.load(id).then(setLoad).catch(() => undefined);
@@ -348,21 +403,57 @@ export default function App() {
     } else if (m.type === 'join' || m.type === 'presence') {
       const before = peers.get(m.peer.id);
       peers.set(m.peer.id, m.peer);
+      const view = (m.peer as { view?: { center: [number, number]; zoom: number } }).view;
+      if (followRef.current === m.peer.id && view) mapRef.current?.jumpTo(view.center, view.zoom);
       publishPeers(!before || before.name !== m.peer.name || before.selection?.id !== m.peer.selection?.id);
     } else if (m.type === 'leave') {
       peers.delete(m.id);
+      if (followRef.current === m.id) setFollowId(null);
       publishPeers(true);
     } else if (m.type === 'patch') {
       ingest(m as unknown as OpResponse);
+      // say who changed what, and flash it on the map
+      const last = (m as unknown as OpResponse).history?.details?.[0];
+      if (last) {
+        setNotice(`${last.author ?? 'Участник'}: ${last.label}${last.refs[0]?.name ? ` — ${last.refs[0].name}` : ''}`);
+        flash(last.refs);
+      }
     } else if (m.type === 'load') {
       const id = docIdRef.current;
       if (id) api.load(id).then(setLoad).catch(() => undefined);
     }
-  }, [ingest, publishPeers, resync]);
+  }, [ingest, publishPeers, resync, flash]);
   const docIdRef = useRef<string | undefined>(undefined);
   docIdRef.current = doc?.doc_id;
   const collab = useCollab(doc?.doc_id, myName, onCollab);
   sendRef.current = collab.send;
+  USER_NAME.current = myName;
+  const onView = useCallback((center: [number, number], zoom: number) => { sendRef.current({ view: { center, zoom } }); }, []);
+  const onOverlayFile = useCallback((file: File) => {
+    // start from the visible part of the map; the corners are then dragged into place
+    const b = mapRef.current?.getBounds?.();
+    const url = URL.createObjectURL(file);
+    const [w, s0, e, n] = b ?? [104.26, 52.25, 104.28, 52.27];
+    const dx = (e - w) * 0.15;
+    const dy = (n - s0) * 0.15;
+    setOverlay({ url, name: file.name, opacity: 0.6,
+      corners: [[w + dx, n - dy], [e - dx, n - dy], [e - dx, s0 + dy], [w + dx, s0 + dy]] });
+  }, []);
+  const onShowRefs = useCallback((refs: { kind: string; id: number }[]) => {
+    flash(refs, 6000);
+    const first = refs.find((r) => r.kind === 'way' || r.kind === 'node');
+    if (first) showElement(first.kind as 'way' | 'node', first.id);
+  }, [flash, showElement]);
+  const switchMode = (m: 'edit' | 'analytics') => {
+    setMode(m);
+    if (m === 'analytics') {
+      setTool('select');
+      setBottomTab('load');
+      setLoadColor(true);
+    } else {
+      setLoadColor(false);
+    }
+  };
   useEffect(() => { collab.send({ selection }); }, [collab, selection]);
   useEffect(() => { collab.send({ tool }); }, [collab, tool]);
   useEffect(() => { if (!doc) { peersRef.current.clear(); setPeerList([]); } }, [doc]);
@@ -397,6 +488,10 @@ export default function App() {
   // -------------------------------------------------------------- ops
   const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }): Promise<boolean> => {
     if (!docId) return false;
+    if (modeRef.current === 'analytics') {
+      setNotice('Режим аналитики: граф не редактируется. Переключитесь на «Редактирование».');
+      return false;
+    }
     setError(null);
     try {
       let res: OpResponse;
@@ -421,6 +516,8 @@ export default function App() {
       return false;
     }
   }, [docId, ingest]);
+
+  runOpsRef.current = runOps;
 
   // stable callbacks so memoized panels and the map skip unrelated re-renders
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
@@ -514,7 +611,7 @@ export default function App() {
       setError((e as Error).message);
     }
   };
-  const downloadReport = useCallback(async (kind: 'xlsx' | 'docx') => {
+  const downloadReport = useCallback(async (kind: 'xlsx' | 'docx' | 'pdf') => {
     const id = docIdRef.current;
     if (!id) return;
     try {
@@ -613,13 +710,26 @@ export default function App() {
           <button className="icon-btn" aria-label="Повторить" title={`Повторить${doc.history.redo_label ? ': ' + doc.history.redo_label : ''} · Ctrl+Shift+Z`}
             disabled={!doc.history.can_redo} onClick={redo}>↷</button>
         </div>
+        <div className="seg mode-seg" role="group" aria-label="Режим работы">
+          <button aria-pressed={mode === 'edit'} onClick={() => switchMode('edit')}>Редактирование</button>
+          <button aria-pressed={mode === 'analytics'} onClick={() => switchMode('analytics')}>Аналитика</button>
+        </div>
+        <button className="btn" aria-pressed={threeD} onClick={() => setThreeD(!threeD)} title="Объёмный вид зданий">3D</button>
         <span className="grow" />
         <div className="peers" aria-label={`В документе: ${[myName, ...peerList.map((p) => p.name)].join(', ')}`}>
           <button className="peer-avatar me" style={{ background: '#334155' }} title={`${myName} (вы) — изменить имя`}
             onClick={() => setNameEdit(myName)}>{initials(myName)}</button>
           {peerList.map((p) => (
-            <button key={p.id} className="peer-avatar" style={{ background: p.color }} title={`${p.name} — показать`}
-              onClick={() => p.selection && showElement(p.selection.kind, p.selection.id)}>{initials(p.name)}</button>
+            <button key={p.id} className={`peer-avatar ${followId === p.id ? 'following' : ''}`} style={{ background: p.color }}
+              title={followId === p.id ? `Перестать следить за ${p.name}` : `Следить за ${p.name}: карта повторяет его вид`}
+              aria-pressed={followId === p.id}
+              onClick={() => {
+                const next = followId === p.id ? null : p.id;
+                setFollowId(next);
+                const view = (p as { view?: { center: [number, number]; zoom: number } }).view;
+                if (next && view) mapRef.current?.jumpTo(view.center, view.zoom);
+                if (next) setNotice(`Вы следите за ${p.name}. Нажмите на аватар ещё раз, чтобы перестать.`);
+              }}>{initials(p.name)}</button>
           ))}
         </div>
         <button className="btn" onClick={shareLink} title="Скопировать ссылку для совместной работы">Поделиться</button>
@@ -647,15 +757,17 @@ export default function App() {
       </header>
 
       <div className="body">
-        <ToolRail tool={tool} onTool={setTool} />
+        {mode === 'edit' && <ToolRail tool={tool} onTool={setTool} />}
         <LayersPanel layers={layers} onLayers={onLayers} onSelectAll={onSelectAllLayers}
           baseOpacity={baseOpacity} onBaseOpacity={setBaseOpacity}
           canApplyTemplate={selectedWay?.layer === 'road'} onTemplate={applyTemplate}
-          drawOrder={drawOrder} onDrawOrder={setDrawOrder} />
+          drawOrder={drawOrder} onDrawOrder={setDrawOrder}
+          basemap={<BasemapControls base={base} onBase={setBase} overlay={overlay} onOverlay={setOverlay} onOverlayFile={onOverlayFile} />} />
         <main className="center">
           <div className="map-wrap">
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
-              drawOrder={drawOrder} route={routeOverlay}
+              drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
+              threeD={threeD} highlight={highlight} onView={onView}
               baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
@@ -668,7 +780,8 @@ export default function App() {
           </div>
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
             validating={validating} onShow={showIssue} onFix={onFix}
-            issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}>
+            issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}
+            onShowRefs={onShowRefs}>
             {bottomTab === 'load' && (
               <LoadPanel load={load} comparison={comparison} onMultiplier={onMultiplier} onSnapshot={onSnapshot}
                 onDeleteSnapshot={onDeleteSnapshot} onCompare={onCompare} onReset={onResetLoad} onShowRoad={onShowRoad}
@@ -679,11 +792,20 @@ export default function App() {
             )}
           </BottomPanel>
         </main>
+        {mode === 'analytics' && !selection ? (
+          <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
+            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
+        ) : (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
           onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}
-          onOpenRoute={setOpenRoute} onScenarioChanged={refreshLoad} />
+          onOpenRoute={setOpenRoute} onScenarioChanged={refreshLoad}
+          closed={selection?.kind === 'way' && (load?.closures ?? []).some((c) => c.id === selection.id)}
+          onClosure={onClosure} onObjectReport={objectReport} onAutofill={autofillBuildings}
+          readOnly={mode === 'analytics'} />
+        )}
       </div>
+      {tasksOpen && <TasksModal docId={doc.doc_id} selection={selection} onClose={() => setTasksOpen(false)} />}
 
       <footer className="status mono">
         <span>узлов {doc.stats.nodes}</span><span>рёбер {doc.stats.ways}</span><span>светофоров {doc.stats.signals}</span>

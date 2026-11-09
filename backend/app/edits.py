@@ -8,6 +8,7 @@ operation without writing an inverse by hand.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -29,6 +30,19 @@ class Transaction:
     label: str
     before: dict[Key, Element | None] = field(default_factory=dict)
     after: dict[Key, Element | None] = field(default_factory=dict)
+    author: str | None = None   # who made the edit (collaborator name)
+    at: float = 0.0             # unix time of the edit
+
+    def summary(self) -> dict[str, Any]:
+        """Journal entry for the history panel: what, who, when and which elements."""
+        refs = []
+        for (kind, eid) in self.before:
+            old, new = self.before[(kind, eid)], self.after.get((kind, eid))
+            status = "added" if old is None else "deleted" if new is None else "modified"
+            ref = new or old
+            refs.append({"kind": kind, "id": eid, "status": status,
+                         "name": ref.tags.get("name", "") if ref is not None else ""})
+        return {"label": self.label, "author": self.author, "at": self.at, "refs": refs[:30], "count": len(refs)}
 
     def touch(self, kind: Kind, eid: int) -> None:
         key = (kind, eid)
@@ -97,6 +111,7 @@ class History:
             "undo_label": self.undo_stack[-1].label if self.undo_stack else None,
             "redo_label": self.redo_stack[-1].label if self.redo_stack else None,
             "entries": [tx.label for tx in reversed(self.undo_stack[-50:])],
+            "details": [tx.summary() for tx in reversed(self.undo_stack[-50:])],
         }
 
 
@@ -1232,14 +1247,15 @@ OPS: dict[str, tuple[Callable[..., dict], str]] = {
 }
 
 
-def apply_ops(doc: OsmDocument, history: History, ops: list[tuple[str, dict]], label: str | None = None) -> list[dict]:
+def apply_ops(doc: OsmDocument, history: History, ops: list[tuple[str, dict]], label: str | None = None,
+              author: str | None = None, at: float | None = None) -> list[dict]:
     """Apply several operations as ONE undo step (e.g. a road template)."""
     if not ops:
         return []
     for op, _ in ops:
         if op not in OPS:
             raise OpError(f"неизвестная операция: {op}")
-    tx = Transaction(doc, label or OPS[ops[0][0]][1])
+    tx = Transaction(doc, label or OPS[ops[0][0]][1], author=author, at=at if at is not None else time.time())
     results: list[dict] = []
     try:
         for op, args in ops:
@@ -1260,5 +1276,6 @@ def apply_ops(doc: OsmDocument, history: History, ops: list[tuple[str, dict]], l
     return results
 
 
-def apply_op(doc: OsmDocument, history: History, op: str, args: dict, label: str | None = None) -> dict:
-    return apply_ops(doc, history, [(op, args)], label)[0]
+def apply_op(doc: OsmDocument, history: History, op: str, args: dict, label: str | None = None,
+             author: str | None = None, at: float | None = None) -> dict:
+    return apply_ops(doc, history, [(op, args)], label, author, at)[0]
