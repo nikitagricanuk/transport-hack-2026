@@ -118,3 +118,24 @@ def test_fast_writer_is_valid_xml_and_escapes(doc):
     assert out.startswith(b'<?xml version="1.0" encoding="UTF-8"?>')
     text = out.decode("utf-8")
     assert "<note>" in text and "<bounds" in text and "<meta" in text
+
+
+def test_export_after_backend_restart_returns_the_whole_edited_file(raw):
+    """Regression: after a redeploy the export answered a 88-byte 404 JSON that
+    the browser saved as team.osm."""
+    c = TestClient(app)
+    doc_id = c.post("/api/documents", files={"file": ("t.osm", raw, "application/xml")}).json()["doc_id"]
+    c.post(f"/api/documents/{doc_id}/ops", json={"op": "set_tags", "args": {"kind": "way", "id": 100, "tags": {"maxspeed": "40"}}})
+    before = c.get(f"/api/documents/{doc_id}/export").content
+
+    SESSIONS.clear()  # backend restarted; the browser tab still has the document open
+    r = c.get(f"/api/documents/{doc_id}/export", params={"filename": "team1"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/xml")
+    assert r.content == before and len(r.content) >= len(raw) * 0.9
+    again = OsmDocument.parse(r.content)
+    assert again.ways[100].tags["maxspeed"] == "40" and len(again.nodes) == len(OsmDocument.parse(raw).nodes)
+    # edits keep working on the restored document
+    assert c.post(f"/api/documents/{doc_id}/ops",
+                  json={"op": "set_tags", "args": {"kind": "way", "id": 101, "tags": {"maxspeed": "30"}}}).status_code == 200
+    # an unknown document is still a clear 404, never a file
+    assert c.get("/api/documents/nope/export").status_code == 404

@@ -104,7 +104,14 @@ class SnapshotRequest(BaseModel):
 
 # ----------------------------------------------------------------- helpers
 def _session(doc_id: str) -> Session:
+    """The open document, restored from its draft if the backend was restarted.
+
+    Without the restore every request after a redeploy answered 404, and the
+    browser saved that 88-byte error as the exported .osm.
+    """
     s = SESSIONS.get(doc_id)
+    if s is None and _draft_exists(doc_id):
+        s = _materialize_draft(doc_id)
     if s is None:
         raise HTTPException(404, "документ не найден — загрузите .osm заново")
     return s
@@ -329,11 +336,23 @@ def _draft_exists(doc_id: str) -> bool:
     return osm_path.is_file() and meta_path.is_file()
 
 
+_RESTORE_LOCK = threading.Lock()
+
+
 def _materialize_draft(doc_id: str) -> Session:
-    """Load the draft stored for this id. Never substitutes a different document."""
+    """Load the draft stored for this id once, even when several requests race."""
     existing = SESSIONS.get(doc_id)
     if existing is not None:
         return existing
+    with _RESTORE_LOCK:
+        existing = SESSIONS.get(doc_id)
+        if existing is not None:
+            return existing
+        return _materialize_draft_unlocked(doc_id)
+
+
+def _materialize_draft_unlocked(doc_id: str) -> Session:
+    """Load the draft stored for this id. Never substitutes a different document."""
     _migrate_legacy_autosave()
     paths = _draft_paths(doc_id)
     if paths is None:

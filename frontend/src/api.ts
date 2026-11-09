@@ -47,6 +47,41 @@ export type OpResponse = Omit<DocState, 'geo'> & {
   results?: { id?: number; warnings?: string[] }[];
 };
 
+/**
+ * Download a file through fetch and save it only when the server answered with it.
+ * A plain <a href download> saves whatever comes back, so an error JSON ended up
+ * on disk as a tiny ".osm".
+ */
+export async function downloadFile(url: string, filename: string, expectOsm = false): Promise<number> {
+  const res = await fetch(url, { headers: { 'X-Client-Id': CLIENT_ID } });
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) msg = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+    } catch {
+      /* not json */
+    }
+    throw new Error(`Файл не сохранён: ${msg}`);
+  }
+  const blob = await res.blob();
+  if (expectOsm) {
+    const head = (await blob.slice(0, 200).text()).trimStart();
+    if (!head.startsWith('<?xml') && !head.startsWith('<osm')) {
+      throw new Error('Файл не сохранён: сервер вернул не OSM. Обновите страницу и попробуйте снова.');
+    }
+  }
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+  return blob.size;
+}
+
 export const api = {
   samples: () => request<{ name: string; size: number }[]>('/api/samples'),
   openSample: (name: string) => request<DocState>(`/api/samples/${encodeURIComponent(name)}/open`, { method: 'POST' }),

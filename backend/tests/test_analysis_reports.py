@@ -88,10 +88,7 @@ def test_snapshots_compare_load_and_graph_changes(raw):
 
     # scenario survives a backend restart together with the draft
     SESSIONS.pop(doc_id)
-    again = c.get(f"/api/documents/{doc_id}/load")
-    assert again.status_code == 404  # memory session gone; documents endpoint restores it
-    c.get(f"/api/documents/{doc_id}")
-    again = c.get(f"/api/documents/{doc_id}/load").json()
+    again = c.get(f"/api/documents/{doc_id}/load").json()  # restored from the draft on demand
     assert again["multiplier"] == 1.2 and len(again["snapshots"]) == 2
 
     assert c.post(f"/api/documents/{doc_id}/load", json={"way_id": 999999, "volume": 5}).status_code == 404

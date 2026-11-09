@@ -330,11 +330,10 @@ export function ExportCheck({ validation, onFixList, onExport, onClose, filename
 }
 
 // ------------------------------------------------------------------ report
-export function ReportModal({ data, onClose, xlsxUrl, docxUrl }: {
+export function ReportModal({ data, onClose, onDownload }: {
   data: ReportData | null | 'error';
   onClose: () => void;
-  xlsxUrl: string;
-  docxUrl: string;
+  onDownload: (kind: 'xlsx' | 'docx') => void;
 }) {
   return (
     <div className="modal-back" onClick={onClose}>
@@ -342,8 +341,8 @@ export function ReportModal({ data, onClose, xlsxUrl, docxUrl }: {
         <div className="row between">
           <h2>Отчёт по схеме</h2>
           <div className="row gap8">
-            <a className="btn" href={docxUrl} download>Word (.docx)</a>
-            <a className="btn primary" href={xlsxUrl} download>Excel (.xlsx)</a>
+            <button className="btn" onClick={() => onDownload('docx')}>Word (.docx)</button>
+            <button className="btn primary" onClick={() => onDownload('xlsx')}>Excel (.xlsx)</button>
           </div>
         </div>
         {data === null && <p>Собираю данные…</p>}

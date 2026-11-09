@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, type OpResponse } from './api';
+import { api, downloadFile, type OpResponse } from './api';
 import MapView, { type MapHandle } from './components/MapView';
 import Inspector from './components/Inspector';
 import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail, type BottomTab } from './components/Panels';
@@ -429,13 +429,25 @@ export default function App() {
   useEffect(() => { setHint(null); }, [tool]);
 
   // ------------------------------------------------------------ export
-  const exportOsm = () => {
+  const exportOsm = async () => {
     if (!doc) return;
-    const a = document.createElement('a');
-    a.href = api.exportUrl(doc.doc_id, team || 'team');
-    a.download = `${team || 'team'}.osm`;
-    a.click();
+    const name = `${team || 'team'}.osm`;
+    try {
+      const size = await downloadFile(api.exportUrl(doc.doc_id, team || 'team'), name, true);
+      setNotice(`Сохранён ${name} — ${(size / 1024 / 1024).toFixed(2)} МБ`);
+    } catch (e) {
+      setError((e as Error).message);
+    }
   };
+  const downloadReport = useCallback(async (kind: 'xlsx' | 'docx') => {
+    const id = docIdRef.current;
+    if (!id) return;
+    try {
+      await downloadFile(api.reportUrl(id, kind), `report.${kind}`);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
 
   const checkSumo = async () => {
     if (!doc) return;
@@ -610,7 +622,7 @@ export default function App() {
       )}
       {report !== undefined && (
         <ReportModal data={report} onClose={() => setReport(undefined)}
-          xlsxUrl={api.reportUrl(doc.doc_id, 'xlsx')} docxUrl={api.reportUrl(doc.doc_id, 'docx')} />
+          onDownload={downloadReport} />
       )}
 
       {sumo && (
