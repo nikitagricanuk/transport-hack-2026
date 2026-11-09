@@ -3,6 +3,7 @@ import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEv
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import { PATH_LAYER_IDS, PATH_STYLES, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
 
 export interface MapHandle {
   /** collaborators' cursors and selections; called often, does not re-render React */
@@ -39,25 +40,25 @@ type DraftPoint = { lon: number; lat: number; id?: number; way_id?: number };
 const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] };
 const HIT_PX = 6;
 
-const ROAD_COLOR: maplibregl.ExpressionSpecification = [
-  'match', ['get', 'highway'],
-  ['motorway', 'trunk', 'motorway_link', 'trunk_link'], '#F2A06B',
-  ['primary', 'primary_link'], '#FFD27A',
-  ['secondary', 'secondary_link'], '#FFF0A8',
-  '#FFFFFF',
-];
-
-/** Width by lane count and zoom. `extra` px is added at every stop: MapLibre only
- * accepts ['zoom'] in a top-level interpolate, so it cannot be wrapped in ['+', ...]. */
+/** Width by lane count, highway class and zoom. `extra` px is added at every stop.
+ * MapLibre only accepts ['zoom'] as the input of a top-level interpolate, so the
+ * zoom expression is never wrapped in ['+', ...]. */
 const laneWidth = (
-  k: number,
   extra: number | maplibregl.ExpressionSpecification = 0,
 ): maplibregl.ExpressionSpecification => [
   'interpolate', ['exponential', 2], ['zoom'],
-  13, ['+', ['*', ['get', 'lanes'], 0.6 * k], extra],
-  17, ['+', ['*', ['get', 'lanes'], 3.2 * k], extra],
-  20, ['+', ['*', ['get', 'lanes'], 22 * k], extra],
+  13, ['+', ['*', ['get', 'lanes'], ['*', classScale(), 0.6]], extra],
+  17, ['+', ['*', ['get', 'lanes'], ['*', classScale(), 3.2]], extra],
+  20, ['+', ['*', ['get', 'lanes'], ['*', classScale(), 22]], extra],
 ];
+
+const filterIf = (map: maplibregl.Map, id: string, filter: maplibregl.FilterSpecification) => {
+  if (map.getLayer(id)) map.setFilter(id, filter);
+};
+const showIf = (map: maplibregl.Map, ids: string[], on: boolean) => {
+  const visibility = on ? 'visible' : 'none';
+  for (const id of ids) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visibility);
+};
 
 function arrowImage(): ImageData {
   const s = 24;
@@ -213,26 +214,37 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': ['match', ['get', 'layer'], 'building', '#8A8273', '#6A9E55'], 'line-width': 1, 'line-opacity': 0.8 } });
       map.addLayer({ id: 'area-selected', type: 'line', source: 'areas', filter: ['==', ['get', 'id'], 0],
         paint: { 'line-color': '#2563EB', 'line-width': 2.5 } });
-      map.addLayer({ id: 'paths', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'path'],
-        paint: { 'line-color': '#9CA3AF', 'line-width': 1.4, 'line-dasharray': [2, 1.5] } });
+      for (const style of PATH_STYLES) {
+        map.addLayer({
+          id: style.id, type: 'line', source: 'ways', filter: pathFilter(style),
+          layout: { 'line-cap': style.dash ? 'butt' : 'round', 'line-join': 'round' },
+          paint: {
+            'line-color': style.color,
+            'line-width': style.width,
+            ...(style.dash ? { 'line-dasharray': style.dash } : {}),
+          },
+        });
+      }
       map.addLayer({ id: 'road-casing', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'road'],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['case', ['get', 'bridge'], '#4B5260', '#AEB5C0'],
-                 'line-width': laneWidth(1, ['case', ['get', 'bridge'], 4, 2]) } });
-      map.addLayer({ id: 'road-fill', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'road'],
+                 'line-width': laneWidth(['case', ['get', 'bridge'], 4, 2]) } });
+      map.addLayer({ id: 'road-fill', type: 'line', source: 'ways', filter: solidRoadFilter(),
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
-          // no v/c state (-1) -> normal road colour; otherwise green / yellow / orange / red by congestion
-          'line-color': ['case', ['<', ['to-number', ['coalesce', ['feature-state', 'vc'], -1]], 0],
-            ROAD_COLOR,
-            ['step', ['to-number', ['coalesce', ['feature-state', 'vc'], 0]], '#22C55E', 0.6, '#EAB308', 0.85, '#F97316', 1.0, '#DC2626']],
-          'line-width': laneWidth(1),
+          // no v/c state (-1) -> class colour; otherwise green / yellow / orange / red by congestion
+          'line-color': roadLineColor(),
+          'line-width': laneWidth(),
         } });
+      // Links stay out of the solid fill so the dash reads against the casing.
+      map.addLayer({ id: 'road-link', type: 'line', source: 'ways', filter: linkFilter(),
+        layout: { 'line-cap': 'butt', 'line-join': 'round' },
+        paint: { 'line-color': roadLineColor(), 'line-width': laneWidth(), 'line-dasharray': [2, 1.4] } });
       map.addLayer({ id: 'rail', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'rail'],
         paint: { 'line-color': '#7C3AED', 'line-width': 2, 'line-dasharray': [3, 2] } });
       map.addLayer({ id: 'way-selected', type: 'line', source: 'ways', filter: ['==', ['get', 'id'], 0],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': '#2563EB', 'line-width': laneWidth(1, 6), 'line-opacity': 0.35 } });
+        paint: { 'line-color': '#2563EB', 'line-width': laneWidth(6), 'line-opacity': 0.35 } });
       map.addLayer({ id: 'way-selected-core', type: 'line', source: 'ways', filter: ['==', ['get', 'id'], 0],
         paint: { 'line-color': '#2563EB', 'line-width': 2.5 } });
       map.addLayer({ id: 'oneway', type: 'symbol', source: 'ways', minzoom: 15,
@@ -418,10 +430,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const sel = props.selection;
     const wayId = sel?.kind === 'way' ? sel.id : 0;
     const nodeId = sel?.kind === 'node' ? sel.id : 0;
-    map.setFilter('way-selected', ['==', ['get', 'id'], wayId]);
-    map.setFilter('way-selected-core', ['==', ['get', 'id'], wayId]);
-    map.setFilter('node-selected', ['==', ['get', 'id'], nodeId]);
-    map.setFilter('area-selected', ['==', ['get', 'id'], wayId]);
+    filterIf(map, 'way-selected', ['==', ['get', 'id'], wayId]);
+    filterIf(map, 'way-selected-core', ['==', ['get', 'id'], wayId]);
+    filterIf(map, 'node-selected', ['==', ['get', 'id'], nodeId]);
+    filterIf(map, 'area-selected', ['==', ['get', 'id'], wayId]);
     updateVerts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, props.selection, props.geo]);
@@ -430,15 +442,13 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const map = mapRef.current;
     if (!ready || !map) return;
     const L = props.layers;
-    const vis = (on: boolean) => (on ? 'visible' : 'none');
-    const set = (ids: string[], on: boolean) => ids.forEach((id) => map.setLayoutProperty(id, 'visibility', vis(on)));
-    set(['road-casing', 'road-fill', 'oneway', 'road-label', 'junctions'], L.roads);
-    set(['paths'], L.paths);
-    set(['rail'], L.rail);
-    set(['areas-fill', 'areas-line'], L.buildings);
-    set(['issues'], L.issues);
+    showIf(map, ['road-casing', 'road-fill', 'road-link', 'oneway', 'road-label', 'junctions'], L.roads);
+    showIf(map, PATH_LAYER_IDS, L.paths);
+    showIf(map, ['rail'], L.rail);
+    showIf(map, ['areas-fill', 'areas-line'], L.buildings);
+    showIf(map, ['issues'], L.issues);
     const cats = [L.signals && 'signal', L.crossings && 'crossing', L.stops && 'stop', 'tagged'].filter(Boolean);
-    map.setFilter('pois', ['in', ['get', 'category'], ['literal', cats]]);
+    filterIf(map, 'pois', ['in', ['get', 'category'], ['literal', cats]]);
   }, [ready, props.layers]);
 
   useEffect(() => {

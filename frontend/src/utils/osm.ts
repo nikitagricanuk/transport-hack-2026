@@ -16,7 +16,16 @@ export const HIGHWAY_CLASSES: { value: string; label: string }[] = [
   { value: 'footway', label: 'footway — тротуар' },
 ];
 
-export const SURFACES = ['asphalt', 'concrete', 'paving_stones', 'sett', 'compacted', 'gravel', 'unpaved'];
+/** OSM `surface=*` values. The label is Russian; the stored value stays the OSM token. */
+export const SURFACES: { value: string; label: string }[] = [
+  { value: 'asphalt', label: 'асфальт' },
+  { value: 'concrete', label: 'бетон' },
+  { value: 'paving_stones', label: 'тротуарная плитка' },
+  { value: 'sett', label: 'брусчатка' },
+  { value: 'compacted', label: 'уплотнённое покрытие' },
+  { value: 'gravel', label: 'гравий' },
+  { value: 'unpaved', label: 'без покрытия' },
+];
 export const SPEEDS = [20, 30, 40, 50, 60, 80];
 
 export const KEY_SUGGESTIONS = [
@@ -32,7 +41,7 @@ export const VALUE_SUGGESTIONS: Record<string, string[]> = {
   bridge: ['yes', 'viaduct', 'no'],
   tunnel: ['yes', 'no'],
   layer: ['-1', '1', '2'],
-  surface: SURFACES,
+  surface: SURFACES.map((s) => s.value),
   junction: ['roundabout', 'circular'],
   crossing: ['marked', 'traffic_signals', 'uncontrolled', 'unmarked'],
   'traffic_signals:direction': ['forward', 'backward', 'both'],
