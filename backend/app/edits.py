@@ -263,6 +263,38 @@ def op_move_node(doc, tx, id: int, lat: float, lon: float):
     return _with_warnings({"id": n.id}, warnings)
 
 
+def op_move_way(doc, tx, id: int, dlat: float, dlon: float):
+    """Shift every node of a way by the same delta, so a building or a road moves as one object.
+
+    Nodes shared with another way move too: in OSM the corner belongs to every way that uses it.
+    A highway may pick up a new crossing where the moved shape now overlays another road.
+    """
+    w = _way(doc, int(id))
+    dlat, dlon = float(dlat), float(dlon)
+    if dlat != dlat or dlon != dlon or abs(dlat) == float("inf") or abs(dlon) == float("inf"):
+        raise OpError("сдвиг должен быть конечным числом")
+    if abs(dlat) < 1e-12 and abs(dlon) < 1e-12:
+        raise OpError("сдвиг слишком мал")
+    moved = 0
+    seen: set[int] = set()
+    for nid in w.nodes:
+        if nid in seen:
+            continue
+        seen.add(nid)
+        n = doc.nodes.get(nid)
+        if n is None:
+            continue
+        tx.touch("node", n.id)
+        n.set_position(n.lat + dlat, n.lon + dlon)
+        moved += 1
+    if moved == 0:
+        raise OpError("у объекта нет узлов")
+    warnings: list[str] = []
+    if "highway" in w.tags and w.tags.get("area") != "yes":
+        warnings = _join_crossings(doc, tx, [w.id])
+    return _with_warnings({"id": w.id, "nodes": moved}, warnings)
+
+
 def op_add_node(doc, tx, lat: float, lon: float, tags: dict | None = None):
     return {"id": _create_node(doc, tx, lat, lon, tags).id}
 
@@ -515,6 +547,107 @@ def _rewrite_split_members(doc: OsmDocument, rel: Relation, old: Way, new: Way) 
         else:
             out.append(m)
     return out
+
+
+# How far a detached end is pulled back from the shared node. Above the 1 m
+# endpoint snap, so the next edit does not glue the roads together again.
+_SEPARATE_GAP_M = 4.0
+
+
+def _highway_ways_at(doc: OsmDocument, nid: int) -> list[Way]:
+    return [w for w in doc.ways_of_node(nid) if "highway" in w.tags and w.tags.get("area") != "yes"]
+
+
+def _endpoint_only(way: Way, nid: int) -> bool:
+    last = len(way.nodes) - 1
+    indexes = [i for i, ref in enumerate(way.nodes) if ref == nid]
+    return bool(indexes) and all(i == 0 or i == last for i in indexes)
+
+
+def _split_way_at(doc: OsmDocument, tx: Transaction, way: Way, idx: int) -> Way:
+    if idx <= 0 or idx >= len(way.nodes) - 1:
+        raise OpError("разделять можно только по внутреннему узлу")
+    tx.touch("way", way.id)
+    second = way.nodes[idx:]
+    way.nodes = way.nodes[: idx + 1]
+    new_id = doc.new_id()
+    tx.touch("way", new_id)
+    new_way = Way(id=new_id, nodes=second, tags=dict(way.tags))
+    doc.ways[new_id] = new_way
+    for rel in list(doc.relations_with("way", way.id)):
+        tx.touch("relation", rel.id)
+        rel.members = _rewrite_split_members(doc, rel, way, new_way)
+    return new_way
+
+
+def _pull_back(doc: OsmDocument, proj: LocalProjection, nid: int, neighbor_id: int, gap: float):
+    a, b = doc.nodes.get(nid), doc.nodes.get(neighbor_id)
+    if a is None or b is None or neighbor_id == nid:
+        return None
+    pa, pb = proj.to_xy(a.lat, a.lon), proj.to_xy(b.lat, b.lon)
+    length = dist(pa, pb)
+    if length < 0.2:
+        return None
+    step = min(gap, length * 0.4)
+    return proj.to_latlon(pa[0] + (pb[0] - pa[0]) / length * step, pa[1] + (pb[1] - pa[1]) / length * step)
+
+
+def _detach_endpoint(doc: OsmDocument, tx: Transaction, way: Way, nid: int, proj: LocalProjection, gap: float) -> int:
+    nodes = way.nodes
+    if nodes[0] == nid:
+        neighbor = next((ref for ref in nodes[1:] if ref != nid), None)
+    else:
+        neighbor = next((ref for ref in reversed(nodes[:-1]) if ref != nid), None)
+    if neighbor is None:
+        raise OpError("некуда отодвинуть конец дороги")
+    point = _pull_back(doc, proj, nid, neighbor, gap)
+    if point is None:
+        raise OpError("сегмент слишком короткий, чтобы разъединить дороги")
+    new = _create_node(doc, tx, point[0], point[1])
+    tx.touch("way", way.id)
+    way.nodes = _dedupe_consecutive([new.id if ref == nid else ref for ref in way.nodes])
+    if len(set(way.nodes)) < 2:
+        raise OpError("после разъединения ребро стало короче двух узлов")
+    return new.id
+
+
+def op_separate_ways(doc, tx, node_id: int):
+    """Undo a shared connection: every road but one leaves the node.
+
+    The through road (the node sits in its middle) keeps the point. A spur that
+    only ends here is pulled back along itself. A road that crossed through the
+    node is split and both new ends stop short, leaving a gap. Positive ids are
+    preferred over ways created in this session.
+    """
+    nid = int(node_id)
+    _node(doc, nid)
+    ways = _highway_ways_at(doc, nid)
+    if len(ways) < 2:
+        raise OpError("узел не соединяет несколько дорог")
+    kept = min(ways, key=lambda w: (_endpoint_only(w, nid), w.id < 0, abs(w.id)))
+    pending = [w for w in ways if w.id != kept.id]
+    proj = _proj(doc)
+    created: list[int] = []
+    detached: list[int] = []
+    seen: set[int] = set()
+    steps = 0
+    while pending:
+        steps += 1
+        if steps > 32:
+            raise OpError("не удалось разъединить дороги")
+        way = pending.pop()
+        if way.id in seen or way.id not in doc.ways or nid not in way.nodes:
+            continue
+        if not _endpoint_only(way, nid):
+            interior = next(i for i, ref in enumerate(way.nodes) if ref == nid and 0 < i < len(way.nodes) - 1)
+            other = _split_way_at(doc, tx, way, interior)
+            pending.append(way)
+            pending.append(other)
+            continue
+        seen.add(way.id)
+        created.append(_detach_endpoint(doc, tx, way, nid, proj, _SEPARATE_GAP_M))
+        detached.append(way.id)
+    return {"id": nid, "detached": detached, "nodes": created}
 
 
 def op_split_way(doc, tx, way_id: int, node_id: int):
@@ -923,6 +1056,8 @@ OPS: dict[str, tuple[Callable[..., dict], str]] = {
     "set_tags": (op_set_tags, "Изменены теги"),
     "set_lanes": (op_set_lanes, "Изменены полосы"),
     "move_node": (op_move_node, "Перемещён узел"),
+    "move_way": (op_move_way, "Объект перемещён"),
+    "separate_ways": (op_separate_ways, "Дороги разъединены"),
     "add_node": (op_add_node, "Добавлен узел"),
     "insert_node": (op_insert_node, "Вставлен узел в ребро"),
     "add_way": (op_add_way, "Добавлено ребро"),

@@ -10,6 +10,7 @@ import type {
   ReportData, Selection, SumoResult, Tool, ValidationResult, WayProps,
 } from './types';
 import { applyPatch } from './utils/geoPatch';
+import { sharedHighwayNodes } from './utils/joins';
 import { saveName, savedName, useCollab, type CollabMessage } from './utils/collab';
 import { isDraftPointKeyClaimed, isFullscreenToggle, shouldDeleteSelection } from './utils/keys';
 import {
@@ -118,6 +119,12 @@ export default function App() {
     return undefined;
   }, [doc, selection]);
   const selectedWay = selection?.kind === 'way' ? wayIndex.get(selection.id) : undefined;
+  const sharedNodes = useMemo(() => sharedHighwayNodes(doc?.geo ?? null), [doc]);
+  const canSeparate = selection?.kind === 'node' && sharedNodes.has(selection.id);
+  const sharedJunctions = useMemo(() => {
+    if (!selectedWay || (selectedWay.layer !== 'road' && selectedWay.layer !== 'path')) return 0;
+    return new Set(selectedWay.nodes.filter((id) => sharedNodes.has(id))).size;
+  }, [selectedWay, sharedNodes]);
   const selectedGeometry = useMemo(() => {
     if (!doc || selection?.kind !== 'way') return undefined;
     const line = doc.geo.ways.features.find((f) => f.properties.id === selection.id);
@@ -659,6 +666,7 @@ export default function App() {
           </BottomPanel>
         </main>
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
+          canSeparate={canSeparate} sharedJunctions={sharedJunctions}
           onSetLoad={onSetLoad} onOp={onInspectorOp} />
       </div>
 
