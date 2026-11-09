@@ -184,3 +184,4 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1p
 .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
 .maplibregl-ctrl-attrib { font-size: 10px; }
+.bottom-body .more { margin: 8px 14px; }

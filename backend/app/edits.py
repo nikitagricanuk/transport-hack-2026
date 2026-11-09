@@ -8,12 +8,11 @@ operation without writing an inverse by hand.
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .geo import LocalProjection, dist, project_on_segment
-from .osm_model import Element, Kind, Member, Node, OsmDocument, Relation, Way
+from .osm_model import Element, Kind, Member, Node, OsmDocument, Relation, Way, clone
 from .roads import direction, lane_tags, reversed_tags
 
 
@@ -35,12 +34,12 @@ class Transaction:
         key = (kind, eid)
         if key not in self.before:
             cur = self.doc.get(kind, eid)
-            self.before[key] = copy.deepcopy(cur)
+            self.before[key] = clone(cur)
 
     def commit(self) -> None:
         for (kind, eid) in self.before:
             cur = self.doc.get(kind, eid)  # type: ignore[arg-type]
-            self.after[(kind, eid)] = copy.deepcopy(cur)
+            self.after[(kind, eid)] = clone(cur)
 
     def _restore(self, states: dict[Key, Element | None]) -> None:
         for (kind, eid), el in states.items():
@@ -48,7 +47,7 @@ class Transaction:
             if el is None:
                 store.pop(eid, None)
             else:
-                store[eid] = copy.deepcopy(el)
+                store[eid] = clone(el)  # type: ignore[assignment]
 
     def undo(self) -> None:
         self._restore(self.before)
@@ -66,6 +65,8 @@ class History:
         self.undo_stack: list[Transaction] = []
         self.redo_stack: list[Transaction] = []
         self.limit = limit
+        # the transaction applied, undone or redone last; tells callers what changed
+        self.last_tx: Transaction | None = None
 
     def push(self, tx: Transaction) -> None:
         self.undo_stack.append(tx)
@@ -594,6 +595,7 @@ def apply_ops(doc: OsmDocument, history: History, ops: list[tuple[str, dict]], l
         tx.undo()
         raise
     tx.commit()
+    history.last_tx = tx
     if not tx.is_empty:
         history.push(tx)
     return results

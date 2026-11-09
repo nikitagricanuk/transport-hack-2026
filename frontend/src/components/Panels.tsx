@@ -1,3 +1,4 @@
+import { memo, useState } from 'react';
 import type { HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
 
@@ -94,12 +95,16 @@ export function LayersPanel({ layers, onLayers, baseOpacity, onBaseOpacity, canA
 // ---------------------------------------------------------------- issues
 const SEV_LABEL = { critical: 'критично', warning: 'предупреждение', info: 'замечание' } as const;
 
-export function BottomPanel({ validation, history, tab, onTab, onShow, onFix, validating }: {
+const ISSUES_PAGE = 200;
+
+export const BottomPanel = memo(function BottomPanel({ validation, history, tab, onTab, onShow, onFix, validating }: {
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: 'issues' | 'history'; onTab: (t: 'issues' | 'history') => void;
   onShow: (i: Issue) => void; onFix: (i: Issue) => void; validating: boolean;
 }) {
   const issues = validation?.issues ?? [];
+  // thousands of DOM rows make every re-render slow; show a page, load more on demand
+  const [limit, setLimit] = useState(ISSUES_PAGE);
   return (
     <section className="bottom" aria-label="Проблемы и история">
       <div className="tabs" role="tablist">
@@ -120,7 +125,7 @@ export function BottomPanel({ validation, history, tab, onTab, onShow, onFix, va
       <div className="bottom-body">
         {tab === 'issues' && (issues.length === 0
           ? <p className="ok-msg">Проблем не найдено</p>
-          : issues.map((i) => (
+          : issues.slice(0, limit).map((i) => (
             <div key={i.id} className="issue">
               <span className={`sev ${i.severity}`} title={SEV_LABEL[i.severity]}>{i.severity === 'info' ? 'i' : '!'}</span>
               <button className="link issue-title" onClick={() => onShow(i)}>{i.title}</button>
@@ -129,10 +134,15 @@ export function BottomPanel({ validation, history, tab, onTab, onShow, onFix, va
               {i.fix ? <button className="btn small" onClick={() => onFix(i)}>{i.fix.label}</button> : <span />}
             </div>
           )))}
+        {tab === 'issues' && issues.length > limit && (
+          <button className="btn small more" onClick={() => setLimit(limit + ISSUES_PAGE)}>
+            Показать ещё {Math.min(ISSUES_PAGE, issues.length - limit)} из {issues.length - limit}
+          </button>
+        )}
         {tab === 'history' && (history?.entries.length
           ? history.entries.map((e, idx) => <div key={idx} className="hist">{idx === 0 ? '● ' : ''}{e}</div>)
           : <p className="muted pad">Правок пока нет</p>)}
       </div>
     </section>
   );
-}
+});

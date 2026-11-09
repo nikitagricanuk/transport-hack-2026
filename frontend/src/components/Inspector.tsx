@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import type { NodeProps, Op, Tags, WayProps } from '../types';
 import TagEditor from './TagEditor';
 import { HIGHWAY_CLASSES, SPEEDS, SURFACES, laneCounts, onewayMode, turnGlyphs, type OnewayMode } from '../utils/osm';
@@ -9,7 +9,7 @@ interface Props {
   onOp: (op: Op | Op[], label?: string) => void;
 }
 
-export default function Inspector({ way, node, onOp }: Props) {
+export default memo(function Inspector({ way, node, onOp }: Props) {
   const [tab, setTab] = useState<'attr' | 'tags'>('attr');
   if (!way && !node) {
     return (
@@ -51,7 +51,7 @@ export default function Inspector({ way, node, onOp }: Props) {
       </div>
     </aside>
   );
-}
+});
 
 function nodeTitle(tags: Tags) {
   if (tags.highway === 'traffic_signals') return 'Светофор';

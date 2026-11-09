@@ -4,13 +4,15 @@ import MapView, { type MapHandle } from './components/MapView';
 import Inspector from './components/Inspector';
 import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail } from './components/Panels';
 import StartScreen from './components/StartScreen';
-import type { DocState, Issue, LayerVisibility, NodeProps, Op, OrganizerResult, Selection, SumoResult, Tool, ValidationResult, WayProps } from './types';
+import type { DocState, Geo, GeoDiff, Issue, LayerVisibility, NodeProps, Op, OrganizerResult, Selection, SumoResult, Tool, ValidationResult, WayProps } from './types';
+import { applyPatch } from './utils/geoPatch';
 import { TEMPLATES, templateOps, type RoadTemplate } from './utils/osm';
 
 const DEFAULT_LAYERS: LayerVisibility = {
   roads: true, paths: true, rail: true, signals: true, crossings: true, stops: true, buildings: true, issues: true,
 };
 const STORAGE_KEY = 'uds-editor-session';
+const NO_ISSUES: Issue[] = [];
 
 export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
@@ -23,7 +25,17 @@ export default function App() {
   const [bottomTab, setBottomTab] = useState<'issues' | 'history'>('issues');
   const [hint, setHint] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<{ ll: [number, number] | null; zoom: number }>({ ll: null, zoom: 15 });
+  // Cursor coordinates are written straight into the status bar. Keeping them in
+  // React state re-rendered the whole editor on every mouse move.
+  const cursorEl = useRef<HTMLSpanElement>(null);
+  const onCursor = useCallback((ll: [number, number] | null, zoom: number) => {
+    if (cursorEl.current) {
+      cursorEl.current.textContent = (ll ? `${ll[1].toFixed(5)}° N · ${ll[0].toFixed(5)}° E   ` : '') + `z ${zoom.toFixed(1)}`;
+    }
+  }, []);
+  const [mapDiff, setMapDiff] = useState<GeoDiff | null>(null);
+  // latest map data, updated synchronously so back-to-back patches never merge onto a stale base
+  const geoRef = useRef<Geo | null>(null);
   const [team, setTeam] = useState('team1');
   const [sumo, setSumo] = useState<SumoResult | 'running' | null>(null);
   const [organizer, setOrganizer] = useState<OrganizerResult | 'running' | null>(null);
@@ -71,6 +83,8 @@ export default function App() {
   }, []);
 
   const loadDoc = useCallback((d: DocState) => {
+    geoRef.current = d.geo;
+    setMapDiff(null);
     setDoc(d);
     setSelection(null);
     setValidation(null);
@@ -99,8 +113,18 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ doc_id: doc.doc_id, team, filename: doc.filename }));
   }, [doc, team]);
 
-  const applyState = useCallback((res: DocState) => {
-    setDoc(res);
+  const applyState = useCallback((res: OpResponse) => {
+    const { patch, geo: fullGeo, ...state } = res;
+    let geo = fullGeo ?? geoRef.current;
+    let diff: GeoDiff | null = null;
+    if (!fullGeo && patch && geo) {
+      diff = applyPatch(geo, patch);
+      geo = diff.target;
+    }
+    if (!geo) return;
+    geoRef.current = geo;
+    setMapDiff(diff);
+    setDoc({ ...state, geo } as DocState);
     scheduleValidate(res.doc_id);
   }, [scheduleValidate]);
 
@@ -112,24 +136,35 @@ export default function App() {
   }, [doc, selection, wayIndex, selectedNode]);
 
   // -------------------------------------------------------------- ops
-  const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }) => {
-    if (!doc) return;
+  const docId = doc?.doc_id;
+  const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }): Promise<boolean> => {
+    if (!docId) return false;
     setError(null);
     try {
       let res: OpResponse;
       const list = Array.isArray(ops) ? ops : [ops];
-      if (list.length === 1) res = await api.op(doc.doc_id, list[0], opts?.label);
-      else res = await api.batch(doc.doc_id, list, opts?.label);
+      if (list.length === 1) res = await api.op(docId, list[0], opts?.label);
+      else res = await api.batch(docId, list, opts?.label);
       applyState(res);
       if (opts?.select === 'result') {
         const id = res.result?.id ?? res.results?.[res.results.length - 1]?.id;
         const op = list[list.length - 1].op;
         if (id !== undefined) setSelection({ kind: op === 'add_way' ? 'way' : 'node', id });
       }
+      return true;
     } catch (e) {
       setError((e as Error).message);
+      return false;
     }
-  }, [doc, applyState]);
+  }, [docId, applyState]);
+
+  // stable callbacks so memoized panels and the map skip unrelated re-renders
+  const onMapOp = useCallback((op: Op, o?: { select?: 'result' | 'keep' }) => runOps(op, { select: o?.select }), [runOps]);
+  const onFix = useCallback((i: Issue) => {
+    if (i.fix) runOps({ op: i.fix.op, args: i.fix.args }, { label: i.fix.label + ': ' + i.title });
+  }, [runOps]);
+  const onInspectorOp = useCallback((op: Op | Op[], label?: string) => { runOps(op, { label }); }, [runOps]);
+  const mapIssues = layers.issues ? validation?.issues ?? NO_ISSUES : NO_ISSUES;
 
   const undo = useCallback(async () => {
     if (doc?.history.can_undo) applyState(await api.undo(doc.doc_id));
@@ -206,9 +241,11 @@ export default function App() {
   };
 
   const closeDocument = () => {
-    const docId = doc?.doc_id;
+    const closingId = doc?.doc_id;
     localStorage.removeItem(STORAGE_KEY);
-    if (docId) api.discardDraft(docId).catch(() => undefined);
+    if (closingId) api.discardDraft(closingId).catch(() => undefined);
+    geoRef.current = null;
+    setMapDiff(null);
     setDoc(null);
     setValidation(null);
     setSelection(null);
@@ -262,19 +299,16 @@ export default function App() {
           canApplyTemplate={selectedWay?.layer === 'road'} onTemplate={applyTemplate} />
         <main className="center">
           <div className="map-wrap">
-            <MapView ref={mapRef} geo={doc.geo} selection={selection} tool={tool} layers={layers} baseOpacity={baseOpacity}
-              issues={layers.issues ? validation?.issues ?? [] : []} onSelect={setSelection}
-              onOp={(op, o) => runOps(op, { select: o?.select })} onHint={setHint}
-              onCursor={(ll, zoom) => setCursor({ ll, zoom })} wayById={wayById} />
+            <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
+              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection}
+              onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
             <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
             {error && <div className="toast error" role="alert">{error}<button className="icon-btn" aria-label="Закрыть" onClick={() => setError(null)}>×</button></div>}
           </div>
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
-            validating={validating} onShow={showIssue}
-            onFix={(i) => i.fix && runOps({ op: i.fix.op, args: i.fix.args }, { label: i.fix.label + ': ' + i.title })} />
+            validating={validating} onShow={showIssue} onFix={onFix} />
         </main>
-        <Inspector way={selectedWay} node={selectedNode}
-          onOp={(op, label) => runOps(op, { label })} />
+        <Inspector way={selectedWay} node={selectedNode} onOp={onInspectorOp} />
       </div>
 
       <footer className="status mono">
@@ -286,8 +320,7 @@ export default function App() {
           <span className="bad">● вне сильной связности: {validation.summary.outside_strong}</span>
         )}
         <span className="grow" />
-        {cursor.ll && <span>{cursor.ll[1].toFixed(5)}° N · {cursor.ll[0].toFixed(5)}° E</span>}
-        <span>z {cursor.zoom.toFixed(1)}</span>
+        <span ref={cursorEl} style={{ whiteSpace: 'pre' }} />
       </footer>
 
       {organizer && (

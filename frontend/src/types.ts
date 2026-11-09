@@ -1,4 +1,4 @@
-import type { FeatureCollection, LineString, Point, Polygon } from 'geojson';
+import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 
 export type Kind = 'node' | 'way' | 'relation';
 export type Tags = Record<string, string>;
@@ -29,6 +29,24 @@ export interface Geo {
   areas: FeatureCollection<Polygon, WayProps>;
   nodes: FeatureCollection<Point, NodeProps>;
   bounds: [number, number, number, number] | null; // minlat, minlon, maxlat, maxlon
+}
+
+/** Features one edit touched: drop every listed id, then add the returned features. */
+export interface GeoPatch {
+  ways: number[];
+  nodes: number[];
+  features: {
+    ways: Feature<LineString, WayProps>[];
+    areas: Feature<Polygon, WayProps>[];
+    nodes: Feature<Point, NodeProps>[];
+  };
+}
+
+/** A patch applied to `base`, with per-source changes the map can apply without a full reload. */
+export interface GeoDiff {
+  base: Geo;
+  target: Geo;
+  changes: Record<'ways' | 'areas' | 'nodes', { remove: number[]; add: Feature[] }>;
 }
 
 export interface HistoryInfo {

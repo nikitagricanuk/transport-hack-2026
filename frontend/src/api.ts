@@ -1,4 +1,4 @@
-import type { DocState, Op, OrganizerResult, SumoResult, ValidationResult } from './types';
+import type { DocState, Geo, GeoPatch, Op, OrganizerResult, SumoResult, ValidationResult } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -21,7 +21,13 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-export type OpResponse = DocState & { result?: { id?: number; new_id?: number }; results?: { id?: number }[] };
+/** Edits answer with a patch of the touched map features instead of the whole map. */
+export type OpResponse = Omit<DocState, 'geo'> & {
+  geo?: Geo;
+  patch?: GeoPatch | null;
+  result?: { id?: number; new_id?: number };
+  results?: { id?: number }[];
+};
 
 export const api = {
   samples: () => request<{ name: string; size: number }[]>('/api/samples'),
@@ -35,8 +41,8 @@ export const api = {
     request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label })),
   batch: (docId: string, ops: Op[], label?: string) =>
     request<OpResponse>(`/api/documents/${docId}/batch`, json({ ops, label })),
-  undo: (docId: string) => request<DocState>(`/api/documents/${docId}/undo`, { method: 'POST' }),
-  redo: (docId: string) => request<DocState>(`/api/documents/${docId}/redo`, { method: 'POST' }),
+  undo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/undo`, { method: 'POST' }),
+  redo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/redo`, { method: 'POST' }),
   validate: (docId: string) => request<ValidationResult>(`/api/documents/${docId}/validate`),
   sumo: (docId: string) => request<SumoResult>(`/api/documents/${docId}/check/sumo`, { method: 'POST' }),
   organizer: (docId: string) =>
