@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .access import road_permissions
 from .osm_model import Node, OsmDocument, Way
 from .roads import direction, is_drivable
 
@@ -58,6 +59,7 @@ def way_feature(doc: OsmDocument, w: Way) -> tuple[str, dict] | None:
         "bridge": w.tags.get("bridge", "no") not in ("no", ""),
         "nodes": w.nodes,
         "tags": w.tags,
+        "permissions": road_permissions(w.tags),
     }
     if layer in ("building", "area") and w.is_closed:
         return "areas", {"type": "Feature", "id": _fid("way", w.id),

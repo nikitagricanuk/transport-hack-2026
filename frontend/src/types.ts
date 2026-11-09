@@ -3,6 +3,18 @@ import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geo
 export type Kind = 'node' | 'way' | 'relation';
 export type Tags = Record<string, string>;
 
+/** OSM access tags edited as checkboxes. Keys match `backend/app/access.py`. */
+export interface RoadPermissions {
+  foot: boolean;
+  bicycle: boolean;
+  horse: boolean;
+  motorcycle: boolean;
+  hgv: boolean;
+  psv: boolean;
+  moped: boolean;
+  wheelchair: boolean;
+}
+
 export interface WayProps {
   id: number;
   kind: 'way';
@@ -14,6 +26,7 @@ export interface WayProps {
   bridge: boolean;
   nodes: number[];
   tags: Tags;
+  permissions: RoadPermissions;
 }
 
 export interface NodeProps {

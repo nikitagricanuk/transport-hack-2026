@@ -1,4 +1,16 @@
-import type { Op, Tags } from '../types';
+import type { Op, RoadPermissions, Tags } from '../types';
+
+/** Checkbox rows in the inspector. Keys match `backend/app/access.py` `PERMISSIONS`. */
+export const ROAD_PERMISSIONS: { key: keyof RoadPermissions; label: string }[] = [
+  { key: 'foot', label: 'Пешеходы' },
+  { key: 'bicycle', label: 'Велосипедисты' },
+  { key: 'horse', label: 'Всадники' },
+  { key: 'motorcycle', label: 'Мотоциклы' },
+  { key: 'hgv', label: 'Грузовики' },
+  { key: 'psv', label: 'Маршрутный транспорт' },
+  { key: 'moped', label: 'Мопеды' },
+  { key: 'wheelchair', label: 'Инвалидные коляски' },
+];
 
 export const HIGHWAY_CLASSES: { value: string; label: string }[] = [
   { value: 'motorway', label: 'motorway — автомагистраль' },
@@ -33,6 +45,7 @@ export const KEY_SUGGESTIONS = [
   'turn:lanes', 'turn:lanes:forward', 'turn:lanes:backward', 'bridge', 'tunnel', 'layer', 'junction',
   'crossing', 'traffic_signals', 'traffic_signals:direction', 'access', 'motor_vehicle', 'psv', 'sidewalk',
   'lit', 'ref', 'width', 'railway', 'public_transport', 'bus', 'tram', 'smoothness', 'parking:lane:both',
+  'foot', 'bicycle', 'horse', 'motorcycle', 'hgv', 'moped', 'wheelchair',
 ];
 
 export const VALUE_SUGGESTIONS: Record<string, string[]> = {
@@ -46,6 +59,7 @@ export const VALUE_SUGGESTIONS: Record<string, string[]> = {
   crossing: ['marked', 'traffic_signals', 'uncontrolled', 'unmarked'],
   'traffic_signals:direction': ['forward', 'backward', 'both'],
   access: ['yes', 'no', 'private', 'destination'],
+  ...Object.fromEntries(ROAD_PERMISSIONS.map((p) => [p.key, ['yes', 'no', 'designated']])),
   maxspeed: SPEEDS.map(String),
   'turn:lanes': ['left|through|right', 'left;through|through;right', 'through|through;right'],
   'turn:lanes:forward': ['left;through|through;right', 'left|through|through;right'],
