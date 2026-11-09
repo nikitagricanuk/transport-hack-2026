@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 DRIVABLE = {
     "motorway", "trunk", "primary", "secondary", "tertiary", "unclassified",
     "residential", "living_street", "service", "road",
@@ -63,15 +65,22 @@ def default_turns(n: int) -> list[str]:
     return out
 
 
-def lane_tags(forward: int, backward: int, oneway: str, auto_turns: bool = True) -> dict[str, str | None]:
+def lane_tags(forward: int, backward: int, oneway: str, auto_turns: bool = False) -> dict[str, str | None]:
     """Tag patch that sets lanes consistently. None values delete tags.
 
     oneway: "no" | "yes" | "-1"
+
+    Turn lanes are left untouched unless ``auto_turns`` is set. Inventing
+    ``turn:lanes`` marks lanes that were not in the source and SUMO then
+    treats those invented maneuvers as real.
     """
     patch: dict[str, str | None] = {
         "lanes": None, "lanes:forward": None, "lanes:backward": None,
-        "turn:lanes": None, "turn:lanes:forward": None, "turn:lanes:backward": None,
     }
+    if auto_turns:
+        patch.update({
+            "turn:lanes": None, "turn:lanes:forward": None, "turn:lanes:backward": None,
+        })
     forward = max(1, forward)
     if oneway in ("yes", "-1"):
         patch["oneway"] = oneway
@@ -90,19 +99,80 @@ def lane_tags(forward: int, backward: int, oneway: str, auto_turns: bool = True)
     return patch
 
 
+_TURN_SWAP = {
+    "left": "right", "right": "left",
+    "slight_left": "slight_right", "slight_right": "slight_left",
+    "sharp_left": "sharp_right", "sharp_right": "sharp_left",
+    "merge_to_left": "merge_to_right", "merge_to_right": "merge_to_left",
+}
+_SIDE_WORD = re.compile(r"(?<![A-Za-z0-9])(left|right)(?![A-Za-z0-9])")
+_SIDE_VALUE_KEYS = ("sidewalk", "cycleway", "shoulder", "placement", "parking:lane", "busway")
+
+
+def _swap_side_word(value: str) -> str:
+    return _SIDE_WORD.sub(lambda m: "right" if m.group(1) == "left" else "left", value)
+
+
+def _mirror_turns(value: str) -> str:
+    """Lane order is left-to-right in the way direction; reversing the way flips it."""
+    lanes = []
+    for lane in reversed(value.split("|")):
+        parts = [_TURN_SWAP.get(p.strip(), p.strip()) for p in lane.split(";")]
+        lanes.append(";".join(parts))
+    return "|".join(lanes)
+
+
+def _flip_incline(value: str) -> str:
+    v = value.strip()
+    if v == "up":
+        return "down"
+    if v == "down":
+        return "up"
+    m = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)(%?)", v)
+    if not m:
+        return value
+    sign, num, pct = m.groups()
+    return f"{'' if sign == '-' else '-'}{num}{pct}"
+
+
+def _side_value_key(key: str) -> bool:
+    return any(key == prefix or key.startswith(prefix + ":") for prefix in _SIDE_VALUE_KEYS)
+
+
 def reversed_tags(tags: dict[str, str]) -> dict[str, str]:
-    """Tags of a way after its node order is reversed."""
+    """Tags after the way's nodes are reversed, so traffic follows the new geometry.
+
+    ``oneway`` is intentionally not flipped between ``yes`` and ``-1``. Reversing
+    the nodes already turns the way around; flipping the tag as well cancels
+    that and the vehicles keep going the same way on the ground. ``:forward`` /
+    ``:backward`` keys stay put for the same reason: they describe the new way
+    direction, which is the direction traffic now uses.
+
+    Values that are relative to the way direction are rewritten so the road
+    itself does not move: turn maneuvers are mirrored, ``left``/``right`` sides
+    swap, and ``incline`` flips.
+    """
     out: dict[str, str] = {}
-    for k, v in tags.items():
-        nk = k
-        if ":forward" in k:
-            nk = k.replace(":forward", ":backward")
-        elif ":backward" in k:
-            nk = k.replace(":backward", ":forward")
-        out[nk] = v
-    ow = out.get("oneway")
-    if ow in ONEWAY_FORWARD:
-        out["oneway"] = "-1"
-    elif ow in ONEWAY_BACKWARD:
-        out["oneway"] = "yes"
+    for key, value in tags.items():
+        nk = _swap_side_word(key)
+        nv = value
+        if "turn" in nk and "lane" in nk:
+            nv = _mirror_turns(value)
+        elif "lanes" in nk and "|" in value:
+            nv = "|".join(reversed(value.split("|")))
+        elif nk == "incline" or nk.startswith("incline:"):
+            nv = _flip_incline(value)
+        elif _side_value_key(nk) and _SIDE_WORD.search(value):
+            nv = _swap_side_word(value)
+        out[nk] = nv
     return out
+
+
+def traffic_node_order(nodes: list[int], tags: dict[str, str]) -> list[int] | None:
+    """Node ids in the direction vehicles may travel, or None when both ways are open."""
+    d = direction(tags)
+    if d > 0:
+        return list(nodes)
+    if d < 0:
+        return list(reversed(nodes))
+    return None

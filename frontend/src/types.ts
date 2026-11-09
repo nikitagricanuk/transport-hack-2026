@@ -66,6 +66,7 @@ export interface Issue {
   description: string;
   refs: { kind: Kind; id: number }[];
   location: [number, number] | null;
+  locations?: [number, number][] | null;
   fix: Fix | null;
   levels: string[];
 }
@@ -75,8 +76,18 @@ export interface ValidationResult {
   summary: {
     counts: Record<Severity, number>;
     components: number;
+    strong_components: number;
+    outside_strong: number;
     levels: Record<'matsim' | 'sumo' | 'webots', 'ok' | 'risk' | 'fail'>;
+    level_notes: Record<'matsim' | 'sumo' | 'webots', string>;
   };
+}
+
+export interface OrganizerResult {
+  ok: boolean;
+  status: number;
+  filename: string;
+  message: string;
 }
 
 export interface SumoResult {

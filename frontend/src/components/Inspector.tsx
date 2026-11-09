@@ -104,7 +104,7 @@ function WayAttributes({ way, tags, setTags, onOp }: {
           </div>
 
           <div className="card stack10">
-            <div className="row between"><b>Полосы</b><span className="muted small">turn:lanes заполняются автоматически</span></div>
+            <div className="row between"><b>Полосы</b><span className="muted small">turn:lanes не подставляются</span></div>
             <div className="grid2">
               <Stepper label="Встречные" value={mode === 'no' ? backward : 0} disabled={mode !== 'no'}
                 onChange={(v) => setLanes(forward, v, mode)} />

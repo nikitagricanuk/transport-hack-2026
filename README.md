@@ -27,23 +27,46 @@ WITH_SUMO=1 docker compose up --build
 
 ## Разработка
 
+### Linux
+
 Бэкенд (Python 3.11+):
 
 ```bash
 cd backend
-python -m venv .venv
-.venv/Scripts/pip install -r requirements-dev.txt     # Linux/macOS: .venv/bin/pip
-.venv/Scripts/python -m uvicorn app.main:app --reload
-.venv/Scripts/python -m pytest -q
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Проверки, из активированного окружения:
+
+```bash
+cd backend
+pytest -q
 ```
 
 Фронтенд (Node 20+), в другом терминале:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev        # http://localhost:5173, /api проксируется на :8000
 ```
+
+Сборка фронтенда: `npm run build` в `frontend/`.
+
+### Windows
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\python -m uvicorn app.main:app --reload --port 8000
+.venv\Scripts\python -m pytest -q
+```
+
+Фронтенд так же: `npm ci` и `npm run dev` в `frontend/`.
 
 Для кнопки «SUMO-проверка» установите в venv `pip install eclipse-sumo` — тогда экспортированный файл
 прогоняется через `netconvert` локально, без ожидания сервера.
@@ -117,10 +140,10 @@ Nginx на сервере уже терминирует HTTPS для https://tha
 | --- | --- |
 | Импорт `.osm`, отображение в 2D на подложке OSM | `StartScreen`, `MapView` |
 | Экспорт без потерь: порядок, атрибуты, порядок тегов, `<bounds>`/`<meta>` сохраняются | `backend/app/osm_model.py` |
-| Правки: теги, полосы (`lanes`, `turn:lanes` автоматически), узлы, рёбра, разделение, склейка, разворот | `backend/app/edits.py` |
+| Правки: теги, полосы (число полос; `turn:lanes` не выдумываются), узлы, рёбра, разделение, склейка, разворот направления движения | `backend/app/edits.py` |
 | Undo/redo для любой операции, шаблон дороги — один шаг | `History`, `apply_ops` |
 | Горячие клавиши: V W N S M R T P, 1–4 шаблоны, Ctrl+Z / Ctrl+Shift+Z, Delete, Esc | `App.tsx` |
-| Проверки: связность, разорванные/склеенные перекрёстки, тупики на oneway, полосы, мосты без layer, светофоры | `backend/app/validation.py` |
+| Проверки: связность, сильные компоненты (односторонние ловушки), разорванные/склеенные перекрёстки, тупики на oneway, полосы, мосты без layer, светофоры | `backend/app/validation.py` |
 | Автоисправления из панели проблем | поле `fix` у проблемы |
 | Локальный `netconvert` | `backend/app/sumo_check.py` |
 
@@ -149,6 +172,21 @@ frontend (React + MapLibre)  ──HTTP──▶  backend (FastAPI)
 | GET | `/api/documents/{id}/validate` | проверка графа |
 | GET | `/api/documents/{id}/export?filename=team1` | скачать `.osm` |
 | POST | `/api/documents/{id}/check/sumo` | прогон `netconvert` |
+| POST | `/api/documents/{id}/check/organizer` | отправить экспорт на сервер проверки |
+| GET / DELETE | `/api/draft` | восстановить или сбросить автосохранение |
+
+Обновление страницы не теряет правки: id документа лежит в `localStorage`, а сам файл — в `data/drafts/`. Если процесс сервера ещё жив, восстанавливается и история undo.
+
+Отправка на сервер организаторов (`POST /api/submit`, `Authorization: Bearer`, файл `{TEAM_NAME}.osm`) включается переменными окружения:
+
+```bash
+export ORGANIZER_TOKEN=...   # токен команды
+export TEAM_NAME=...         # имя файла на сервере, без .osm
+# необязательно, если сервер не на адресе по умолчанию:
+# export ORGANIZER_URL=http://innerlogistics.lovethosetrains.com:7078
+```
+
+Кнопка «На сервер проверки» пишет понятную ошибку, если `ORGANIZER_TOKEN` или `TEAM_NAME` не заданы.
 
 Операции: `set_tags`, `set_lanes`, `move_node`, `add_node`, `insert_node`, `add_way`, `delete`,
 `split_way`, `merge_nodes`, `connect_endpoint`, `reverse_way`.

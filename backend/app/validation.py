@@ -29,6 +29,7 @@ class Issue:
     description: str
     refs: list[dict[str, Any]]
     location: list[float] | None = None  # [lon, lat]
+    locations: list[list[float]] | None = None  # every highlighted point, [lon, lat]
     fix: dict[str, Any] | None = None    # {"label", "op", "args"}
     levels: list[str] = field(default_factory=list)  # affected: matsim/sumo/webots
 
@@ -55,7 +56,16 @@ def _summary(issues: list[Issue], v: "_Validator") -> dict[str, Any]:
     return {
         "counts": {s: sum(1 for i in issues if i.severity == s) for s in ("critical", "warning", "info")},
         "components": v.component_count,
+        "strong_components": v.strong_component_count,
+        "outside_strong": v.outside_strong,
         "levels": {name: level(name) for name in ("matsim", "sumo", "webots")},
+        # Webots itself is not executed. "ok" means the static geometry checks passed.
+        "level_notes": {
+            "matsim": "Связность, разрывы и односторонние ловушки направленного графа.",
+            "sumo": "Направления, полосы, перекрёстки, светофоры и геометрия.",
+            "webots": "Проверены layer мостов и тоннелей, что layer — целое число, "
+                      "и что у проезжих рёбер нет сегментов нулевой длины. Сам Webots не запускался.",
+        },
     }
 
 
@@ -72,6 +82,9 @@ class _Validator:
             for ref in dict.fromkeys(w.nodes):
                 self.road_node_ways.setdefault(ref, []).append(w.id)
         self.component_count = 0
+        self.strong_component_count = 0
+        self.outside_strong = 0
+        self.main_nodes: set[int] = set()
         self._xy_cache: dict[int, tuple[float, float]] = {}
 
     # ---------------------------------------------------------------- utils
@@ -113,6 +126,7 @@ class _Validator:
     def run(self) -> None:
         self.check_data()
         self.check_connectivity()
+        self.check_strong_connectivity()
         self.check_gaps()
         self.check_close_junctions()
         self.check_directions()
@@ -153,7 +167,7 @@ class _Validator:
             return
         comps = sorted(nx.connected_components(g), key=len, reverse=True)
         self.component_count = len(comps)
-        self.main_nodes: set[int] = comps[0]
+        self.main_nodes = comps[0]
         for comp in comps[1:]:
             ways = sorted({d["way"] for _, _, d in g.subgraph(comp).edges(data=True)})
             first = next(iter(comp))
@@ -234,6 +248,85 @@ class _Validator:
                          fix={"label": "Объединить", "op": "merge_nodes",
                               "args": {"keep_id": nid, "remove_id": other}})
 
+    def check_strong_connectivity(self) -> None:
+        """One-way traps: nodes that are not in the largest strongly connected component.
+
+        Edges follow ``oneway`` (including ``-1`` and implicit motorway/roundabout
+        oneway) and skip ways ``is_drivable`` rejects for ``access``. A node you
+        can drive into but not back out of is a trap even when every junction has
+        both an incoming and an outgoing edge locally.
+        """
+        dg = nx.DiGraph()
+        for w in self.road_ways:
+            refs = [r for r in w.nodes if r in self.doc.nodes]
+            d = direction(w.tags)
+            for a, b in zip(refs, refs[1:]):
+                if d >= 0:
+                    dg.add_edge(a, b)
+                if d <= 0:
+                    dg.add_edge(b, a)
+        if dg.number_of_nodes() == 0:
+            return
+        sccs = [set(c) for c in nx.strongly_connected_components(dg)]
+        sccs.sort(key=len, reverse=True)
+        self.strong_component_count = len(sccs)
+        self.outside_strong = sum(len(c) for c in sccs[1:])
+        if len(sccs) == 1:
+            return
+        cond = nx.condensation(dg, sccs)
+        reachable = nx.descendants(cond, 0)
+        reaches_main = nx.ancestors(cond, 0)
+        groups: dict[str, list[set[int]]] = {"trap": [], "unreachable": [], "island": []}
+        for i, comp in enumerate(sccs[1:], start=1):
+            # Separate undirected pieces are already reported as isolated fragments.
+            if self.main_nodes and not (comp & self.main_nodes):
+                continue
+            if i in reachable and i not in reaches_main:
+                groups["trap"].append(comp)
+            elif i in reaches_main and i not in reachable:
+                groups["unreachable"].append(comp)
+            else:
+                groups["island"].append(comp)
+        titles = {
+            "trap": ("Односторонняя ловушка", "Односторонние тупики-ловушки",
+                     "сюда можно въехать из основной сети, но выехать обратно нельзя"),
+            "unreachable": ("Недостижимый участок", "Узлы без въезда с основной сети",
+                            "с основной сети сюда не попасть: односторонние рёбра смотрят наружу"),
+            "island": ("Направленно изолированный участок", "Направленно изолированные узлы",
+                       "участок не сообщается с основной сетью по направлению движения"),
+        }
+        for kind, comps in groups.items():
+            multi = [c for c in comps if len(c) >= 2]
+            singles: set[int] = set()
+            for comp in comps:
+                if len(comp) < 2:
+                    singles |= comp
+            for comp in multi:
+                self._add_directed_area(kind, comp, titles[kind][0], titles[kind][2], multi=True)
+            if singles:
+                self._add_directed_area(kind, singles, titles[kind][1], titles[kind][2], multi=False)
+
+    def _add_directed_area(self, kind: str, nodes: set[int], title: str, why: str, multi: bool) -> None:
+        ordered = sorted(nodes)
+        locs = [loc for n in ordered if (loc := self.loc(n))]
+        ways: set[int] = set()
+        for n in ordered:
+            ways.update(self.road_node_ways.get(n, []))
+        interior = any(not self.near_boundary(n) for n in nodes)
+        if not interior:
+            severity: Severity = "info"
+        elif multi:
+            severity = "critical"
+        else:
+            severity = "warning"
+        noun = "узлов" if len(nodes) != 1 else "узел"
+        self.add(category="connectivity", severity=severity, title=title,
+                 description=f"{len(nodes)} {noun}: {why}. MatSim не построит обратный маршрут, "
+                             "в SUMO машины останутся в этом кармане.",
+                 refs=[{"kind": "node", "id": ordered[0]}] + [{"kind": "way", "id": w} for w in sorted(ways)[:12]],
+                 location=locs[0] if locs else None, locations=locs[:800] or None,
+                 levels=["matsim", "sumo"])
+
     def check_directions(self) -> None:
         dg = nx.DiGraph()
         for w in self.road_ways:
@@ -301,6 +394,38 @@ class _Validator:
 
     def check_geometry(self) -> None:
         for w in self.doc.ways.values():
+            layer = w.tags.get("layer")
+            if layer is not None:
+                try:
+                    int(layer)
+                except ValueError:
+                    self.add(category="geometry", severity="warning", title="layer не целое число",
+                             description=f"{self.name(w.id)}: layer={layer}. Webots поднимает полотно по целому layer.",
+                             refs=[{"kind": "way", "id": w.id}],
+                             location=self.loc(w.nodes[len(w.nodes) // 2]) if w.nodes else None,
+                             levels=["webots"])
+            bridge = w.tags.get("bridge") not in (None, "no")
+            tunnel = w.tags.get("tunnel") not in (None, "no")
+            if bridge and tunnel and w.nodes:
+                self.add(category="geometry", severity="warning", title="Мост и тоннель на одном ребре",
+                         description=f"{self.name(w.id)} помечен и bridge, и tunnel — Webots не выберет высоту.",
+                         refs=[{"kind": "way", "id": w.id}],
+                         location=self.loc(w.nodes[len(w.nodes) // 2]), levels=["webots"])
+            if is_drivable(w.tags):
+                prev: tuple[float, float] | None = None
+                for ref in w.nodes:
+                    n = self.doc.nodes.get(ref)
+                    if n is None:
+                        continue
+                    cur = (n.lat, n.lon)
+                    if prev is not None and prev == cur:
+                        self.add(category="geometry", severity="warning", title="Нулевая длина сегмента",
+                                 description=f"{self.name(w.id)} содержит подряд два узла в одной точке. "
+                                             "Webots и SUMO строят из этого вырожденное полотно.",
+                                 refs=[{"kind": "way", "id": w.id}], location=[n.lon, n.lat],
+                                 levels=["webots", "sumo"])
+                        break
+                    prev = cur
             if w.tags.get("bridge") not in (None, "no") and "layer" not in w.tags and w.nodes:
                 self.add(category="geometry", severity="warning", title="Мост без layer",
                          description=f"{self.name(w.id)}: bridge без layer — Webots положит полотно на землю.",

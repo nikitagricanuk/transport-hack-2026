@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .geo import LocalProjection, dist, project_on_segment
-from .osm_model import Element, Kind, Member, Node, OsmDocument, Way
-from .roads import lane_tags, reversed_tags
+from .osm_model import Element, Kind, Member, Node, OsmDocument, Relation, Way
+from .roads import direction, lane_tags, reversed_tags
 
 
 class OpError(ValueError):
@@ -249,7 +249,7 @@ def op_set_tags(doc, tx, kind: Kind, id: int, tags: dict, replace: bool = False)
 
 
 def op_set_lanes(doc, tx, way_id: int, forward: int, backward: int = 0,
-                 oneway: str = "no", auto_turns: bool = True):
+                 oneway: str = "no", auto_turns: bool = False):
     return op_set_tags(doc, tx, "way", way_id, lane_tags(int(forward), int(backward), oneway, auto_turns))
 
 
@@ -306,6 +306,125 @@ def op_delete(doc, tx, kind: Kind, id: int):
     return {"id": eid}
 
 
+_BACKWARD_ROLES = {"backward", "reverse"}
+
+
+def _is_restriction(tags: dict[str, str]) -> bool:
+    kind = tags.get("type", "").lower()
+    return kind == "restriction" or kind.startswith("restriction:") or kind == "connectivity"
+
+
+def _via_node_ids(doc: OsmDocument, rel: Relation) -> set[int]:
+    nodes: set[int] = set()
+    for m in rel.members:
+        if m.role != "via":
+            continue
+        if m.type == "node":
+            nodes.add(m.ref)
+        elif m.type == "way":
+            w = doc.ways.get(m.ref)
+            if w is not None and w.nodes:
+                nodes.add(w.nodes[0])
+                nodes.add(w.nodes[-1])
+    return nodes
+
+
+def _touches_end(nodes: list[int] | None, nid: int) -> bool:
+    return bool(nodes) and (nodes[0] == nid or nodes[-1] == nid)
+
+
+def _piece_for_role(role: str, old: Way, new: Way, via: set[int], tags: dict[str, str]) -> Way:
+    """The single from/to piece that still touches the via node.
+
+    SUMO drops a restriction that has two ``from`` or two ``to`` members, which
+    is what a blind copy of both pieces produces.
+    """
+    hits = [w for w in (old, new) if w.nodes and (w.nodes[0] in via or w.nodes[-1] in via)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) != 2:
+        return old
+    # The split node is the via. Keep the piece that approaches it (from) or leaves it (to).
+    backward = direction(tags) < 0
+    if role == "from":
+        if backward:
+            return new if new.nodes[0] in via else old
+        return old if old.nodes[-1] in via else new
+    if backward:
+        return old if old.nodes[-1] in via else new
+    return new if new.nodes[0] in via else old
+
+
+def _neighbour_nodes(doc: OsmDocument, members: list[Member], index: int, step: int, old_id: int) -> list[int] | None:
+    j = index + step
+    while 0 <= j < len(members):
+        m = members[j]
+        if m.type == "way" and m.ref != old_id:
+            w = doc.ways.get(m.ref)
+            if w is not None:
+                return w.nodes
+        j += step
+    return None
+
+
+def _traverse_backward(doc: OsmDocument, members: list[Member], index: int, old: Way, new: Way, role: str) -> bool:
+    """True when the relation travels this way against its node order.
+
+    The second half is then the first piece the route reaches, so it has to be
+    inserted before the original member. Appending it always walks the route
+    backwards along that way.
+    """
+    if role in _BACKWARD_ROLES:
+        return True
+    if role == "forward":
+        return False
+    prev = _neighbour_nodes(doc, members, index, -1, old.id)
+    if prev is not None:
+        at_start = _touches_end(prev, old.nodes[0])
+        at_end = _touches_end(prev, new.nodes[-1])
+        if at_end and not at_start:
+            return True
+        if at_start and not at_end:
+            return False
+    nxt = _neighbour_nodes(doc, members, index, 1, old.id)
+    if nxt is not None and _touches_end(nxt, old.nodes[0]) and not _touches_end(nxt, new.nodes[-1]):
+        return True
+    return False
+
+
+def _ordered_pieces(backward: bool, old: Way, new: Way, role: str) -> list[Member]:
+    ids = (new.id, old.id) if backward else (old.id, new.id)
+    return [Member("way", wid, role) for wid in ids]
+
+
+def _rewrite_split_members(doc: OsmDocument, rel: Relation, old: Way, new: Way) -> list[Member]:
+    out: list[Member] = []
+    if _is_restriction(rel.tags):
+        via = _via_node_ids(doc, rel)
+        for i, m in enumerate(rel.members):
+            if not (m.type == "way" and m.ref == old.id):
+                out.append(m)
+                continue
+            if m.role in {"from", "to"}:
+                chosen = _piece_for_role(m.role, old, new, via, old.tags)
+                out.append(Member("way", chosen.id, m.role))
+            elif m.role == "via":
+                backward = _traverse_backward(doc, rel.members, i, old, new, m.role)
+                out.extend(_ordered_pieces(backward, old, new, m.role))
+            else:
+                # Unknown role: still one member, so converters do not see a duplicated from/to.
+                chosen = _piece_for_role("from", old, new, via, old.tags) if via else old
+                out.append(Member("way", chosen.id, m.role))
+        return out
+    for i, m in enumerate(rel.members):
+        if m.type == "way" and m.ref == old.id:
+            backward = _traverse_backward(doc, rel.members, i, old, new, m.role)
+            out.extend(_ordered_pieces(backward, old, new, m.role))
+        else:
+            out.append(m)
+    return out
+
+
 def op_split_way(doc, tx, way_id: int, node_id: int):
     w = _way(doc, int(way_id))
     nid = int(node_id)
@@ -319,15 +438,11 @@ def op_split_way(doc, tx, way_id: int, node_id: int):
     w.nodes = first
     new_id = doc.new_id()
     tx.touch("way", new_id)
-    doc.ways[new_id] = Way(id=new_id, nodes=second, tags=dict(w.tags))
+    new_way = Way(id=new_id, nodes=second, tags=dict(w.tags))
+    doc.ways[new_id] = new_way
     for rel in list(doc.relations_with("way", w.id)):
         tx.touch("relation", rel.id)
-        out: list[Member] = []
-        for m in rel.members:
-            out.append(m)
-            if m.type == "way" and m.ref == w.id:
-                out.append(Member("way", new_id, m.role))
-        rel.members = out
+        rel.members = _rewrite_split_members(doc, rel, w, new_way)
     return {"id": w.id, "new_id": new_id}
 
 
@@ -350,6 +465,16 @@ def op_reverse_way(doc, tx, id: int):
     tx.touch("way", w.id)
     w.nodes = list(reversed(w.nodes))
     w.tags = reversed_tags(w.tags)
+    for rel in list(doc.relations_with("way", w.id)):
+        if not any(m.type == "way" and m.ref == w.id and m.role in {"forward", "backward"} for m in rel.members):
+            continue
+        tx.touch("relation", rel.id)
+        for m in rel.members:
+            if m.type == "way" and m.ref == w.id:
+                if m.role == "forward":
+                    m.role = "backward"
+                elif m.role == "backward":
+                    m.role = "forward"
     return {"id": w.id}
 
 
@@ -380,7 +505,10 @@ def apply_ops(doc: OsmDocument, history: History, ops: list[tuple[str, dict]], l
     try:
         for op, args in ops:
             results.append(OPS[op][0](doc, tx, **args) or {})
-    except TypeError as e:
+    except OpError:
+        tx.undo()
+        raise
+    except (TypeError, ValueError, KeyError) as e:
         tx.undo()
         raise OpError(f"неверные параметры операции: {e}") from e
     except Exception:

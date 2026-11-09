@@ -48,11 +48,13 @@ def test_set_tags_undo_redo(doc):
 
 def test_set_lanes_is_consistent(doc):
     h = History()
+    apply_op(doc, h, "set_tags", {"kind": "way", "id": 100, "tags": {"turn:lanes": "left|right"}})
     apply_op(doc, h, "set_lanes", {"way_id": 100, "forward": 2, "backward": 2, "oneway": "no"})
     t = doc.ways[100].tags
     assert t["lanes"] == "4" and t["lanes:forward"] == "2" and t["lanes:backward"] == "2"
-    assert t["turn:lanes:forward"] == "left;through|through;right"
-    apply_op(doc, h, "set_lanes", {"way_id": 100, "forward": 3, "oneway": "yes"})
+    assert "turn:lanes:forward" not in t and "turn:lanes:backward" not in t
+    assert t["turn:lanes"] == "left|right"
+    apply_op(doc, h, "set_lanes", {"way_id": 100, "forward": 3, "oneway": "yes", "auto_turns": True})
     t = doc.ways[100].tags
     assert t["oneway"] == "yes" and t["lanes"] == "3" and "lanes:backward" not in t
     assert t["turn:lanes"].count("|") == 2
@@ -95,13 +97,17 @@ def test_delete_node_removes_degenerate_way(doc):
     assert 103 in doc.ways and 9 in doc.nodes and 10 in doc.nodes
 
 
-def test_reverse_way_swaps_directional_tags(doc):
+def test_reverse_way_flips_traffic_direction(doc):
     h = History()
-    apply_op(doc, h, "set_tags", {"kind": "way", "id": 101, "tags": {"oneway": "yes", "lanes:forward": "2"}})
+    apply_op(doc, h, "set_tags", {"kind": "way", "id": 101, "tags": {
+        "oneway": "yes", "lanes:forward": "2", "turn:lanes": "left|through", "sidewalk": "left",
+    }})
     apply_op(doc, h, "reverse_way", {"id": 101})
     t = doc.ways[101].tags
     assert doc.ways[101].nodes == [6, 2, 5]
-    assert t["oneway"] == "-1" and t["lanes:backward"] == "2" and "lanes:forward" not in t
+    # oneway stays "yes": geometry flipped, so vehicles now travel the other way.
+    assert t["oneway"] == "yes" and t["lanes:forward"] == "2" and "lanes:backward" not in t
+    assert t["turn:lanes"] == "through|right" and t["sidewalk"] == "right"
 
 
 def test_bad_op_is_rolled_back(doc):

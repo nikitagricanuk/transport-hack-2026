@@ -4,12 +4,13 @@ import MapView, { type MapHandle } from './components/MapView';
 import Inspector from './components/Inspector';
 import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail } from './components/Panels';
 import StartScreen from './components/StartScreen';
-import type { DocState, Issue, LayerVisibility, NodeProps, Op, Selection, SumoResult, Tool, ValidationResult, WayProps } from './types';
+import type { DocState, Issue, LayerVisibility, NodeProps, Op, OrganizerResult, Selection, SumoResult, Tool, ValidationResult, WayProps } from './types';
 import { TEMPLATES, templateOps, type RoadTemplate } from './utils/osm';
 
 const DEFAULT_LAYERS: LayerVisibility = {
   roads: true, paths: true, rail: true, signals: true, crossings: true, stops: true, buildings: true, issues: true,
 };
+const STORAGE_KEY = 'uds-editor-session';
 
 export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
@@ -25,6 +26,8 @@ export default function App() {
   const [cursor, setCursor] = useState<{ ll: [number, number] | null; zoom: number }>({ ll: null, zoom: 15 });
   const [team, setTeam] = useState('team1');
   const [sumo, setSumo] = useState<SumoResult | 'running' | null>(null);
+  const [organizer, setOrganizer] = useState<OrganizerResult | 'running' | null>(null);
+  const [booting, setBooting] = useState(true);
   const mapRef = useRef<MapHandle>(null);
 
   // ---------------------------------------------------------- indexes
@@ -73,6 +76,28 @@ export default function App() {
     setValidation(null);
     scheduleValidate(d.doc_id);
   }, [scheduleValidate]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) { setBooting(false); return; }
+    let saved: { doc_id?: string; team?: string } = {};
+    try { saved = JSON.parse(raw); } catch { setBooting(false); return; }
+    if (saved.team) setTeam(saved.team);
+    if (!saved.doc_id) { setBooting(false); return; }
+    api.restore(saved.doc_id)
+      .then((d) => { loadDoc(d); setError(null); })
+      .catch((e: Error) => {
+        const msg = e?.message ?? '';
+        if (msg.startsWith('404') || msg.includes('не найден')) localStorage.removeItem(STORAGE_KEY);
+        else setError(msg);
+      })
+      .finally(() => setBooting(false));
+  }, [loadDoc]);
+
+  useEffect(() => {
+    if (!doc) return;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ doc_id: doc.doc_id, team, filename: doc.filename }));
+  }, [doc, team]);
 
   const applyState = useCallback((res: DocState) => {
     setDoc(res);
@@ -168,6 +193,27 @@ export default function App() {
     }
   };
 
+  const uploadOrganizer = async () => {
+    if (!doc) return;
+    setOrganizer('running');
+    setError(null);
+    try {
+      setOrganizer(await api.organizer(doc.doc_id));
+    } catch (e) {
+      setOrganizer(null);
+      setError((e as Error).message);
+    }
+  };
+
+  const closeDocument = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    api.discardDraft().catch(() => undefined);
+    setDoc(null);
+    setValidation(null);
+    setSelection(null);
+  };
+
+  if (booting) return <div className="start"><p className="muted">Восстановление правок…</p></div>;
   if (!doc) return <StartScreen onLoaded={loadDoc} />;
 
   const counts = validation?.summary.counts;
@@ -186,7 +232,7 @@ export default function App() {
           {doc.filename}
           {changes > 0 && <><span className="dot" aria-hidden="true" /><span className="muted">изменено объектов: {changes}</span></>}
         </div>
-        <button className="btn ghost" onClick={() => { setDoc(null); setValidation(null); }}>Открыть другой</button>
+        <button className="btn ghost" onClick={closeDocument}>Открыть другой</button>
         <div className="row gap2">
           <button className="icon-btn" aria-label="Отменить" title={`Отменить${doc.history.undo_label ? ': ' + doc.history.undo_label : ''} · Ctrl+Z`}
             disabled={!doc.history.can_undo} onClick={undo}>↶</button>
@@ -200,6 +246,7 @@ export default function App() {
             {counts.critical + counts.warning}</span>}
         </button>
         <button className="btn" onClick={checkSumo} title="Локальный прогон SUMO netconvert">SUMO-проверка</button>
+        <button className="btn" onClick={uploadOrganizer} title="POST на сервер проверки. Нужны ORGANIZER_TOKEN и TEAM_NAME">На сервер проверки</button>
         <label className="team">
           <span className="sr-only">Имя файла (название команды)</span>
           <input value={team} onChange={(e) => setTeam(e.target.value.replace(/[^\w\-]/g, ''))} aria-label="Название команды" />
@@ -234,10 +281,28 @@ export default function App() {
         <span>правок {doc.history.entries.length}</span>
         {validation && <span className={validation.summary.components <= 1 ? 'good' : 'bad'}>
           ● компонент связности: {validation.summary.components}</span>}
+        {validation && validation.summary.outside_strong > 0 && (
+          <span className="bad">● вне сильной связности: {validation.summary.outside_strong}</span>
+        )}
         <span className="grow" />
         {cursor.ll && <span>{cursor.ll[1].toFixed(5)}° N · {cursor.ll[0].toFixed(5)}° E</span>}
         <span>z {cursor.zoom.toFixed(1)}</span>
       </footer>
+
+      {organizer && (
+        <div className="modal-back" onClick={() => organizer !== 'running' && setOrganizer(null)}>
+          <div className="modal" role="dialog" aria-label="Отправка на сервер проверки" onClick={(e) => e.stopPropagation()}>
+            <h2>Сервер проверки</h2>
+            {organizer === 'running' ? <p>Отправка .osm…</p> : (
+              <>
+                <p className={organizer.ok ? 'good' : 'bad'}>{organizer.ok ? `Принято: ${organizer.filename}` : 'Сервер отклонил файл'}</p>
+                {organizer.message && <pre className="log">{organizer.message}</pre>}
+              </>
+            )}
+            {organizer !== 'running' && <button className="btn" onClick={() => setOrganizer(null)}>Закрыть</button>}
+          </div>
+        </div>
+      )}
 
       {sumo && (
         <div className="modal-back" onClick={() => sumo !== 'running' && setSumo(null)}>
