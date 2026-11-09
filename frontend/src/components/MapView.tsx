@@ -3,6 +3,7 @@ import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEv
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
 import { defaultCamera } from '../utils/view';
@@ -96,8 +97,18 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   const draft = useRef<DraftPoint[]>([]);
   const mergeFirst = useRef<number | null>(null);
   const drag = useRef<{
-    nodeId: number; moved: boolean; lon: number; lat: number;
-    ways: { coords: number[][]; idx: number[] }[]; frame: number;
+    mode: 'node' | 'way';
+    nodeId?: number;
+    wayId?: number;
+    moved: boolean;
+    startX: number;
+    startY: number;
+    lon: number;
+    lat: number;
+    originLon: number;
+    originLat: number;
+    ways: { base: number[][]; coords: number[][]; idx: number[] }[];
+    frame: number;
   } | null>(null);
 
   const fitData = () => {
@@ -237,7 +248,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     map.on('load', () => {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
-      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'draft', 'drag', 'cmp-before', 'cmp-after', 'peer-sel']) {
+      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after', 'peer-sel']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -337,6 +348,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addLayer({ id: 'verts', type: 'circle', source: 'verts',
         paint: { 'circle-radius': ['case', ['get', 'end'], 6, 5], 'circle-color': '#FFFFFF',
                  'circle-stroke-color': '#2563EB', 'circle-stroke-width': 2.2 } });
+      // Shared junction of the selection. A click pulls the other roads off this point.
+      map.addLayer({ id: 'join-handles', type: 'circle', source: 'joins',
+        paint: { 'circle-radius': 8, 'circle-color': '#F97316', 'circle-stroke-color': '#FFFFFF', 'circle-stroke-width': 2 } });
       map.addLayer({ id: 'drag-pt', type: 'circle', source: 'drag', filter: ['==', ['geometry-type'], 'Point'],
         paint: { 'circle-radius': 6, 'circle-color': '#2563EB', 'circle-stroke-color': '#FFFFFF', 'circle-stroke-width': 2 } });
       map.addLayer({ id: 'draft-line', type: 'line', source: 'draft', filter: ['==', ['geometry-type'], 'LineString'],
@@ -471,6 +485,15 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     filterIf(map, 'node-selected', ['==', ['get', 'id'], nodeId]);
     filterIf(map, 'area-selected', ['==', ['get', 'id'], wayId]);
     updateVerts();
+    const handles = joinHandles(props.geo, props.selection);
+    (map.getSource('joins') as GeoJSONSource).setData({
+      type: 'FeatureCollection',
+      features: handles.map((handle) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [handle.lon, handle.lat] },
+        properties: { id: handle.id },
+      })),
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, props.selection, props.geo]);
 
@@ -522,14 +545,16 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const pick = (e: MapMouseEvent) => {
       const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
         [e.point.x - HIT_PX, e.point.y - HIT_PX], [e.point.x + HIT_PX, e.point.y + HIT_PX]];
-      const feats = map.queryRenderedFeatures(bbox, { layers: ['verts', 'pois', 'junctions', 'ways-hit', 'areas-fill'] });
+      const feats = map.queryRenderedFeatures(bbox, { layers: ['join-handles', 'verts', 'pois', 'junctions', 'ways-hit', 'areas-fill'] });
       const byLayer = (ids: string[]) => feats.find((f: MapGeoJSONFeature) => ids.includes(f.layer.id));
       const vert = byLayer(['verts']);
       const node = vert ?? byLayer(['pois', 'junctions']);
       const way = byLayer(['ways-hit']) ?? byLayer(['areas-fill']);
+      const join = byLayer(['join-handles']);
       return {
         nodeId: node ? Number(node.properties.id) : undefined,
         wayId: way ? Number(way.properties.id) : undefined,
+        joinId: join ? Number(join.properties.id) : undefined,
       };
     };
 
@@ -547,14 +572,19 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const onClick = (e: MapMouseEvent) => {
       if (drag.current?.moved) return;
       const p = propsRef.current;
-      const { nodeId, wayId } = pick(e);
+      const { nodeId, wayId, joinId } = pick(e);
       const { lng, lat } = e.lngLat;
       switch (p.tool) {
-        case 'select':
+        case 'select': {
+          if (joinId !== undefined) {
+            p.onOp({ op: 'separate_ways', args: { node_id: joinId } });
+            break;
+          }
           if (nodeId !== undefined) p.onSelect({ kind: 'node', id: nodeId });
           else if (wayId !== undefined) p.onSelect({ kind: 'way', id: wayId });
           else p.onSelect(null);
           break;
+        }
         case 'node':
           if (wayId !== undefined) p.onOp({ op: 'insert_node', args: { way_id: wayId, lat, lon: lng } }, { select: 'result' });
           else p.onOp({ op: 'add_node', args: { lat, lon: lng } }, { select: 'result' });
@@ -633,6 +663,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       propsRef.current.onCursor([e.lngLat.lng, e.lngLat.lat], map.getZoom());
       const d = drag.current;
       if (d) {
+        // A click on the orange split point must not count as a drag.
+        if (!d.moved && Math.hypot(e.point.x - d.startX, e.point.y - d.startY) < 4) return;
         d.moved = true;
         d.lon = e.lngLat.lng;
         d.lat = e.lngLat.lat;
@@ -646,24 +678,44 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const onDown = (e: MapMouseEvent) => {
       const p = propsRef.current;
       if (p.tool !== 'select' || e.originalEvent.button !== 0) return;
-      const { nodeId } = pick(e);
-      const draggable = nodeId !== undefined && (
-        (p.selection?.kind === 'way' && p.wayById(p.selection.id)?.nodes.includes(nodeId)) ||
-        (p.selection?.kind === 'node' && p.selection.id === nodeId));
-      if (!draggable) return;
-      e.preventDefault();
-      map.dragPan.disable();
+      const { nodeId, wayId } = pick(e);
       const shapes = [
         ...(p.geo?.ways.features ?? []).map((f) => ({ nodes: f.properties.nodes, coords: f.geometry.coordinates })),
         ...(p.geo?.areas.features ?? []).map((f) => ({ nodes: f.properties.nodes, coords: f.geometry.coordinates[0] })),
       ];
-      const ways = shapes
-        .filter((f) => f.nodes.includes(nodeId!))
-        .map((f) => ({
-          coords: f.coords.map((c) => [...c]),
-          idx: f.nodes.flatMap((n, i) => (n === nodeId ? [i] : [])),
-        }));
-      drag.current = { nodeId: nodeId!, moved: false, lon: e.lngLat.lng, lat: e.lngLat.lat, ways, frame: 0 };
+      const copy = (nodes: number[], coords: number[][], moving: (id: number) => boolean) => ({
+        base: coords.map((c) => [...c]),
+        coords: coords.map((c) => [...c]),
+        idx: nodes.flatMap((n, i) => (moving(n) ? [i] : [])),
+      });
+      const vertexDrag = nodeId !== undefined && (
+        (p.selection?.kind === 'way' && p.wayById(p.selection.id)?.nodes.includes(nodeId)) ||
+        (p.selection?.kind === 'node' && p.selection.id === nodeId));
+      if (vertexDrag) {
+        e.preventDefault();
+        map.dragPan.disable();
+        drag.current = {
+          mode: 'node', nodeId, moved: false, startX: e.point.x, startY: e.point.y,
+          lon: e.lngLat.lng, lat: e.lngLat.lat, originLon: e.lngLat.lng, originLat: e.lngLat.lat,
+          ways: shapes.filter((f) => f.nodes.includes(nodeId!)).map((f) => copy(f.nodes, f.coords, (n) => n === nodeId)),
+          frame: 0,
+        };
+        return;
+      }
+      // Dragging the selected line or polygon, not one corner, moves every node of it.
+      const selectedId = p.selection?.kind === 'way' ? p.selection.id : undefined;
+      if (selectedId === undefined || wayId !== selectedId) return;
+      const way = p.wayById(selectedId);
+      if (!way) return;
+      e.preventDefault();
+      map.dragPan.disable();
+      const ids = new Set(way.nodes);
+      drag.current = {
+        mode: 'way', wayId: selectedId, moved: false, startX: e.point.x, startY: e.point.y,
+        lon: e.lngLat.lng, lat: e.lngLat.lat, originLon: e.lngLat.lng, originLat: e.lngLat.lat,
+        ways: shapes.filter((f) => f.nodes.some((n) => ids.has(n))).map((f) => copy(f.nodes, f.coords, (n) => ids.has(n))),
+        frame: 0,
+      };
     };
 
     const onUp = () => {
@@ -672,8 +724,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.dragPan.enable();
       if (d.frame) { cancelAnimationFrame(d.frame); d.frame = 0; drawDrag(d); }
       if (d.moved) {
+        const op = d.mode === 'way'
+          ? { op: 'move_way', args: { id: d.wayId, dlat: d.lat - d.originLat, dlon: d.lon - d.originLon } }
+          : { op: 'move_node', args: { id: d.nodeId, lat: d.lat, lon: d.lon } };
         // a successful move replaces the preview via the map update; a rejected one must drop it
-        Promise.resolve(propsRef.current.onOp({ op: 'move_node', args: { id: d.nodeId, lat: d.lat, lon: d.lon } }, { select: 'keep' }))
+        Promise.resolve(propsRef.current.onOp(op, { select: 'keep' }))
           .then((ok) => { if (ok === false) clearDrag(); });
         setTimeout(() => { drag.current = null; }, 0);
       } else {
@@ -735,12 +790,17 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   const drawDrag = (d: NonNullable<typeof drag.current>) => {
     const map = mapRef.current;
     if (!map) return;
-    const pos = [d.lon, d.lat];
+    const dlon = d.lon - d.originLon;
+    const dlat = d.lat - d.originLat;
     const feats: Feature[] = d.ways.map((w) => {
-      for (const i of w.idx) w.coords[i] = pos;
+      for (const i of w.idx) {
+        w.coords[i] = d.mode === 'node' ? [d.lon, d.lat] : [w.base[i][0] + dlon, w.base[i][1] + dlat];
+      }
       return { type: 'Feature', geometry: { type: 'LineString', coordinates: w.coords }, properties: {} };
     });
-    feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: pos }, properties: {} });
+    if (d.mode === 'node') {
+      feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [d.lon, d.lat] }, properties: {} });
+    }
     (map.getSource('drag') as GeoJSONSource).setData({ type: 'FeatureCollection', features: feats });
   };
 

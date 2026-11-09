@@ -263,6 +263,41 @@ def op_move_node(doc, tx, id: int, lat: float, lon: float):
     return _with_warnings({"id": n.id}, warnings)
 
 
+def op_move_way(doc, tx, id: int, dlat: float, dlon: float):
+    """Shift every node of a way by the same delta, so a building or a road moves as one object.
+
+    Nodes shared with another way move too: in OSM the corner belongs to every way that uses it.
+    Every highway that uses a moved node is checked for a new same-grade crossing.
+    """
+    w = _way(doc, int(id))
+    dlat, dlon = float(dlat), float(dlon)
+    if dlat != dlat or dlon != dlon or abs(dlat) == float("inf") or abs(dlon) == float("inf"):
+        raise OpError("сдвиг должен быть конечным числом")
+    if abs(dlat) < 1e-12 and abs(dlon) < 1e-12:
+        raise OpError("сдвиг слишком мал")
+    moved = 0
+    seen: set[int] = set()
+    moved_ids: list[int] = []
+    for nid in w.nodes:
+        if nid in seen:
+            continue
+        seen.add(nid)
+        n = doc.nodes.get(nid)
+        if n is None:
+            continue
+        tx.touch("node", n.id)
+        n.set_position(n.lat + dlat, n.lon + dlon)
+        moved += 1
+        moved_ids.append(n.id)
+    if moved == 0:
+        raise OpError("у объекта нет узлов")
+    # A shared node moves every way that uses it. Crossing detection has to see
+    # those highways too: dragging a building corner can make the attached road
+    # cross a third road, and that crossing is not on the building itself.
+    warnings = _join_crossings(doc, tx, _highway_ids_touching(doc, moved_ids))
+    return _with_warnings({"id": w.id, "nodes": moved}, warnings)
+
+
 def op_add_node(doc, tx, lat: float, lon: float, tags: dict | None = None):
     return {"id": _create_node(doc, tx, lat, lon, tags).id}
 
@@ -515,6 +550,190 @@ def _rewrite_split_members(doc: OsmDocument, rel: Relation, old: Way, new: Way) 
         else:
             out.append(m)
     return out
+
+
+# Preferred pull along the detached road, used when that point already sits
+# outside the endpoint snap of the road that stays. A shallower meeting needs
+# a longer pull. The pull never takes more than 40% of the segment; if that
+# still cannot clear the snap, the split is refused.
+_SEPARATE_GAP_M = 4.0
+_SEPARATE_STEP_M = 0.05
+_SEPARATE_BLOCKED = (
+    "нельзя разъединить: конец дороги останется ближе 1 м "
+    "к оставшейся и снова соединится при сдвиге узла"
+)
+
+
+def _highway_ways_at(doc: OsmDocument, nid: int) -> list[Way]:
+    return [w for w in doc.ways_of_node(nid) if "highway" in w.tags and w.tags.get("area") != "yes"]
+
+
+def _endpoint_only(way: Way, nid: int) -> bool:
+    last = len(way.nodes) - 1
+    indexes = [i for i, ref in enumerate(way.nodes) if ref == nid]
+    return bool(indexes) and all(i == 0 or i == last for i in indexes)
+
+
+def _split_way_at(doc: OsmDocument, tx: Transaction, way: Way, idx: int) -> Way:
+    if idx <= 0 or idx >= len(way.nodes) - 1:
+        raise OpError("разделять можно только по внутреннему узлу")
+    tx.touch("way", way.id)
+    second = way.nodes[idx:]
+    way.nodes = way.nodes[: idx + 1]
+    new_id = doc.new_id()
+    tx.touch("way", new_id)
+    new_way = Way(id=new_id, nodes=second, tags=dict(way.tags))
+    doc.ways[new_id] = new_way
+    for rel in list(doc.relations_with("way", way.id)):
+        tx.touch("relation", rel.id)
+        rel.members = _rewrite_split_members(doc, rel, way, new_way)
+    return new_way
+
+
+def _segments_of(doc: OsmDocument, proj: LocalProjection, way: Way):
+    pts = []
+    for nid in way.nodes:
+        n = doc.nodes.get(nid)
+        pts.append(None if n is None else proj.to_xy(n.lat, n.lon))
+    out = []
+    for a, b in zip(pts, pts[1:]):
+        if a is None or b is None or dist(a, b) < 0.05:
+            continue
+        out.append((a, b))
+    return out
+
+
+def _distance_to_segments(point: tuple[float, float], segments) -> float:
+    best = float("inf")
+    for a, b in segments:
+        _, _, d = project_on_segment(point, a, b)
+        if d < best:
+            best = d
+    return best
+
+
+def _highway_ids_touching(doc: OsmDocument, node_ids: list[int]) -> list[int]:
+    """Every highway line that references one of ``node_ids``, in first-seen order."""
+    out: list[int] = []
+    seen: set[int] = set()
+    for nid in node_ids:
+        for way in _highway_ways_at(doc, nid):
+            if way.id in seen:
+                continue
+            seen.add(way.id)
+            out.append(way.id)
+    return out
+
+
+def _separation_step(origin: tuple[float, float], toward: tuple[float, float], segments) -> float | None:
+    """Distance to slide from ``origin`` toward ``toward`` so the point clears the endpoint snap.
+
+    ``None`` when no point in the allowed range (at most 40% of the segment) is
+    further than the snap tolerance from ``segments``. Distance to the original
+    junction is not enough: a branch that meets the retained road at a shallow
+    angle is still inside the snap after a short slide along itself.
+    """
+    length = dist(origin, toward)
+    if length < 0.2:
+        return None
+    max_step = length * 0.4
+    ux = (toward[0] - origin[0]) / length
+    uy = (toward[1] - origin[1]) / length
+    need = _ENDPOINT_SNAP_M + 0.02
+
+    def clearance(step: float) -> float:
+        return _distance_to_segments((origin[0] + ux * step, origin[1] + uy * step), segments)
+
+    preferred = min(_SEPARATE_GAP_M, max_step)
+    if clearance(preferred) > need:
+        return preferred
+    # The preferred gap can sit inside the snap, while a shorter slide clears a
+    # bend or a longer one clears a shallow angle. Take the first that does.
+    count = int(max_step / _SEPARATE_STEP_M)
+    for i in range(1, count + 1):
+        step = min(max_step, i * _SEPARATE_STEP_M)
+        if clearance(step) > need:
+            return step
+    if clearance(max_step) > need:
+        return max_step
+    return None
+
+
+def _detach_endpoint(doc: OsmDocument, tx: Transaction, way: Way, nid: int, proj: LocalProjection, retained) -> int:
+    nodes = way.nodes
+    if nodes[0] == nid:
+        neighbor = next((ref for ref in nodes[1:] if ref != nid), None)
+    else:
+        neighbor = next((ref for ref in reversed(nodes[:-1]) if ref != nid), None)
+    if neighbor is None:
+        raise OpError("некуда отодвинуть конец дороги")
+    a, b = doc.nodes.get(nid), doc.nodes.get(neighbor)
+    if a is None or b is None:
+        raise OpError("некуда отодвинуть конец дороги")
+    pa, pb = proj.to_xy(a.lat, a.lon), proj.to_xy(b.lat, b.lon)
+    length = dist(pa, pb)
+    if length < 0.2:
+        raise OpError("сегмент слишком короткий, чтобы разъединить дороги")
+    step = _separation_step(pa, pb, retained)
+    if step is None:
+        raise OpError(_SEPARATE_BLOCKED)
+    point = proj.to_latlon(
+        pa[0] + (pb[0] - pa[0]) / length * step,
+        pa[1] + (pb[1] - pa[1]) / length * step,
+    )
+    # The stored lat/lon is what the next edit measures. Refuse if that round trip
+    # falls back inside the snap.
+    if _distance_to_segments(proj.to_xy(point[0], point[1]), retained) <= _ENDPOINT_SNAP_M:
+        raise OpError(_SEPARATE_BLOCKED)
+    new = _create_node(doc, tx, point[0], point[1])
+    tx.touch("way", way.id)
+    way.nodes = _dedupe_consecutive([new.id if ref == nid else ref for ref in way.nodes])
+    if len(set(way.nodes)) < 2:
+        raise OpError("после разъединения ребро стало короче двух узлов")
+    return new.id
+
+
+def op_separate_ways(doc, tx, node_id: int):
+    """Undo a shared connection: every road but one leaves the node.
+
+    The through road (the node sits in its middle) keeps the point. A spur that
+    only ends here is pulled back along itself. A road that crossed through the
+    node is split and both new ends stop short. Each new end has to land outside
+    the endpoint snap of the road that stays, measured against that road's
+    geometry. A shallow angle or a short segment cannot always do that; the
+    split is then refused so the next vertex edit does not join the roads again.
+    Positive ids are preferred over ways created in this session.
+    """
+    nid = int(node_id)
+    _node(doc, nid)
+    ways = _highway_ways_at(doc, nid)
+    if len(ways) < 2:
+        raise OpError("узел не соединяет несколько дорог")
+    kept = min(ways, key=lambda w: (_endpoint_only(w, nid), w.id < 0, abs(w.id)))
+    pending = [w for w in ways if w.id != kept.id]
+    proj = _proj(doc)
+    retained = _segments_of(doc, proj, kept)
+    created: list[int] = []
+    detached: list[int] = []
+    seen: set[int] = set()
+    steps = 0
+    while pending:
+        steps += 1
+        if steps > 32:
+            raise OpError("не удалось разъединить дороги")
+        way = pending.pop()
+        if way.id in seen or way.id not in doc.ways or nid not in way.nodes:
+            continue
+        if not _endpoint_only(way, nid):
+            interior = next(i for i, ref in enumerate(way.nodes) if ref == nid and 0 < i < len(way.nodes) - 1)
+            other = _split_way_at(doc, tx, way, interior)
+            pending.append(way)
+            pending.append(other)
+            continue
+        seen.add(way.id)
+        created.append(_detach_endpoint(doc, tx, way, nid, proj, retained))
+        detached.append(way.id)
+    return {"id": nid, "detached": detached, "nodes": created}
 
 
 def op_split_way(doc, tx, way_id: int, node_id: int):
@@ -923,6 +1142,8 @@ OPS: dict[str, tuple[Callable[..., dict], str]] = {
     "set_tags": (op_set_tags, "Изменены теги"),
     "set_lanes": (op_set_lanes, "Изменены полосы"),
     "move_node": (op_move_node, "Перемещён узел"),
+    "move_way": (op_move_way, "Объект перемещён"),
+    "separate_ways": (op_separate_ways, "Дороги разъединены"),
     "add_node": (op_add_node, "Добавлен узел"),
     "insert_node": (op_insert_node, "Вставлен узел в ребро"),
     "add_way": (op_add_way, "Добавлено ребро"),

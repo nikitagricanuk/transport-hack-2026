@@ -14,6 +14,10 @@ interface Props {
   onSetLoad?: (wayId: number, volume: number | null) => void;
   /** the selected node is a vertex of a drivable way */
   nodeOnRoad?: boolean;
+  /** the selected node is a shared junction that can be pulled apart */
+  canSeparate?: boolean;
+  /** shared junctions on the selected road, drawn as orange points */
+  sharedJunctions?: number;
   onOp: (op: Op | Op[], label?: string) => void;
 }
 
@@ -23,7 +27,7 @@ const BUILDING_TYPES: [string, string][] = [
   ['university', 'университет'], ['hospital', 'больница'], ['industrial', 'промышленное'], ['garage', 'гараж'],
 ];
 
-export default memo(function Inspector({ way, node, geometry, loadRow, onSetLoad, nodeOnRoad, onOp }: Props) {
+export default memo(function Inspector({ way, node, geometry, loadRow, onSetLoad, nodeOnRoad, canSeparate, sharedJunctions, onOp }: Props) {
   const [tab, setTab] = useState<'attr' | 'tags'>('attr');
   if (!way && !node) {
     return (
@@ -61,7 +65,7 @@ export default memo(function Inspector({ way, node, geometry, loadRow, onSetLoad
           && <AreaAttributes way={way} tags={tags} setTags={setTags} area={geometry ? areaM2(geometry) : 0} />}
         {tab === 'attr' && way && way.layer !== 'building' && way.layer !== 'area' && (
           <>
-            <WayAttributes way={way} tags={tags} setTags={setTags} onOp={onOp} />
+            <WayAttributes way={way} tags={tags} setTags={setTags} onOp={onOp} sharedJunctions={sharedJunctions} />
             {loadRow && onSetLoad && <RoadLoad key={way.id} row={loadRow} onSet={(v) => onSetLoad(way.id, v)} />}
           </>
         )}
@@ -76,6 +80,11 @@ export default memo(function Inspector({ way, node, geometry, loadRow, onSetLoad
         {tab === 'attr' && node && <NodeAttributes tags={tags} setTags={setTags} />}
       </div>
       <div className="insp-foot">
+        {node && canSeparate && (
+          <button className="btn" onClick={() => onOp({ op: 'separate_ways', args: { node_id: node.id } }, 'Дороги разъединены')}>
+            Разделить дороги
+          </button>
+        )}
         {way && way.layer !== 'building' && way.layer !== 'area' && (
           <button className="btn" onClick={() => onOp({ op: 'reverse_way', args: { id } })}>Развернуть</button>
         )}
@@ -127,7 +136,7 @@ function AreaAttributes({ way, tags, setTags, area }: {
         </>
       )}
       <NameField value={tags.name ?? ''} onCommit={(v) => setTags({ name: v || null })} />
-      <p className="muted small">Вершины контура можно перетаскивать на карте инструментом «Выбор».</p>
+      <p className="muted small">Контур можно перетащить целиком или за одну вершину инструментом «Выбор».</p>
     </div>
   );
 }
@@ -139,8 +148,8 @@ function nodeTitle(tags: Tags) {
   return 'Узел';
 }
 
-function WayAttributes({ way, tags, setTags, onOp }: {
-  way: WayProps; tags: Tags;
+function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
+  way: WayProps; tags: Tags; sharedJunctions?: number;
   setTags: (p: Record<string, string | null>, label?: string) => void;
   onOp: (op: Op | Op[], label?: string) => void;
 }) {
@@ -172,6 +181,9 @@ function WayAttributes({ way, tags, setTags, onOp }: {
         </label>
       </div>
       <NameField value={tags.name ?? ''} onCommit={(v) => setTags({ name: v || null })} />
+      {!!sharedJunctions && (
+        <p className="muted small">Оранжевая точка на общем узле разделяет соединённые дороги. Линию можно перетащить целиком.</p>
+      )}
 
       {(way.layer === 'road' || way.layer === 'path') && (
         <div className="field">
