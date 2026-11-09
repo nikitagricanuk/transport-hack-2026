@@ -96,6 +96,28 @@ Job `deploy` запускается только после успешной с�
 4. `docker compose up -d --pull never` поднимает уже скачанный образ и в реестр больше не ходит, затем `docker image prune -f`.
 5. `curl` `http://127.0.0.1:8095/api/health` до 15 раз с паузой 3 секунды. В ответе должно быть `"ok": true`, иначе job падает.
 
+### Файл `app.env` на сервере
+
+Кнопка «На сервер проверки» читает `ORGANIZER_TOKEN` и `TEAM_NAME` из окружения контейнера. На сервере они лежат в `app.env` рядом с `docker-compose.yml`: сейчас это `~/transport-hack/app.env` (если деплой идёт в `/opt/transport-hack`, файл там же). Скрипт деплоя перезаписывает только `docker-compose.yml` и `app.env` не удаляет и не затирает. Токен не попадает в git, образ, логи CI и секреты GitHub.
+
+Создайте файл от пользователя `deploy`, режим `600`:
+
+```bash
+umask 077
+cat > ~/transport-hack/app.env << 'EOF'
+ORGANIZER_TOKEN=токен-команды
+TEAM_NAME=hack-team7
+EOF
+chmod 600 ~/transport-hack/app.env
+```
+
+| Ключ | Назначение |
+| --- | --- |
+| `ORGANIZER_TOKEN` | токен команды, заголовок `Authorization: Bearer` на сервере проверки |
+| `TEAM_NAME` | имя сдаваемого файла без `.osm`. Пример: `hack-team7` |
+
+В compose файл подключён как `env_file` с `required: false`: если его ещё нет, контейнер всё равно стартует, а кнопка ответит, что переменные не заданы. После правки `app.env` в каталоге деплоя выполните `docker compose up -d`, чтобы контейнер перечитал окружение.
+
 Nginx на сервере уже терминирует HTTPS для https://thack.nikitagricanuk.ru и проксирует на `127.0.0.1:8095`.
 
 Сервер — RHEL 10, SELinux enforcing, Docker 29 и Compose v5. Пользователь SSH должен запускать `docker` без пароля (группа `docker`). В production нет bind-mount, поэтому `:Z` не нужен. Если позже примонтируете каталог с хоста, добавьте суффикс `:Z`. Чужие контейнеры не используются: свой проект `transport-hack`, свой контейнер, порт и том.
@@ -177,7 +199,7 @@ frontend (React + MapLibre)  ──HTTP──▶  backend (FastAPI)
 
 Обновление страницы не теряет правки: id документа лежит в `localStorage`, а сам файл — в `data/drafts/`. Если процесс сервера ещё жив, восстанавливается и история undo.
 
-Отправка на сервер организаторов (`POST /api/submit`, `Authorization: Bearer`, файл `{TEAM_NAME}.osm`) включается переменными окружения:
+Отправка на сервер организаторов (`POST /api/submit`, заголовок `Authorization: Bearer`, multipart-поле `osm`, файл `{TEAM_NAME}.osm`) включается переменными окружения:
 
 ```bash
 export ORGANIZER_TOKEN=...   # токен команды
@@ -187,6 +209,7 @@ export TEAM_NAME=...         # имя файла на сервере, без .os
 ```
 
 Кнопка «На сервер проверки» пишет понятную ошибку, если `ORGANIZER_TOKEN` или `TEAM_NAME` не заданы.
+На сервере их задаёт `app.env` рядом с compose — см. раздел «Файл `app.env` на сервере».
 
 Операции: `set_tags`, `set_lanes`, `move_node`, `add_node`, `insert_node`, `add_way`, `delete`,
 `split_way`, `merge_nodes`, `connect_endpoint`, `reverse_way`.
