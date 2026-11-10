@@ -11,6 +11,8 @@ from .geo import GridIndex, LocalProjection, dist, project_on_segment
 from .osm_model import OsmDocument
 from .roads import ONEWAY_VALID, can_connect, default_turns, direction, is_access_way, is_drivable, parse_int
 from .edits import ATTACH_MAX_M, signal_spot, way_level
+from .norms import (GRADE_SOURCE, LIVING_KMH, SPEED_SHORTHAND, SPEED_SOURCE, URBAN_KMH, default_limit,
+                    max_grade, speed_kmh)
 
 Severity = Literal["critical", "warning", "info"]
 Category = Literal["connectivity", "direction", "junction", "lanes", "geometry", "data"]
@@ -22,7 +24,8 @@ FRINGE_PAIR_M = 90.0  # opposite carriageway ends this close at the border get a
 FRAGMENT_LINK_M = 30.0  # an isolated fragment this close to the network gets a connector
 OUTSIDE = "outside"   # virtual node: the rest of the city beyond the extract
 STOP_FAR_M = 25.0
-MAX_GRADE = 0.12    # steeper than 12 % between two nodes is a Z jump
+# road classes whose speed matters most for the simulation (and their _link ramps)
+MAIN_CLASSES = {"motorway", "trunk", "primary", "secondary", "tertiary"}
 CONNECT_FIX_M = 30.0  # offer "connect to a nearby road" only inside this radius
 ENTRANCE_M = 12.0     # driveway/sidewalk end this close to a door is not a dead end
 
@@ -160,6 +163,8 @@ class _Validator:
         self.check_close_junctions()
         self.check_directions()
         self.check_lanes()
+        self.check_speed()
+        self.check_restrictions()
         self.check_geometry()
         self.check_elevation()
         self.check_signals_and_stops()
@@ -545,6 +550,108 @@ class _Validator:
                                   "args": {"kind": "way", "id": w.id,
                                            "tags": {key: "|".join(default_turns(expected))}}})
 
+    def check_speed(self) -> None:
+        """Speed limits the three simulators read the same way (ПДД 10.2).
+
+        Without maxspeed each adapter falls back to its own class table: ул. Лермонтова
+        (secondary) gets 100 km/h in SUMO's default typemap and 30 km/h in MatSim.
+        «RU:urban» is read as 60 by SUMO, but MatSim parses only numbers.
+        """
+        for w in self.road_ways:
+            t = w.tags
+            hw = t.get("highway", "")
+            base = hw.removesuffix("_link")
+            ref = [{"kind": "way", "id": w.id}]
+            loc = self.loc(w.nodes[len(w.nodes) // 2])
+            raw = t.get("maxspeed")
+
+            def fix(kmh: int, label: str = "") -> dict[str, Any]:
+                return {"label": label or f"maxspeed={kmh} ({SPEED_SOURCE})", "op": "set_tags",
+                        "args": {"kind": "way", "id": w.id, "tags": {"maxspeed": str(kmh)}}}
+
+            if raw is None:
+                if base in MAIN_CLASSES:
+                    self.add(category="data", severity="warning", title="Нет ограничения скорости",
+                             description=f"{self.name(w.id)} ({hw}) без maxspeed: каждый симулятор подставит своё "
+                                         "значение по классу дороги (SUMO — до 100 км/ч, MatSim — 30 км/ч). "
+                                         f"В городе действует {URBAN_KMH} км/ч ({SPEED_SOURCE}), если нет знака.",
+                             refs=ref, location=loc, levels=["matsim", "sumo"], fixes=[fix(URBAN_KMH)])
+                elif base in ("residential", "unclassified"):
+                    self.add(category="data", severity="info", title="Нет ограничения скорости",
+                             description=f"{self.name(w.id)} без maxspeed: скорость возьмётся из таблицы "
+                                         f"симулятора. По {SPEED_SOURCE} в городе — {URBAN_KMH} км/ч, "
+                                         f"в жилой зоне — {LIVING_KMH} км/ч.",
+                             refs=ref, location=loc, levels=["matsim", "sumo"],
+                             fixes=[fix(URBAN_KMH), fix(LIVING_KMH, f"maxspeed={LIVING_KMH} (жилая зона)")])
+                continue
+            kmh = speed_kmh(raw)
+            if raw.strip() in SPEED_SHORTHAND:
+                self.add(category="data", severity="info", title="Скорость задана сокращением",
+                         description=f"{self.name(w.id)}: maxspeed={raw}. SUMO поймёт это как {kmh} км/ч, "
+                                     "а MatSim читает только число и подставит своё значение.",
+                         refs=ref, location=loc, levels=["matsim"], fixes=[fix(kmh, f"Заменить на {kmh}")])
+            elif kmh is None:
+                self.add(category="data", severity="warning", title="maxspeed не распознан",
+                         description=f"{self.name(w.id)}: maxspeed={raw} — ни один симулятор его не поймёт.",
+                         refs=ref, location=loc, levels=["matsim", "sumo"],
+                         fixes=[fix(default_limit(hw))])
+            elif kmh > URBAN_KMH and base not in ("motorway", "trunk"):
+                self.add(category="data", severity="info", title="Скорость выше городской нормы",
+                         description=f"{self.name(w.id)}: {kmh} км/ч при {URBAN_KMH} км/ч в городе "
+                                     f"({SPEED_SOURCE}). Сверьте со знаками на месте.",
+                         refs=ref, location=loc, levels=["matsim", "sumo"], fixes=[fix(URBAN_KMH)])
+
+    def check_restrictions(self) -> None:
+        """Turn restrictions SUMO can apply: one from, one to, a via they both end at.
+
+        In an extract, restrictions often reference ways outside it; netconvert then
+        ignores the relation («Ignoring restriction relation … unknown from-way»).
+        """
+        for rel in self.doc.relations.values():
+            if not rel.tags.get("type", "").startswith("restriction"):
+                continue
+            froms = [m for m in rel.members if m.role == "from"]
+            tos = [m for m in rel.members if m.role == "to"]
+            vias = [m for m in rel.members if m.role == "via"]
+            problems: list[str] = []
+            if len(froms) != 1 or len(tos) != 1:
+                problems.append(f"участников from: {len(froms)}, to: {len(tos)} (нужно по одному)")
+            missing = [m.ref for m in froms + tos + vias
+                       if (m.type == "way" and m.ref not in self.doc.ways)
+                       or (m.type == "node" and m.ref not in self.doc.nodes)]
+            if missing:
+                problems.append(f"ссылается на объекты вне выгрузки: {', '.join(map(str, sorted(set(missing))))}")
+            ways = [self.doc.ways.get(m.ref) for m in froms + tos if m.type == "way"]
+            if any(w is not None and not is_drivable(w.tags) for w in ways):
+                problems.append("from или to — не проезжая дорога")
+            if not vias:
+                problems.append("нет узла via")
+            via_fix = None
+            if not problems and len(vias) == 1 and vias[0].type == "node":
+                fw, tw = self.doc.ways.get(froms[0].ref), self.doc.ways.get(tos[0].ref)
+                via = vias[0].ref
+                if fw is not None and tw is not None:
+                    ends_f, ends_t = {fw.nodes[0], fw.nodes[-1]}, {tw.nodes[0], tw.nodes[-1]}
+                    if via not in ends_f or via not in ends_t:
+                        problems.append("узел via не на концах обоих рёбер — SUMO не поймёт, где поворот")
+                        shared = sorted(ends_f & ends_t)
+                        if len(shared) == 1:
+                            via_fix = {"label": f"Исправить via → узел {shared[0]}", "op": "set_restriction_via",
+                                       "args": {"relation_id": rel.id, "node_id": shared[0]}}
+            if not problems:
+                continue
+            kind = rel.tags.get("restriction") or rel.tags.get("type")
+            node = next((m.ref for m in vias if m.type == "node" and m.ref in self.doc.nodes), None)
+            way = next((w for w in ways if w is not None), None)
+            loc = self.loc(node) if node else (self.loc(way.nodes[len(way.nodes) // 2]) if way else None)
+            fixes = [via_fix] if via_fix else []
+            fixes.append({"label": "Удалить отношение", "op": "delete", "args": {"kind": "relation", "id": rel.id}})
+            self.add(category="junction", severity="warning", title="Запрет поворота не применится",
+                     description=f"Отношение {rel.id} ({kind}): {'; '.join(problems)}. "
+                                 "SUMO пропустит такой запрет, и машины будут поворачивать там, где нельзя.",
+                     refs=[{"kind": "relation", "id": rel.id}] + ([{"kind": "node", "id": node}] if node else []),
+                     location=loc, levels=["sumo"], fixes=fixes)
+
     def check_geometry(self) -> None:
         for w in self.doc.ways.values():
             layer = w.tags.get("layer")
@@ -630,15 +737,17 @@ class _Validator:
                     continue
                 run = dist(pa, pb)
                 rise = abs(ele(a) - ele(b))
-                if run < 0.5 or rise / run <= MAX_GRADE or w.id in reported:
+                limit = max_grade(w.tags)
+                # ele is stored to the centimetre: allow that rounding on short segments
+                if run < 0.5 or (rise - 0.01) / run <= limit or w.id in reported:
                     continue
                 reported.add(w.id)
                 bridge = next((o for o in (self.doc.ways.get(x) for x in self.road_node_ways.get(a, []) +
                                            self.road_node_ways.get(b, []))
                                if o is not None and way_level(o.tags) != 0), None)
                 self.add(category="geometry", severity="warning", title="Резкий перепад высоты",
-                         description=f"{self.name(w.id)}: уклон {rise / run:.0%} на {run:.0f} м "
-                                     f"(допустимо до {MAX_GRADE:.0%}).",
+                         description=f"{self.name(w.id)}: уклон {rise / run * 1000:.0f} ‰ на {run:.0f} м "
+                                     f"(для {w.tags.get('highway')} допустимо до {limit * 1000:.0f} ‰, {GRADE_SOURCE}).",
                          refs=[{"kind": "way", "id": w.id}], location=self.loc(a), levels=["webots"],
                          fix={"label": "Плавный Z", "op": "smooth_z", "args": {"way_id": bridge.id}} if bridge else None)
 

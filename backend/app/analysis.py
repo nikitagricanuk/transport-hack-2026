@@ -19,6 +19,7 @@ import uuid
 from typing import Any
 
 from .geo import LocalProjection
+from .norms import speed_kmh
 from .osm_model import OsmDocument, Way, clone
 from .roads import direction, is_drivable, parse_int
 
@@ -33,9 +34,10 @@ DEFAULT_VC = {
     "motorway": 0.6, "trunk": 0.6, "primary": 0.55, "secondary": 0.5, "tertiary": 0.4,
     "unclassified": 0.25, "residential": 0.2, "living_street": 0.1, "service": 0.1, "road": 0.2,
 }
+# km/h without a maxspeed sign: ПДД 10.2 — 60 in town, 20 in residential zones and courtyards
 DEFAULT_SPEED = {
-    "motorway": 90, "trunk": 70, "primary": 60, "secondary": 60, "tertiary": 50, "unclassified": 40,
-    "residential": 40, "living_street": 20, "service": 20, "road": 40,
+    "motorway": 90, "trunk": 70, "primary": 60, "secondary": 60, "tertiary": 60, "unclassified": 60,
+    "residential": 60, "living_street": 20, "service": 20, "road": 60,
 }
 LOS_BOUNDS = [(0.35, "A"), (0.55, "B"), (0.75, "C"), (0.9, "D"), (1.0, "E")]
 HIGHWAY_RU = {
@@ -75,10 +77,11 @@ def _lanes(tags: dict[str, str]) -> int:
 
 
 def _speed(tags: dict[str, str]) -> float:
-    v = parse_int((tags.get("maxspeed") or "").split()[0] if tags.get("maxspeed") else None)
-    if v and v > 0:
+    """maxspeed in km/h (numbers, mph, RU:urban = 60, RU:living_street = 20), else the class default."""
+    v = speed_kmh(tags.get("maxspeed"))
+    if v:
         return float(v)
-    return float(DEFAULT_SPEED.get(_base_class(tags.get("highway", "")), 40))
+    return float(DEFAULT_SPEED.get(_base_class(tags.get("highway", "")), 60))
 
 
 def los(vc: float) -> str:
