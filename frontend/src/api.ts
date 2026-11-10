@@ -1,5 +1,5 @@
 import type {
-  ChangesResult, Comparison, DocState, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
+  ChangesResult, Comparison, DocState, FixPreview, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
   SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
   ValidationResult,
 } from './types';
@@ -98,6 +98,8 @@ export const api = {
   },
   op: (docId: string, op: Op, label?: string) =>
     request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label })),
+  fixPreview: (docId: string, op: Op) =>
+    request<FixPreview>(`/api/documents/${docId}/fix-preview`, json(op)),
   batch: (docId: string, ops: Op[], label?: string) =>
     request<OpResponse>(`/api/documents/${docId}/batch`, json({ ops, label })),
   undo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/undo`, { method: 'POST' }),
@@ -149,4 +151,6 @@ export const api = {
     request<SignalPlan>(`/api/documents/${docId}/signals/${nodeId}`, json(body)),
   exportUrl: (docId: string, filename: string) =>
     `/api/documents/${docId}/export?filename=${encodeURIComponent(filename)}`,
+  /** applied edits as a Markdown table, the base for docs/fix-log.md */
+  editLogUrl: (docId: string) => `/api/documents/${docId}/edit-log`,
 };

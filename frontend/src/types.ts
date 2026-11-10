@@ -101,6 +101,15 @@ export interface Fix {
   args: Record<string, unknown>;
 }
 
+/** Dry run of a fix: what it would add, delete or change (the document is not touched). */
+export interface FixPreview {
+  features: Feature<LineString | Point, { kind: Kind; id: number; status: 'added' | 'deleted' | 'modified'; name: string; length_m?: number }>[];
+  counts: { added: number; deleted: number; modified: number };
+  added_road_m: number;
+  removed_road_m: number;
+  empty: boolean;
+}
+
 export interface Issue {
   id: string;
   severity: Severity;

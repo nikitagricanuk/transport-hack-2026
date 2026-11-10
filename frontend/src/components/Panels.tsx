@@ -135,9 +135,11 @@ export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
 
 export const BottomPanel = memo(function BottomPanel({
   validation, history, tab, onTab, onShow, onFix, validating, issueFilters, onIssueFilter, onSelectAllIssues, children,
-  onShowRefs,
+  onShowRefs, onDownloadLog,
 }: {
   onShowRefs?: (refs: { kind: Kind; id: number }[]) => void;
+  /** save the edit log (every applied fix with author and time) as fix-log.md */
+  onDownloadLog?: () => void;
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: BottomTab; onTab: (t: BottomTab) => void;
   onShow: (i: Issue) => void; onFix: (i: Issue, fix: Fix) => void; validating: boolean;
@@ -206,6 +208,12 @@ export const BottomPanel = memo(function BottomPanel({
           </button>
         )}
         {(tab === 'load' || tab === 'changes') && children}
+        {tab === 'history' && onDownloadLog && (history?.entries.length ?? 0) > 0 && (
+          <div className="row gap8 pad">
+            <span className="muted small grow">Каждая правка — выбор пользователя: время, автор, что изменено.</span>
+            <button className="btn small" onClick={onDownloadLog}>Скачать журнал (fix-log.md)</button>
+          </div>
+        )}
         {tab === 'history' && (
           <HistoryList details={history?.details} labels={history?.entries ?? []} onShow={(refs) => onShowRefs?.(refs)} />
         )}

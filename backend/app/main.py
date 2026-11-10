@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__, report
 from .collab import HUB, Peer, clean_presence
+from . import fix_preview
 from . import signals as signal_plans
 from . import scenario, transit
 from urllib.parse import unquote
@@ -513,6 +515,17 @@ def run_op(doc_id: str, req: OpRequest, x_client_id: str | None = Header(default
         return _json({"result": result, **_changed(s, s.history.last_tx, entry, x_client_id)})
 
 
+@app.post("/api/documents/{doc_id}/fix-preview")
+def run_fix_preview(doc_id: str, req: OpRequest) -> Response:
+    """Dry run of a suggested fix for the review card; the document is left as it was."""
+    s = _session(doc_id)
+    with s.lock:
+        try:
+            return _json(fix_preview.preview(s.doc, req.op, req.args))
+        except OpError as e:
+            raise HTTPException(422, str(e)) from e
+
+
 @app.post("/api/documents/{doc_id}/batch")
 def run_batch(doc_id: str, req: BatchRequest, x_client_id: str | None = Header(default=None),
               x_user_name: str | None = Header(default=None)) -> Response:
@@ -581,6 +594,40 @@ def run_validate(doc_id: str) -> Response:
     s = _session(doc_id)
     with s.lock:
         return _json(validate(s.doc))
+
+
+_STATUS_RU = {"added": "добавлен", "deleted": "удалён", "modified": "изменён"}
+_KIND_RU = {"node": "узел", "way": "ребро", "relation": "отношение"}
+
+
+def _md_cell(text: str) -> str:
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+@app.get("/api/documents/{doc_id}/edit-log")
+def edit_log(doc_id: str) -> Response:
+    """Every applied edit as a Markdown table: the base for docs/fix-log.md.
+
+    One row per undo step, oldest first, with time, author and the touched
+    elements; the «Почему» column is left for the reviewer to fill in.
+    """
+    s = _session(doc_id)
+    with s.lock:
+        rows = [tx.summary() for tx in s.history.undo_stack]
+        filename = s.filename
+    out = [f"# Журнал правок: {filename}", "",
+           f"Правок: {len(rows)}. Время — UTC. Каждая правка выбрана и применена пользователем в редакторе.", "",
+           "| # | Время | Автор | Правка | Объекты | Почему |", "| --- | --- | --- | --- | --- | --- |"]
+    for n, r in enumerate(rows, 1):
+        when = datetime.fromtimestamp(r["at"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if r["at"] else ""
+        refs = "; ".join(f"{_KIND_RU.get(x['kind'], x['kind'])} {x['id']}{' ' + x['name'] if x['name'] else ''} "
+                         f"{_STATUS_RU.get(x['status'], x['status'])}" for x in r["refs"][:6])
+        if r["count"] > 6:
+            refs += f" и ещё {r['count'] - 6}"
+        out.append(f"| {n} | {when} | {_md_cell(r['author'] or 'без имени')} | {_md_cell(r['label'])} | "
+                   f"{_md_cell(refs)} |  |")
+    return Response(content="\n".join(out) + "\n", media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="fix-log.md"'})
 
 
 @app.get("/api/documents/{doc_id}/export")

@@ -7,6 +7,7 @@ import { BottomPanel, LayersPanel, TOOLS, TOOL_HINTS, ToolRail, type BottomTab }
 import { ChangesPanel, ExportCheck, LoadPanel, ReportModal } from './components/Analysis';
 import { AnalyticsPanel, BasemapControls, TasksModal, type BaseMap, type ImageOverlay } from './components/Extras';
 import StartScreen from './components/StartScreen';
+import { FixReview, type FixReviewState } from './components/FixReview';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
   ReportData, RouteDetail, Selection, SumoResult, Tool, ValidationResult, WayProps,
@@ -63,6 +64,8 @@ export default function App() {
   const [overlay, setOverlay] = useState<ImageOverlay | null>(null);
   const [threeD, setThreeD] = useState(false);
   const [highlight, setHighlight] = useState<{ kind: string; id: number }[]>([]);
+  // a suggested fix under review: drawn on the map, applied only on the user's click
+  const [fixReview, setFixReview] = useState<FixReviewState | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
   const [followId, setFollowId] = useState<string | null>(null);
   const followRef = useRef<string | null>(null);
@@ -523,8 +526,37 @@ export default function App() {
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
   const onFix = useCallback((i: Issue, fix: Fix) => {
-    runOps({ op: fix.op, args: fix.args }, { label: fix.label + ': ' + i.title });
-  }, [runOps]);
+    if (!docId) return;
+    setFixReview({ issue: i, fix, preview: null, error: null });
+    api.fixPreview(docId, { op: fix.op, args: fix.args })
+      .then((preview) => {
+        // frame what is added or removed (a long road that is only split would zoom too far out),
+        // with at least ~80 m around a tiny change
+        const core = preview.features.filter((f) => f.properties.status !== 'modified');
+        const pts = (core.length ? core : preview.features).flatMap((f) => (f.geometry.type === 'Point'
+          ? [f.geometry.coordinates] : f.geometry.coordinates));
+        if (pts.length) {
+          const lons = pts.map((p) => p[0]); const lats = pts.map((p) => p[1]);
+          const pad = 0.0008;
+          mapRef.current?.fitBounds([Math.min(...lats) - pad, Math.min(...lons) - pad * 1.6,
+            Math.max(...lats) + pad, Math.max(...lons) + pad * 1.6]);
+        } else if (i.location) mapRef.current?.flyTo(i.location[0], i.location[1], 18);
+        setFixReview((r) => (r && r.fix === fix ? { ...r, preview } : r));
+      })
+      .catch((e: Error) => {
+        if (i.location) mapRef.current?.flyTo(i.location[0], i.location[1], 18);
+        setFixReview((r) => (r && r.fix === fix ? { ...r, error: e.message } : r));
+      });
+  }, [docId]);
+  const applyReviewedFix = useCallback(() => {
+    const r = fixReview;
+    if (!r) return;
+    setFixReview(null);
+    runOps({ op: r.fix.op, args: r.fix.args }, { label: r.fix.label + ': ' + r.issue.title });
+  }, [fixReview, runOps]);
+  const cancelFixReview = useCallback(() => setFixReview(null), []);
+  // a review belongs to the document it was computed on
+  useEffect(() => { setFixReview(null); }, [docId]);
   const onInspectorOp = useCallback((op: Op | Op[], label?: string) => { runOps(op, { label }); }, [runOps]);
   const onLayers = useCallback((next: LayerVisibility) => {
     const applied = applyLayerChange(layers, issueFilters, next);
@@ -574,6 +606,7 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && (k === 'y' || k === 'н')) { e.preventDefault(); redo(); return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
+      if (e.key === 'Escape' && fixReview) { setFixReview(null); return; }
       if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); return; }
       // Delete/Backspace remove the selection, unless a way draft owns the key
       // (then it only drops the latest draft point). That listener is capture
@@ -596,7 +629,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey, false);
     return () => window.removeEventListener('keydown', onKey, false);
-  }, [tool, selection, undo, redo, runOps, applyTemplate]);
+  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview]);
 
   useEffect(() => { setHint(null); }, [tool]);
 
@@ -616,6 +649,15 @@ export default function App() {
     if (!id) return;
     try {
       await downloadFile(api.reportUrl(id, kind), `report.${kind}`);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, []);
+  const downloadEditLog = useCallback(async () => {
+    const id = docIdRef.current;
+    if (!id) return;
+    try {
+      await downloadFile(api.editLogUrl(id), 'fix-log.md');
     } catch (e) {
       setError((e as Error).message);
     }
@@ -767,11 +809,15 @@ export default function App() {
           <div className="map-wrap">
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
-              threeD={threeD} highlight={highlight} onView={onView}
+              threeD={threeD} highlight={highlight} onView={onView} fixPreview={fixReview?.preview ?? null}
               baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
             <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
+            {fixReview && (
+              <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
+                onApply={applyReviewedFix} onCancel={cancelFixReview} />
+            )}
             {notice && !error && (
               <div className="toast notice" role="status">{notice}
                 <button className="icon-btn" aria-label="Закрыть" onClick={() => setNotice(null)}>×</button></div>
@@ -781,7 +827,7 @@ export default function App() {
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
             validating={validating} onShow={showIssue} onFix={onFix}
             issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}
-            onShowRefs={onShowRefs}>
+            onShowRefs={onShowRefs} onDownloadLog={downloadEditLog}>
             {bottomTab === 'load' && (
               <LoadPanel load={load} comparison={comparison} onMultiplier={onMultiplier} onSnapshot={onSnapshot}
                 onDeleteSnapshot={onDeleteSnapshot} onCompare={onCompare} onReset={onResetLoad} onShowRoad={onShowRoad}
