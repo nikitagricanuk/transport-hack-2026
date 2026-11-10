@@ -1,6 +1,17 @@
+import { levelOfService } from '../utils/los';
 import { memo, useState } from 'react';
 import type { ChangesResult, Comparison, LoadRow, LoadState, Los, ReportData, ValidationResult } from '../types';
 import { fmt } from '../utils/geom';
+
+export function AnalyticsAssumptions() {
+  return <details className="card small">
+    <summary>Допущения и источники</summary>
+    <p>Геометрия и теги взяты из загруженного OSM. При отсутствии данных учёта модель оценивает спрос по классу дороги.</p>
+    <p>Пропускная способность на полосу, доля спроса и запасные скорости заданы для сценария. Задержки рассчитаны по функции BPR с коэффициентами 0,15 и 4.</p>
+    <p>Уровень обслуживания определяется по v/c из таблицы 1 ОДМ 218.2.020-2012.</p>
+    <a href="https://meganorm.ru/Data2/1/4293787/4293787897.htm" target="_blank" rel="noreferrer">Текст ОДМ 218.2.020-2012</a>
+  </details>;
+}
 
 export const LOS_COLOR: Record<Los, string> = {
   A: '#16A34A', B: '#65A30D', C: '#CA8A04', D: '#EA580C', E: '#DC2626', F: '#7F1D1D',
@@ -104,6 +115,7 @@ export const LoadPanel = memo(function LoadPanel({
               title={`${l} — ${LOS_TEXT[l]}: ${s.by_los[l]} рёбер`}>{s.by_los[l] ? l : ''}</span>
           ))}
         </div>
+        <AnalyticsAssumptions />
         <button className="btn small" onClick={onReset}>Сбросить нагрузку</button>
       </section>
 
@@ -193,8 +205,8 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
   const [v, setV] = useState<number | null>(null);
   const val = v ?? row.volume;
   const max = Math.max(row.capacity * 1.6, 100);
-  const vc = val / row.capacity;
-  const los: Los = vc < 0.35 ? 'A' : vc < 0.55 ? 'B' : vc < 0.75 ? 'C' : vc < 0.9 ? 'D' : vc < 1 ? 'E' : 'F';
+  const vc = row.capacity ? val / row.capacity : 0;
+  const los = v === null ? row.los : levelOfService(vc);
   const commit = () => { if (v !== null) { onSet(Math.round(v)); setV(null); } };
   return (
     <div className={`card stack10 ${row.needs_intensity ? 'warn-card' : ''}`}>
@@ -207,7 +219,7 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
       <input type="range" min={0} max={max} step={10} value={val} aria-label="Интенсивность, авт/ч"
         onChange={(e) => setV(Number(e.target.value))} onPointerUp={commit} onKeyUp={commit} />
       <div className="row between small">
-        <span className="mono">{fmt(val)} авт/ч {row.custom ? '' : '(по умолчанию)'}</span>
+        <span className="mono">{fmt(val)} авт/ч {row.custom ? '' : '(нет данных учёта)'}</span>
         <span className="mono muted">пропускная {fmt(row.capacity)} · v/c {fmt(vc, 2)}</span>
       </div>
       <div className="row between small muted">
@@ -375,6 +387,7 @@ export function ReportModal({ data, onClose, onDownload }: {
               </section>
               <section>
                 <h3>Уровень обслуживания дорог</h3>
+                <AnalyticsAssumptions />
                 <Bars items={(Object.keys(data.load.summary.by_los) as Los[]).map((l) => ({
                   label: `${l} — ${LOS_TEXT[l]}`, value: data.load.summary.by_los[l], color: LOS_COLOR[l],
                 }))} />

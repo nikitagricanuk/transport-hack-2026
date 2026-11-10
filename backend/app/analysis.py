@@ -23,23 +23,32 @@ from .norms import speed_kmh
 from .osm_model import OsmDocument, Way, clone
 from .roads import direction, is_drivable, parse_int
 
-# per-lane capacity, veh/h (urban arterial values in the spirit of HCM)
+# Scenario assumptions for capacity per lane, veh/h. Not calibrated to observed traffic.
 LANE_CAPACITY = {
     "motorway": 1800, "trunk": 1500, "primary": 900, "secondary": 800, "tertiary": 700,
     "unclassified": 500, "residential": 500, "living_street": 200, "service": 300, "road": 500,
     "motorway_link": 1200, "trunk_link": 1000, "primary_link": 800, "secondary_link": 700, "tertiary_link": 600,
 }
-# typical share of capacity used in the peak hour when nothing is set
+# Assumed share of capacity used when traffic counts are unavailable.
 DEFAULT_VC = {
     "motorway": 0.6, "trunk": 0.6, "primary": 0.55, "secondary": 0.5, "tertiary": 0.4,
     "unclassified": 0.25, "residential": 0.2, "living_street": 0.1, "service": 0.1, "road": 0.2,
 }
-# km/h without a maxspeed sign: ПДД 10.2 — 60 in town, 20 in residential zones and courtyards
+# Fallback scenario speeds in km/h. Motorway and trunk values are modelling assumptions.
 DEFAULT_SPEED = {
     "motorway": 90, "trunk": 70, "primary": 60, "secondary": 60, "tertiary": 60, "unclassified": 60,
     "residential": 60, "living_street": 20, "service": 20, "road": 60,
 }
-LOS_BOUNDS = [(0.35, "A"), (0.55, "B"), (0.75, "C"), (0.9, "D"), (1.0, "E")]
+# ODM 218.2.020-2012, table 1: traffic load coefficient z.
+# https://meganorm.ru/Data2/1/4293787/4293787897.htm
+LOS_BOUNDS = [(0.20, "A"), (0.45, "B"), (0.70, "C"), (0.90, "D")]
+LOS_SOURCE_URL = "https://meganorm.ru/Data2/1/4293787/4293787897.htm"
+ANALYTICS_ASSUMPTIONS = (
+    "При отсутствии данных учёта объём оценивается по классу дороги. "
+    "Пропускная способность на полосу, доля спроса и запасные скорости — допущения сценария. "
+    "Задержки рассчитаны по функции BPR с коэффициентами 0,15 и 4. "
+    "Уровень обслуживания определяется по коэффициенту загрузки из таблицы 1 ОДМ 218.2.020-2012."
+)
 HIGHWAY_RU = {
     "motorway": "Автомагистраль", "trunk": "Скоростная", "primary": "Магистральная", "secondary": "Районная",
     "tertiary": "Местная", "unclassified": "Прочая", "residential": "Жилая улица", "living_street": "Жилая зона",
@@ -88,7 +97,7 @@ def los(vc: float) -> str:
     for bound, letter in LOS_BOUNDS:
         if vc < bound:
             return letter
-    return "F"
+    return "E" if vc <= 1.0 else "F"
 
 
 def road_rows(doc: OsmDocument, loads: dict[int, float], multiplier: float,

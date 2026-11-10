@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 from typing import Any
 
+from .analysis import ANALYTICS_ASSUMPTIONS, LOS_SOURCE_URL
+
 SEV_RU = {"critical": "Критично", "warning": "Предупреждение", "info": "Замечание"}
 CAT_RU = {
     "connectivity": "Связность", "direction": "Направления", "junction": "Перекрёстки",
@@ -116,11 +118,22 @@ def build_xlsx(data: dict[str, Any]) -> bytes:
           [[SEV_RU[i["severity"]], CAT_RU.get(i["category"], i["category"]), i["title"], i["description"],
             ", ".join(f"{r['kind']}/{r['id']}" for r in i["refs"][:5])] for i in val["issues"]])
 
+    assumptions = wb.create_sheet("Допущения и источники")
+    assumptions["A1"] = ANALYTICS_ASSUMPTIONS
+    assumptions["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+    assumptions.column_dimensions["A"].width = 85
+    assumptions.row_dimensions[1].height = 72
+    assumptions["A3"] = "ОДМ 218.2.020-2012, таблица 1"
+    assumptions["A3"].hyperlink = LOS_SOURCE_URL
+    assumptions["A3"].style = "Hyperlink"
+
     # ---- load
     ws = wb.create_sheet("Нагрузка")
     rows = sorted(load["rows"], key=lambda r: -r["vc"])
-    top, bottom = table(ws, 1, 1, [h for _, h in LOAD_COLS], [[r[k] for k, _ in LOAD_COLS] for r in rows])
-    widths(ws, [12, 28, 14, 7, 10, 12, 12, 8, 9, 11, 13])
+    top, bottom = table(ws, 1, 1, [h for _, h in LOAD_COLS] + ["Источник спроса"],
+                        [[r[k] for k, _ in LOAD_COLS] + ["Введено пользователем" if r["custom"] else "Нет данных учёта"]
+                         for r in rows])
+    widths(ws, [12, 28, 14, 7, 10, 12, 12, 8, 9, 11, 13, 25])
     los_top = 1
     table(ws, los_top, 13, ["Уровень обслуживания", "Рёбер"],
           [[k, v] for k, v in load["summary"]["by_los"].items()])
@@ -319,6 +332,8 @@ def build_docx(data: dict[str, Any]) -> bytes:
         doc.add_paragraph("Правок нет.")
 
     doc.add_heading("4. Нагрузка", 1)
+    doc.add_paragraph(ANALYTICS_ASSUMPTIONS)
+    doc.add_paragraph(LOS_SOURCE_URL)
     ls = load["summary"]
     doc.add_paragraph(
         f"Множитель спроса ×{load['multiplier']}. Средняя загрузка v/c {ls['avg_vc']}, перегружено "
@@ -433,6 +448,8 @@ def build_pdf(data: dict[str, Any]) -> bytes:
                          st, widths=[70, 130, 300])]
 
     story += [Paragraph("3. Нагрузка", st["h1"]),
+              Paragraph(ANALYTICS_ASSUMPTIONS, st["p"]),
+              Paragraph(f'<a href="{LOS_SOURCE_URL}">Текст ОДМ 218.2.020-2012</a>', st["p"]),
               Paragraph(f"Множитель спроса ×{load['multiplier']}. Средняя v/c {ls['avg_vc']}, перегружено "
                         f"{ls['congested_km']} км, рёбер с v/c ≥ 1: {ls['overloaded']}, задержка {ls['delay_hours']} авт·ч.",
                         st["p"]),
@@ -459,7 +476,7 @@ def build_pdf(data: dict[str, Any]) -> bytes:
 
 
 # =========================================================== object report
-# typical weekday traffic by hour, relative to the peak hour (1.0)
+# Illustrative hourly factors relative to the scenario peak (1.0).
 HOURLY_PROFILE = [0.10, 0.06, 0.04, 0.04, 0.08, 0.25, 0.60, 0.95, 1.00, 0.80, 0.70, 0.72,
                   0.75, 0.74, 0.76, 0.82, 0.92, 1.00, 0.95, 0.75, 0.55, 0.40, 0.28, 0.17]
 
@@ -482,6 +499,7 @@ def build_object_xlsx(obj: dict[str, Any]) -> bytes:
     ws.column_dimensions["A"].width = 32
     ws.column_dimensions["B"].width = 40
     if obj.get("hourly"):
+        ws.cell(row=r, column=1, value="Почасовой профиль задан для сценария")
         top = r + 2
         ws.cell(row=top, column=1, value="Час").font = Font(bold=True)
         ws.cell(row=top, column=2, value="Нагрузка, авт/ч").font = Font(bold=True)
@@ -489,7 +507,7 @@ def build_object_xlsx(obj: dict[str, Any]) -> bytes:
             ws.cell(row=top + 1 + h, column=1, value=f"{h:02d}:00")
             ws.cell(row=top + 1 + h, column=2, value=v)
         ch = LineChart()
-        ch.title, ch.y_axis.title = "Суточный профиль нагрузки", "авт/ч"
+        ch.title, ch.y_axis.title = "Суточный профиль нагрузки (допущение)", "авт/ч"
         ch.height, ch.width = 8, 18
         ch.add_data(Reference(ws, min_col=2, min_row=top, max_row=top + 24), titles_from_data=True)
         ch.set_categories(Reference(ws, min_col=1, min_row=top + 1, max_row=top + 24))
@@ -527,7 +545,7 @@ def build_object_pdf(obj: dict[str, Any]) -> bytes:
         ax.set_xlabel("час")
         ax.set_ylabel("авт/ч")
         ax.spines[["top", "right"]].set_visible(False)
-        story += [Paragraph("Суточный профиль нагрузки", st["h1"]), _pdf_image(_png(fig), 16)]
+        story += [Paragraph("Суточный профиль нагрузки (допущение)", st["h1"]), _pdf_image(_png(fig), 16)]
         plt.close(fig)
     for name, headers, rows in obj.get("tables", []):
         story += [Paragraph(name, st["h1"]), _pdf_table([headers] + rows, st)]
