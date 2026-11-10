@@ -6,7 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.analysis import network_stats, road_rows
-from app.edits import History, apply_op
+from app.norms import max_grade
+from app.edits import GRADE_MARGIN, History, apply_op
 from app.main import SESSIONS, app
 from app.validation import validate
 
@@ -22,10 +23,12 @@ def test_smooth_z_ramps_down_from_the_bridge(doc):
     res = apply_op(doc, h, "smooth_z", {"way_id": 104})
     assert res["height"] == 5.0
     assert doc.nodes[4].tags["ele"] == "5.0" and doc.nodes[12].tags["ele"] == "5.0"
-    # way 100 approaches node 4 with 68 m segments: the 60 m ramp ends inside 3-4
-    nodes = doc.ways[100].nodes
-    assert nodes[:3] == [1, 2, 3] and nodes[-1] == 4 and len(nodes) == 5
-    assert doc.nodes[nodes[3]].tags["ele"] == "0.0"
+    # the ramp is height / allowed grade of the approach (primary, 60 ‰ by СП 42): about 88 m,
+    # longer than one 68 m segment, so node 3 is partway down and node 2 is back on the ground
+    ramp = 5.0 / (max_grade(doc.ways[100].tags) * GRADE_MARGIN)
+    assert res["ramp_m"] == round(ramp, 1) and 80 < ramp < 95
+    assert doc.ways[100].nodes == [1, 2, 3, 4]   # heights only, no new nodes
+    assert 0 < float(doc.nodes[3].tags["ele"]) < 5 and "ele" not in doc.nodes[2].tags
     titles = _titles(doc)
     assert "Резкий Z-переход" not in titles and "Резкий перепад высоты" not in titles
     h.undo()

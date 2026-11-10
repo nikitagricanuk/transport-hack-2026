@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from .geo import GridIndex, LocalProjection, dist, project_on_segment, segment_intersection
 from .osm_model import Element, Kind, Member, Node, OsmDocument, Relation, Way, clone
+from .norms import max_grade
 from .roads import can_connect, direction, is_drivable, lane_tags, parse_int, reversed_tags
 
 
@@ -944,7 +945,7 @@ def op_place_signal(doc, tx, node_id: int | None = None, way_id: int | None = No
 
 
 LEVEL_HEIGHT_M = 5.0  # height of one OSM layer step
-RAMP_M = 60.0         # length of the approach ramp on each side
+GRADE_MARGIN = 0.95   # ramps a bit gentler than the limit, so rounding never trips the check
 
 
 def way_level(tags: dict[str, str]) -> int:
@@ -1186,72 +1187,134 @@ def _join_crossings(doc: OsmDocument, tx: Transaction, way_ids: list[int]) -> li
 
 def _set_ele(doc: OsmDocument, tx: Transaction, nid: int, value: float) -> None:
     n = doc.nodes[nid]
-    text = f"{value:.1f}"
+    # centimetres: on a 2 m segment a 5 cm rounding step alone is a 25 ‰ grade
+    text = f"{value:.2f}"
+    if text.endswith("0"):
+        text = text[:-1]   # 5.00 → 5.0, 3.20 → 3.2
     if n.tags.get("ele") != text:
         tx.touch("node", nid)
         n.tags["ele"] = text
 
 
-def op_smooth_z(doc, tx, way_id: int, ramp_m: float = RAMP_M, level_height: float = LEVEL_HEIGHT_M):
+def op_smooth_z(doc, tx, way_id: int, ramp_m: float | None = None, level_height: float = LEVEL_HEIGHT_M):
     """Smooth Z: bridge/tunnel nodes get ele = layer x level_height and the
-    approaches descend linearly to 0 over ``ramp_m`` metres on each side,
-    so 3D models do not jump from ground to deck in one segment.
+    approaches descend linearly to 0 on each side, so 3D models do not jump
+    from ground to deck in one segment.
 
-    Heights are relative to the surrounding ground (nodes without ``ele``).
+    Ramp length L = height / allowed grade (СП 42.13330.2016, see ``norms.max_grade``;
+    the strictest class among the approaches): 5 m at 70 ‰ ≈ 75 m, 10 m ≈ 150 m.
+    The ramp is not limited to the first approach way: every ground node within
+    L metres along the road network from the bridge ends gets
+    ele = height · (1 − d / L), d = network distance. Any segment then rises at most
+    height / L, wherever the ramp crosses into the next way, and a node reached
+    by two ramps keeps the higher one. ``ramp_m`` forces L. Heights are relative
+    to the ground.
     """
+    import heapq
+
     w = _way(doc, int(way_id))
     level = way_level(w.tags)
     if level == 0:
         raise OpError("у ребра нет уровня: сначала задайте мост или тоннель (layer)")
-    ramp_m = float(ramp_m)
-    if ramp_m <= 0:
+    if ramp_m is not None and float(ramp_m) <= 0:
         raise OpError("длина съезда должна быть больше нуля")
     height = level * float(level_height)
     for nid in dict.fromkeys(w.nodes):
         if nid in doc.nodes:
             _set_ele(doc, tx, nid, height)
     proj = _proj(doc)
+    index = doc.node_way_index()
 
     def xy(nid: int) -> tuple[float, float]:
         n = doc.nodes[nid]
         return proj.to_xy(n.lat, n.lon)
 
-    ramps = 0
-    for end in dict.fromkeys((w.nodes[0], w.nodes[-1])):
-        for other in doc.ways_of_node(end):
-            if other.id == w.id or "highway" not in other.tags or way_level(other.tags) != 0:
+    def ground(way: Way) -> bool:
+        return way.id != w.id and "highway" in way.tags and way_level(way.tags) == 0
+
+    def elevated(nid: int) -> bool:  # on some bridge or tunnel (this one or another)
+        return any(way_level(doc.ways[x].tags) != 0 for x in index.get(nid, []) if x in doc.ways)
+
+    ends = [e for e in dict.fromkeys((w.nodes[0], w.nodes[-1])) if e in doc.nodes]
+    approaches = [doc.ways[x] for e in ends for x in index.get(e, []) if x in doc.ways and ground(doc.ways[x])]
+    if ramp_m is not None:
+        ramp = float(ramp_m)
+    else:
+        grade = min((max_grade(a.tags) for a in approaches), default=max_grade(w.tags))
+        ramp = abs(height) / (grade * GRADE_MARGIN)
+
+    def spread(length: float) -> tuple[dict[int, float], float]:
+        """Dijkstra over ground roads from the bridge ends up to `length`; also the
+        strictest allowed grade among the roads the ramp reaches."""
+        best: dict[int, float] = {e: 0.0 for e in ends}
+        strictest = 1.0
+        heap = [(0.0, e) for e in ends]
+        while heap:
+            d, a = heapq.heappop(heap)
+            if d > best.get(a, float("inf")) or d >= length:
                 continue
-            idx = other.nodes.index(end)
-            for step in (1, -1):
-                if not 0 <= idx + step < len(other.nodes):
+            for x in index.get(a, []):
+                way = doc.ways.get(x)
+                if way is None or not ground(way):
                     continue
-                ramps += 1
-                acc, j = 0.0, idx
-                while 0 <= j + step < len(other.nodes):
-                    a, b = other.nodes[j], other.nodes[j + step]
-                    if a not in doc.nodes or b not in doc.nodes:
-                        break
-                    seg = dist(xy(a), xy(b))
-                    if acc + seg < ramp_m - 0.5:
-                        acc += seg
-                        _set_ele(doc, tx, b, height * (1 - acc / ramp_m))
-                        j += step
+                for i, ref in enumerate(way.nodes):
+                    if ref != a:
                         continue
-                    if acc + seg <= ramp_m + 0.5:
-                        _set_ele(doc, tx, b, 0.0)
-                        break
-                    # ramp ends inside this segment: put a ground node there
-                    t = (ramp_m - acc) / seg
-                    pa, pb = xy(a), xy(b)
-                    lat, lon = proj.to_latlon(pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t)
-                    n = _create_node(doc, tx, lat, lon, {"ele": "0.0"})
-                    tx.touch("way", other.id)
-                    other.nodes.insert(j + 1 if step == 1 else j, n.id)
-                    break
-    return {"id": w.id, "height": height, "ramps": ramps}
+                    for j in (i - 1, i + 1):
+                        if not 0 <= j < len(way.nodes):
+                            continue
+                        b = way.nodes[j]
+                        if b not in doc.nodes or b in ends:
+                            continue
+                        strictest = min(strictest, max_grade(way.tags))
+                        nd = d + dist(xy(a), xy(b))
+                        if nd < best.get(b, float("inf")):
+                            best[b] = nd
+                            if not elevated(b):   # another bridge keeps its own height and stops the ramp
+                                heapq.heappush(heap, (nd, b))
+        return best, strictest
+
+    best, strictest = spread(ramp)
+    for _ in range(3):   # the ramp ran onto a stricter road class: lengthen it and spread again
+        if ramp_m is not None or abs(height) / ramp <= strictest * GRADE_MARGIN + 1e-9:
+            break
+        ramp = abs(height) / (strictest * GRADE_MARGIN)
+        best, strictest = spread(ramp)
+    for nid, d in best.items():
+        if nid in ends or d >= ramp or elevated(nid):
+            continue
+        value = height * (1 - d / ramp)
+        old = doc.nodes[nid].tags.get("ele")
+        try:
+            prev = float(old) if old is not None else None
+        except ValueError:
+            prev = None
+        if prev is not None and prev * value > 0 and abs(prev) >= abs(value):
+            continue   # already on a higher ramp of a neighbouring bridge
+        _set_ele(doc, tx, nid, value)
+    return {"id": w.id, "height": height, "ramps": len(approaches), "ramp_m": round(ramp, 1)}
+
+
+def op_set_restriction_via(doc, tx, relation_id: int, node_id: int):
+    """Point a turn restriction at the node where its from and to ways actually meet."""
+    rel = doc.relations.get(int(relation_id))
+    if rel is None:
+        raise OpError(f"отношение {relation_id} не найдено")
+    nid = int(node_id)
+    if nid not in doc.nodes:
+        raise OpError(f"узел {nid} не найден")
+    for role in ("from", "to"):
+        member = next((m for m in rel.members if m.role == role and m.type == "way"), None)
+        w = doc.ways.get(member.ref) if member else None
+        if w is None or nid not in (w.nodes[0], w.nodes[-1]):
+            raise OpError(f"узел {nid} не на конце ребра {role}")
+    tx.touch("relation", rel.id)
+    rel.members = [m for m in rel.members if m.role != "via"] + [Member("node", nid, "via")]
+    return {"id": rel.id}
 
 
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
+    "set_restriction_via": (op_set_restriction_via, "Исправлен узел запрета поворота"),
     "smooth_z": (op_smooth_z, "Плавный Z-переход"),
     "attach_to_road": (op_attach_to_road, "Узел привязан к дороге"),
     "delete_ways": (op_delete_ways, "Удалён фрагмент сети"),

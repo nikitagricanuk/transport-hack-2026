@@ -58,7 +58,8 @@ def test_fringe_turnaround_fix_closes_the_divided_road():
     apply_op(doc, History(), fix["op"], fix["args"])
     after = validate(doc)
     assert not [i for i in after["issues"] if i["category"] == "direction"]
-    assert after["summary"]["levels"]["matsim"] == "ok"
+    # nothing left for MatSim but the speed limits this toy road has no sign for
+    assert not [i for i in after["issues"] if "matsim" in i["levels"] and i["category"] != "data"]
 
 
 def test_interior_dead_end_stays_critical():
