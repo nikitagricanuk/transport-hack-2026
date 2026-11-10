@@ -20,6 +20,8 @@ interface Props {
   nodeOnRoad?: boolean;
   /** the selected node is a shared junction that can be pulled apart */
   canSeparate?: boolean;
+  /** same-class roads meeting this one end to end, for «Объединить с …» */
+  mergeCandidates?: { id: number; name: string }[];
   /** shared junctions on the selected road, drawn as orange points */
   sharedJunctions?: number;
   /** for the signal and stop panels */
@@ -46,7 +48,7 @@ const BUILDING_TYPES: [string, string][] = [
 ];
 
 export default memo(function Inspector({
-  way, node, geometry, loadRow, onSetLoad, nodeOnRoad, canSeparate, sharedJunctions, docId, rev = 0, openRoute = null,
+  way, node, geometry, loadRow, onSetLoad, nodeOnRoad, canSeparate, sharedJunctions, mergeCandidates = [], docId, rev = 0, openRoute = null,
   onOpenRoute, onScenarioChanged, onOp, closed = false, onClosure, onObjectReport, onAutofill, readOnly = false,
 }: Props) {
   const [selectedTab, setTab] = useState<'attr' | 'tags' | 'adapters'>('attr');
@@ -111,7 +113,7 @@ export default memo(function Inspector({
         {tab === 'attr' && way && way.layer !== 'building' && way.layer !== 'area' && (
           <>
             <WayAttributes way={way} tags={tags} setTags={setTags} onOp={onOp} sharedJunctions={sharedJunctions} />
-            {loadRow && onSetLoad && <RoadLoad key={way.id} row={loadRow} onSet={(v) => onSetLoad(way.id, v)} />}
+            {loadRow && onSetLoad && <RoadLoad key={way.id} row={loadRow} onSet={(v) => onSetLoad(way.id, v)} docId={docId} rev={rev} />}
           </>
         )}
         {tab === 'attr' && node && !nodeOnRoad && (
@@ -139,6 +141,12 @@ export default memo(function Inspector({
             <button className="btn small" onClick={() => onObjectReport(kind, id, 'xlsx')} title="Цифры и график в Excel">Excel</button>
           </>
         )}
+        {!readOnly && way && mergeCandidates.map((c) => (
+          <button key={c.id} className="btn" title="Соединить два ребра одного класса в одно (обратно — инструмент «Разделить ребро», S)"
+            onClick={() => onOp({ op: 'merge_ways', args: { way_id: way.id, other_id: c.id } }, 'Рёбра объединены')}>
+            Объединить с {c.name || `way/${c.id}`}
+          </button>
+        ))}
         {!readOnly && node && canSeparate && (
           <button className="btn" onClick={() => onOp({ op: 'separate_ways', args: { node_id: node.id } }, 'Дороги разъединены')}>
             Разделить дороги

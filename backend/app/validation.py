@@ -52,14 +52,30 @@ def _is_entrance(tags: dict[str, str]) -> bool:
     return tags.get("building") == "entrance"
 
 
-def validate(doc: OsmDocument) -> dict[str, Any]:
+def issue_key(issue: dict[str, Any] | Issue) -> str:
+    """Stable identity of an issue: its title and the objects it points at (ids are positional)."""
+    d = asdict(issue) if isinstance(issue, Issue) else issue
+    refs = sorted(f"{r['kind']}/{r['id']}" for r in d["refs"])
+    return d["title"] + "|" + ",".join(refs)
+
+
+def validate(doc: OsmDocument, dismissed: set[str] | None = None) -> dict[str, Any]:
+    """Every issue of the graph. Issues the user dismissed as false (`dismissed` keys) stay in
+    the list marked ``dismissed`` but no longer count in the totals or the adapter levels."""
     v = _Validator(doc)
     v.run()
     issues = sorted(v.issues, key=lambda i: {"critical": 0, "warning": 1, "info": 2}[i.severity])
-    return {
-        "issues": [asdict(i) for i in issues],
-        "summary": _summary(issues, v),
-    }
+    dismissed = dismissed or set()
+    active = [i for i in issues if issue_key(i) not in dismissed]
+    out = []
+    for i in issues:
+        d = asdict(i)
+        d["key"] = issue_key(d)
+        d["dismissed"] = d["key"] in dismissed
+        out.append(d)
+    summary = _summary(active, v)
+    summary["dismissed"] = len(issues) - len(active)
+    return {"issues": out, "summary": summary}
 
 
 def _summary(issues: list[Issue], v: "_Validator") -> dict[str, Any]:

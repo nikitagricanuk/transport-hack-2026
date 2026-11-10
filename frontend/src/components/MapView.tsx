@@ -9,7 +9,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, SimVehicle, Tool, WayProps } from '../types';
 import type { BaseMap, ImageOverlay } from './Extras';
-import { LANE_MINZOOM, buildLanes, findJunctions, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
+import { LANE_MINZOOM, attachToLanes, buildLanes, findJunctions, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
@@ -835,6 +835,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     for (const r of roads) {
       r.junctions = r.nodes.flatMap((id) => { const j = junctions.get(id); return j ? [j] : []; });
     }
+    // a branch that meets a wider road starts from that road's lanes on its side, not its centre
+    const attached = attachToLanes(roads);
+    for (const r of roads) r.coords = attached.get(r.id) ?? r.coords;
     const g = buildLanes(roads, [...junctions.values()]);
     (map.getSource('lane-surface') as GeoJSONSource).setData(g.surface);
     (map.getSource('lane-marks') as GeoJSONSource).setData(g.marks);
@@ -1028,9 +1031,24 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         ?? areas[0];
       const way = byLayer(['ways-hit']) ?? area;
       const join = byLayer(['join-handles']);
+      // any node can be picked, not only junctions and tagged points: a click right on a vertex
+      // of the road (or building) under the cursor selects that node
+      let vertexId: number | undefined;
+      if (!node && way && !(area && way === area && !wantPart && propsRef.current.wayById(Number(way.properties.id))?.layer === 'building')) {
+        const id = Number(way.properties.id);
+        const g = propsRef.current.geo;
+        const f = g?.ways.features.find((x) => x.properties.id === id) ?? g?.areas.features.find((x) => x.properties.id === id);
+        const coords = f ? (f.geometry.type === 'Polygon' ? f.geometry.coordinates[0] : f.geometry.coordinates) as number[][] : [];
+        let best = HIT_PX + 1;
+        coords.forEach((c, i) => {
+          const p = map.project(c as [number, number]);
+          const d = Math.hypot(p.x - e.point.x, p.y - e.point.y);
+          if (d < best) { best = d; vertexId = f!.properties.nodes[i]; }
+        });
+      }
       return {
         partPick: Boolean(wantPart && area),
-        nodeId: node ? Number(node.properties.id) : undefined,
+        nodeId: node ? Number(node.properties.id) : vertexId,
         wayId: way ? Number(way.properties.id) : undefined,
         joinId: join ? Number(join.properties.id) : undefined,
       };

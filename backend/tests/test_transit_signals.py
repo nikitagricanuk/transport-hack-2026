@@ -41,10 +41,17 @@ def test_signal_plan_groups_arms_and_green_share_changes_capacity(doc):
     plan = signals.plan(doc, 2, None, rows)
     assert plan["cycle"] == 90 and [p["green_s"] for p in plan["phases"]] == [40, 40]
     assert 40 <= plan["webster"]["cycle"] <= 150 and 0.2 <= plan["webster"]["main_share"] <= 0.8
-    f = signals.capacity_factors(doc, {2: {"main_share": 0.7}})
-    assert f[100] == pytest.approx(1.4) and f[101] == pytest.approx(0.6)
+    # capacity of an approach to a signal: c = lanes · s(class) · g/C
+    doc.nodes[2].tags["highway"] = "traffic_signals"
+    even = {r["id"]: r for r in road_rows(doc, {}, 1.0, capacity_factor=signals.capacity_factors(doc, {}))}
+    assert even[100]["capacity"] == round(2 * signals.sat_flow("primary") * 40 / 90)   # default plan, even split
+    f = signals.capacity_factors(doc, {2: {"main_share": 0.7, "cycle": 90}})
     boosted = {r["id"]: r for r in road_rows(doc, {}, 1.0, capacity_factor=f)}
-    assert boosted[100]["capacity"] > rows[100]["capacity"] and boosted[101]["capacity"] < rows[101]["capacity"]
+    assert boosted[100]["capacity"] == round(2 * signals.sat_flow("primary") * 56 / 90)
+    assert boosted[100]["capacity"] > even[100]["capacity"] and boosted[101]["capacity"] < even[101]["capacity"]
+    # a longer cycle with the same split loses less time per hour: more capacity
+    longer = signals.capacity_factors(doc, {2: {"main_share": 0.5, "cycle": 120}})
+    assert longer[100] > signals.capacity_factors(doc, {})[100]
 
 
 def _add_bus_route(doc):
@@ -104,3 +111,20 @@ def test_signal_timing_is_exported_as_tags_and_restored_on_import(raw):
     # a reset drops the stale tags from the next export
     c.post(f"/api/documents/{doc2}/signals/2", json={"reset": True})
     assert b"uds:signal:" not in c.get(f"/api/documents/{doc2}/export").content
+
+
+def test_explain_shows_formulas_and_signal_capacity(raw):
+    c = TestClient(app)
+    doc_id = c.post("/api/documents", files={"file": ("t.osm", raw, "application/xml")}).json()["doc_id"]
+    plain = c.get(f"/api/documents/{doc_id}/load/100/explain").json()
+    assert [s["formula"] for s in plain["steps"]][1] == "c = n · c_пол"
+    assert plain["summary"]["signal"] is False
+    c.post(f"/api/documents/{doc_id}/ops", json={"op": "place_signal", "args": {"node_id": 2}})
+    c.post(f"/api/documents/{doc_id}/signals/2", json={"main_share": 0.6, "cycle": 100})
+    ex = c.get(f"/api/documents/{doc_id}/load/100/explain").json()
+    cap = next(s for s in ex["steps"] if s["formula"] == "c = n · s · g / C")
+    g = round((100 - 10) * 0.6)
+    assert cap["value"] == round(2 * signals.sat_flow("primary") * g / 100)
+    assert ex["summary"]["signal"] and ex["summary"]["capacity"] == cap["value"]
+    assert any(s["formula"].startswith("t = t₀") for s in ex["steps"])
+    assert c.get(f"/api/documents/{doc_id}/load/105/explain").status_code == 404   # a building

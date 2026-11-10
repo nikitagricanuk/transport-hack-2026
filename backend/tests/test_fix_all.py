@@ -44,3 +44,20 @@ def test_plan_applies_nothing_and_the_batch_is_one_undo_step():
     hist = c.get(f"/api/documents/{doc_id}").json()["history"]
     assert len(hist["entries"]) == 1 and hist["entries"][0].startswith("Править всё")
     assert not c.get(f"/api/documents/{doc_id}/fix-all").json()["safe"]   # nothing safe left
+
+
+def test_dismissed_issue_is_hidden_from_counts_and_fix_all_and_can_come_back(raw):
+    c = TestClient(app)
+    doc_id = c.post("/api/documents", files={"file": ("t.osm", raw, "application/xml")}).json()["doc_id"]
+    v = c.get(f"/api/documents/{doc_id}/validate").json()
+    issue = next(i for i in v["issues"] if i["severity"] != "info")
+    before = v["summary"]["counts"][issue["severity"]]
+    after = c.post(f"/api/documents/{doc_id}/issues/dismiss", json={"key": issue["key"]}).json()
+    hidden = next(i for i in after["issues"] if i["key"] == issue["key"])
+    assert hidden["dismissed"] and after["summary"]["dismissed"] == 1
+    assert after["summary"]["counts"][issue["severity"]] == before - 1
+    assert c.get(f"/api/documents/{doc_id}/validate").json()["summary"]["dismissed"] == 1
+    plan = c.get(f"/api/documents/{doc_id}/fix-all").json()
+    assert all(p["issue_id"] != issue["id"] for p in plan["safe"] + plan["disputed"])
+    back = c.post(f"/api/documents/{doc_id}/issues/dismiss", json={"key": issue["key"], "dismissed": False}).json()
+    assert back["summary"]["dismissed"] == 0 and back["summary"]["counts"][issue["severity"]] == before

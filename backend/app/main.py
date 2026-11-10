@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from . import __version__, report
 from .collab import HUB, Peer, clean_presence
 from . import fix_all, fix_preview
+from .analysis import METHOD
 from . import signals as signal_plans
 from . import routing, network_analysis, scenario, transit
 from .analysis_requests import RouteRequest, IsochroneRequest, CatchmentRequest, PtRequest
@@ -73,6 +74,8 @@ class Session:
     # vehicles/h per transit route (overrides of the OSM interval) and signal timing per node
     transit_freq: dict[int, float] = field(default_factory=dict)
     signal_timing: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # issues the user marked as false alarms (validation.issue_key), hidden from the list
+    dismissed: set[str] = field(default_factory=set)
     analysis_settings: dict = field(default_factory=dict)
     closure_choices: dict[int, int] = field(default_factory=dict)
     closures: set[int] = field(default_factory=set)        # roads closed by an accident or works
@@ -278,7 +281,8 @@ def _save_analysis(s: Session) -> None:
     data = {"loads": {str(k): v for k, v in s.loads.items()}, "multiplier": s.multiplier, "snapshots": s.snapshots,
             "transit_freq": {str(k): v for k, v in s.transit_freq.items()},
             "signal_timing": {str(k): v for k, v in s.signal_timing.items()},
-            "closures": sorted(s.closures), "closure_choices": s.closure_choices, "analysis_settings": s.analysis_settings, "tasks": s.tasks}
+            "closures": sorted(s.closures), "closure_choices": s.closure_choices, "analysis_settings": s.analysis_settings, "tasks": s.tasks,
+            "dismissed": sorted(s.dismissed)}
     try:
         DRAFT_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -301,6 +305,7 @@ def _load_analysis(s: Session) -> None:
         s.closure_choices = {int(k):int(v) for k,v in data.get("closure_choices", {}).items()}
         s.closures = {int(x) for x in data.get("closures", [])}
         s.tasks = list(data.get("tasks", []))
+        s.dismissed = {str(k) for k in data.get("dismissed", [])}
     except (OSError, ValueError, TypeError, AttributeError):
         return
 
@@ -554,7 +559,7 @@ def _analysis_context(s, req=None):
                                loads=dict(s.loads), multiplier=s.multiplier, transit_freq=dict(s.transit_freq),
                                signal_timing={k:dict(v) for k,v in s.signal_timing.items()},
                                analysis_settings=dict(s.analysis_settings),closure_choices=dict(s.closure_choices),
-                               validation_issues=s.validation_cache[1]["issues"] if s.validation_cache and s.validation_cache[0]==s.revision else [])
+                               validation_issues=s.validation_cache[1]["issues"] if s.validation_cache and s.validation_cache[0][0] == s.revision else [])
 
 
 def _before_graph(ctx, doc, req):
@@ -719,9 +724,26 @@ def delete_draft(doc_id: str | None = None) -> dict[str, bool]:
 def run_validate(doc_id: str) -> Response:
     s = _session(doc_id)
     with s.lock:
-        if not s.validation_cache or s.validation_cache[0]!=s.revision:
-            s.validation_cache=(s.revision,validate(s.doc))
+        key = (s.revision, frozenset(s.dismissed))
+        if not s.validation_cache or s.validation_cache[0] != key:
+            s.validation_cache = (key, validate(s.doc, s.dismissed))
         return _json(s.validation_cache[1])
+
+
+class DismissRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=4000)
+    dismissed: bool = True
+
+
+@app.post("/api/documents/{doc_id}/issues/dismiss")
+def dismiss_issue(doc_id: str, req: DismissRequest, x_client_id: str | None = Header(default=None)) -> Response:
+    """Hide an issue the user considers a false alarm (or bring it back). The file is not changed."""
+    s = _session(doc_id)
+    with s.lock:
+        (s.dismissed.add if req.dismissed else s.dismissed.discard)(req.key)
+        _save_analysis(s)
+        HUB.publish(s.id, {"type": "validate"}, exclude=x_client_id)
+        return _json(validate(s.doc, s.dismissed))
 
 
 @app.get("/api/documents/{doc_id}/fix-all")
@@ -729,7 +751,9 @@ def fix_all_plan(doc_id: str) -> Response:
     """«Править всё»: safe fixes to confirm as a list, disputed ones left to the user. Applies nothing."""
     s = _session(doc_id)
     with s.lock:
-        return _json(fix_all.plan(validate(s.doc)))
+        v = validate(s.doc, s.dismissed)
+        v["issues"] = [i for i in v["issues"] if not i["dismissed"]]
+        return _json(fix_all.plan(v))
 
 
 _STATUS_RU = {"added": "добавлен", "deleted": "удалён", "modified": "изменён"}
@@ -863,6 +887,25 @@ def get_load(doc_id: str) -> Response:
     s = _session(doc_id)
     with s.lock:
         return _json(_load_state(s))
+
+
+def _explain(s: Session, row: dict[str, Any]) -> dict[str, Any]:
+    from .analysis import explain
+
+    timing = {nid: cfg for nid, cfg in s.signal_timing.items() if nid in s.doc.nodes}
+    signal = signal_plans.signal_approaches(s.doc, timing).get(row["id"])
+    return explain(row, s.doc, signal, s.multiplier)
+
+
+@app.get("/api/documents/{doc_id}/load/{way_id}/explain")
+def explain_load(doc_id: str, way_id: int) -> Response:
+    """How a road's intensity, capacity, v/c, level of service and travel time were computed."""
+    s = _session(doc_id)
+    with s.lock:
+        row = next((r for r in _rows(s) if r["id"] == way_id), None)
+        if row is None:
+            raise HTTPException(404, "у этого ребра нет расчёта нагрузки (не проезжая дорога)")
+        return _json(_explain(s, row))
 
 
 @app.post("/api/documents/{doc_id}/load")
@@ -1098,6 +1141,9 @@ def _report_data(s: Session, a: str | None, b: str | None) -> dict[str, Any]:
         "validation": validate(s.doc),
         "changes": list_changes(s.doc),
         "load": {"multiplier": s.multiplier, "rows": rows, "summary": load_summary(rows)},
+        # how the numbers are computed: the formulas, and every step for the most loaded roads
+        "method": METHOD,
+        "explained": [_explain(s, r) for r in sorted(rows, key=lambda r: -r["vc"])[:5]],
         "od": scenario.od_matrix(s.doc),
         "comparison": comparison,
     }

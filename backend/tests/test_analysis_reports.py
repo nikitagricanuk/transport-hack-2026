@@ -133,7 +133,9 @@ def test_reports_contain_numbers_and_charts(raw):
     r = c.get(f"/api/documents/{doc_id}/report.xlsx")
     assert r.status_code == 200 and 'report_t.xlsx' in r.headers["content-disposition"]
     wb = openpyxl.load_workbook(io.BytesIO(r.content))
-    assert wb.sheetnames == ["Сводка", "Дороги", "Проблемы", "Допущения и источники", "Нагрузка", "Сравнение", "Изменения"]
+    assert wb.sheetnames == ["Сводка", "Дороги", "Проблемы", "Допущения и источники", "Нагрузка", "Сравнение", "Изменения",
+                             "Методика"]
+    assert wb["Методика"]["B2"].value == "c = n · c_пол"
     assert "ОДМ 218.2.020-2012" in wb["Допущения и источники"]["A1"].value
     assert wb["Допущения и источники"]["A3"].hyperlink.target.startswith("https://")
     assert wb["Нагрузка"]["L1"].value == "Источник спроса"

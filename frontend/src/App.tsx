@@ -18,6 +18,7 @@ import { FixReview, type FixReviewState } from './components/FixReview';
 import { OrganizerReport, SumoReport } from './components/CheckResults';
 import { Simulation } from './components/Simulation';
 import { FixAllDialog } from './components/FixAll';
+import { IssueDetails } from './components/IssueDetails';
 import { MenuBar, Splitter, useLayout } from './components/WindowLayout';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
@@ -83,6 +84,8 @@ export default function App() {
   // a suggested fix under review: drawn on the map, applied only on the user's click
   const mapHighlight = useMemo(() => [...highlight,...multi], [highlight,multi]);
   const [fixReview, setFixReview] = useState<FixReviewState | null>(null);
+  // the issue whose properties are shown (a click on it in the list)
+  const [issueInfo, setIssueInfo] = useState<Issue | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
   const [fixAllOpen, setFixAllOpen] = useState(false);
   const [followId, setFollowId] = useState<string | null>(null);
@@ -166,6 +169,14 @@ export default function App() {
         return { id: selection.id, kind: 'node', junction: false, category: 'junction', tags: {}, lon, lat };
       }
     }
+    // a corner of a building or an area
+    for (const a of doc.geo.areas.features) {
+      const i = a.properties.nodes.indexOf(selection.id);
+      if (i >= 0) {
+        const [lon, lat] = a.geometry.coordinates[0][i];
+        return { id: selection.id, kind: 'node', junction: false, category: 'tagged', tags: {}, lon, lat };
+      }
+    }
     return undefined;
   }, [doc, selection]);
   const selectedWay = selection?.kind === 'way' ? wayIndex.get(selection.id) : undefined;
@@ -175,6 +186,15 @@ export default function App() {
     if (!selectedWay || (selectedWay.layer !== 'road' && selectedWay.layer !== 'path')) return 0;
     return new Set(selectedWay.nodes.filter((id) => sharedNodes.has(id))).size;
   }, [selectedWay, sharedNodes]);
+  // roads of the same class that meet the selected one end to end: «Объединить с …»
+  const mergeCandidates = useMemo(() => {
+    if (!doc || !selectedWay || selectedWay.layer === 'building' || selectedWay.layer === 'area') return [];
+    const ends = new Set([selectedWay.nodes[0], selectedWay.nodes[selectedWay.nodes.length - 1]]);
+    return doc.geo.ways.features
+      .filter((f) => f.properties.id !== selectedWay.id && f.properties.highway === selectedWay.highway
+        && (ends.has(f.properties.nodes[0]) || ends.has(f.properties.nodes[f.properties.nodes.length - 1])))
+      .slice(0, 4).map((f) => ({ id: f.properties.id, name: f.properties.name }));
+  }, [doc, selectedWay]);
   const selectedGeometry = useMemo(() => {
     if (!doc || selection?.kind !== 'way') return undefined;
     const line = doc.geo.ways.features.find((f) => f.properties.id === selection.id);
@@ -619,6 +639,16 @@ export default function App() {
     }).then(ok=>{if(ok && r.fix.op==='edit_segment'){setSegment(null);setMulti([]);}});
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
+  // «Это не ошибка»: hide a false alarm from the list (or bring it back); the file is not changed
+  const dismissIssue = useCallback(async (i: Issue, dismissed: boolean) => {
+    if (!docId || !i.key) return;
+    try {
+      setValidation(await api.dismissIssue(docId, i.key, dismissed));
+      setNotice(dismissed ? `Скрыто как не ошибка: ${i.title}. Вернуть — «Скрытые» в списке проблем.` : `Возвращено в список: ${i.title}`);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [docId]);
   // a review belongs to the document it was computed on
   useEffect(() => { setFixReview(null); }, [docId]);
   const onInspectorOp = useCallback((op: Op | Op[], label?: string) => { runOps(op, { label }); }, [runOps]);
@@ -648,7 +678,7 @@ export default function App() {
   }, [issueFilters]);
   const mapIssues = useMemo(() => {
     if (!layers.issues || !validation) return NO_ISSUES;
-    const shown = validation.issues.filter((issue) => issueVisible(issueFilters, issue.category));
+    const shown = validation.issues.filter((issue) => !issue.dismissed && issueVisible(issueFilters, issue.category));
     return shown.length ? shown : NO_ISSUES;
   }, [layers.issues, validation, issueFilters]);
 
@@ -664,6 +694,7 @@ export default function App() {
   }, [selection, runOps]);
 
   const showIssue = useCallback((i: Issue) => {
+    setIssueInfo(i);
     if (i.location) mapRef.current?.flyTo(i.location[0], i.location[1], 19);
     const ref = i.refs.find((r) => r.kind === 'way' || r.kind === 'node');
     if (ref && ref.kind !== 'relation') setSelection({ kind: ref.kind, id: ref.id });
@@ -687,6 +718,7 @@ export default function App() {
         if (tasksOpen) { setTasksOpen(false); return true; }
         if (fixAllOpen) { setFixAllOpen(false); return true; }
         if (fixReview) { setFixReview(null); return true; }
+        if (issueInfo) { setIssueInfo(null); return true; }
         return mapRef.current?.cancelPending() ?? false;
       };
       const undoWithNotice = () => {
@@ -733,7 +765,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey, false);
     return () => window.removeEventListener('keydown', onKey, false);
-  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview, organizer, sumo, exportCheck, report, tasksOpen, fixAllOpen, doc, multi, segment, analysisPick]);
+  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview, organizer, sumo, exportCheck, report, tasksOpen, fixAllOpen, doc, multi, segment, analysisPick, issueInfo]);
 
   useEffect(() => { setHint(null); }, [tool]);
 
@@ -942,6 +974,11 @@ export default function App() {
             {mode !== 'simulation' && analysisOverlay.features.some(f=>f.properties?.mock) && <div className="analysis-legend">Интервалы без OSM interval — условные (mock); скорость ОТ и ожидание — допущения</div>}
             {mode === 'simulation' ? <Simulation key={`${doc.doc_id}:${doc.rev}`} docId={doc.doc_id} map={mapRef} />
               : <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>}
+            {issueInfo && !fixReview && (
+              <IssueDetails issue={issueInfo} onClose={() => setIssueInfo(null)}
+                onFix={(f) => onFix(issueInfo, f)} onShowRef={(kind, id) => showElement(kind, id)}
+                onDismiss={(d) => { dismissIssue(issueInfo, d); setIssueInfo(null); }} />
+            )}
             {mode !== 'simulation' && fixReview && (
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
                 onApply={applyReviewedFix} onCancel={cancelFixReview} />
@@ -960,7 +997,7 @@ export default function App() {
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
             validating={validating} onShow={showIssue} onFix={onFix}
             issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}
-            onShowRefs={onShowRefs} onDownloadLog={downloadEditLog} onFixAll={() => setFixAllOpen(true)}>
+            onShowRefs={onShowRefs} onDownloadLog={downloadEditLog} onFixAll={() => setFixAllOpen(true)} onDismiss={dismissIssue}>
             {bottomTab === 'load' && (
               <LoadPanel load={load} comparison={comparison} onMultiplier={onMultiplier} onSnapshot={onSnapshot}
                 onDeleteSnapshot={onDeleteSnapshot} onCompare={onCompare} onReset={onResetLoad} onShowRoad={onShowRoad}
@@ -985,7 +1022,7 @@ export default function App() {
         {mode !== 'simulation' && win.layout.visible.right && (mode !== 'analytics' || selection) && (mode === 'edit' && (multi.length > 1 || segment) ?
           <SelectionEditor multi={multi} segment={segment} geo={doc.geo} onOp={onInspectorOp} onFix={onFix} onClear={() => {setMulti([]);setSegment(null);}} /> : (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
-          canSeparate={canSeparate} sharedJunctions={sharedJunctions}
+          canSeparate={canSeparate} sharedJunctions={sharedJunctions} mergeCandidates={mergeCandidates}
           onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}
           onOpenRoute={setOpenRoute} onScenarioChanged={refreshLoad}
           closed={selection?.kind === 'way' && (load?.closures ?? []).some((c) => c.id === selection.id)}

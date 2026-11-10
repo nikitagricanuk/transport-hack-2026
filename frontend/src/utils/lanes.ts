@@ -306,3 +306,46 @@ export function taperPolygon(coords:number[][], startLanes:number,endLanes:numbe
   coords.forEach((_,i)=>{along+=lengths[i];const half=(startLanes+(endLanes-startLanes)*along/total)*LANE_W/2;left.push(offsetLine(coords,-half)[i]);right.push(offsetLine(coords,half)[i]);});
   return [...left,...right.reverse(),left[0]];
 }
+
+/**
+ * Display-only attachment of a branching road to the lanes of the wider road it joins.
+ *
+ * In OSM (and for SUMO) every connection is a node on the road axis. Drawn like that,
+ * a slip road or a Y branch starts from the centre line of the main road. Here the end
+ * of a road that meets a wider road is shifted sideways, towards the side the branch
+ * leaves on, by (half width of the wider road − own half width): the outer edges line
+ * up, so a ramp leaves from the outer lane and incoming Y roads join their own side.
+ * The file is not changed.
+ */
+export function attachToLanes(roads: { id: number; coords: number[][]; nodes: number[]; halfWidth: number }[]): Map<number, number[][]> {
+  const at = new Map<number, { road: (typeof roads)[number]; i: number }[]>();
+  for (const r of roads) r.nodes.forEach((n, i) => at.set(n, [...(at.get(n) ?? []), { road: r, i }]));
+  const out = new Map<number, number[][]>();
+  for (const r of roads) {
+    if (r.coords.length < 2) continue;
+    let coords: number[][] | null = null;
+    for (const end of [0, r.coords.length - 1]) {
+      const node = r.nodes[end];
+      // the parent: the widest other road at this node, clearly wider than this one
+      const parent = (at.get(node) ?? []).filter((x) => x.road.id !== r.id && x.road.halfWidth > r.halfWidth + 0.5)
+        .sort((a, b) => b.road.halfWidth - a.road.halfWidth)[0];
+      if (!parent) continue;
+      const p = parent.road.coords;
+      const pi = parent.i;
+      const a = p[Math.max(0, pi - 1)], b = p[Math.min(p.length - 1, pi + 1)];
+      const kx = M_PER_DEG_LON_EQ * Math.cos((r.coords[end][1] * Math.PI) / 180);
+      const dx = (b[0] - a[0]) * kx, dy = (b[1] - a[1]) * M_PER_DEG_LAT;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      const nx = dy / len, ny = -dx / len;   // right-hand normal of the parent
+      const inner = r.coords[end === 0 ? 1 : r.coords.length - 2];
+      const vx = (inner[0] - r.coords[end][0]) * kx, vy = (inner[1] - r.coords[end][1]) * M_PER_DEG_LAT;
+      const side = vx * nx + vy * ny >= 0 ? 1 : -1;   // which side of the parent the branch goes to
+      const shift = side * (parent.road.halfWidth - r.halfWidth);
+      coords = coords ?? r.coords.map((c) => [...c]);
+      coords[end] = [r.coords[end][0] + (nx * shift) / kx, r.coords[end][1] + (ny * shift) / M_PER_DEG_LAT];
+    }
+    if (coords) out.set(r.id, coords);
+  }
+  return out;
+}

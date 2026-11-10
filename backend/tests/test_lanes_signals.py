@@ -159,3 +159,28 @@ def test_lermontova_joins_the_existing_carriageways_without_a_shared_point():
     assert res["removed_restrictions"] == [8259525]             # the U-turn there is now impossible anyway
     via = [m.ref for m in doc.relations[8259526].members if m.role == "via"]
     assert via == [back.nodes[0]]                               # «only straight on» moved to the new junction
+
+
+def test_merge_two_roads_into_one_and_back():
+    from app.edits import OpError
+    from app.osm_model import OsmDocument
+
+    xml = """<?xml version="1.0"?><osm version="0.6">
+      <node id="1" lat="52.28" lon="104.280"/><node id="2" lat="52.28" lon="104.281"/>
+      <node id="3" lat="52.28" lon="104.282"/><node id="4" lat="52.28" lon="104.283"/>
+      <way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="residential"/><tag k="name" v="А"/></way>
+      <way id="11"><nd ref="3"/><nd ref="2"/><tag k="highway" v="residential"/><tag k="name" v="Б"/></way>
+      <way id="12"><nd ref="3"/><nd ref="4"/><tag k="highway" v="primary"/></way>
+      <relation id="50"><member type="way" ref="11" role=""/><tag k="type" v="route"/></relation>
+    </osm>"""
+    doc = OsmDocument.parse(xml.encode())
+    h = History()
+    res = apply_op(doc, h, "merge_ways", {"way_id": 10, "other_id": 11})
+    assert doc.ways[10].nodes == [1, 2, 3] and 11 not in doc.ways        # 11 was drawn backwards: reversed
+    assert res["warnings"] and "name" in res["warnings"][0]
+    assert [m.ref for m in doc.relations[50].members] == [10]
+    import pytest
+    with pytest.raises(OpError):                                         # different road class
+        apply_op(doc, h, "merge_ways", {"way_id": 10, "other_id": 12})
+    h.undo()
+    assert 11 in doc.ways and doc.ways[10].nodes == [1, 2]
