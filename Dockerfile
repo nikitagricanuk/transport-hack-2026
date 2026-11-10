@@ -21,12 +21,16 @@ WORKDIR /app
 
 # eclipse-sumo provides netconvert for «SUMO-проверка» and sumo for «Симуляция».
 # It is on by default; build a slim image with `--build-arg WITH_SUMO=0`.
+# The wheel's headless sumo binary still links against X11, OpenGL and Expat.
 ARG WITH_SUMO=1
 
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
  && if [ "$WITH_SUMO" = "1" ]; then \
-      pip install --no-cache-dir eclipse-sumo==1.21.0 \
+      apt-get update \
+      && apt-get install -y --no-install-recommends libx11-6 libxext6 libxrender1 libgl1 libexpat1 \
+      && rm -rf /var/lib/apt/lists/* \
+      && pip install --no-cache-dir eclipse-sumo==1.21.0 \
       && python -c "import os, subprocess, sumo; [subprocess.run([os.path.join(sumo.SUMO_HOME, 'bin', name), '--version'], check=True, stdout=subprocess.DEVNULL) for name in ('netconvert', 'sumo')]"; \
     fi \
  && groupadd --gid 10001 app \
