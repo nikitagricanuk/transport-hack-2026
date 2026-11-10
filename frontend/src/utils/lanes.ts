@@ -3,7 +3,7 @@ import type { Feature, FeatureCollection, LineString, Polygon } from 'geojson';
 /** Lane width used for the physical view, metres. */
 export const LANE_W = 3.5;
 /** From this zoom roads are drawn at their real width with lanes and markings. */
-export const LANE_MINZOOM = 17;
+export const LANE_MINZOOM = 15;
 
 const M_PER_DEG_LAT = 110_540;
 const M_PER_DEG_LON_EQ = 111_320;
