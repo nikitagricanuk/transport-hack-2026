@@ -33,6 +33,10 @@ def test_snaps_same_edge_obey_direction_and_no_mutation():
     assert math.isclose(result["length_m"],300,abs_tol=.1)
     assert math.isclose(result["time_s"],18,abs_tol=.01)
     assert r.shortest_path(rg,b,a,"length") is None
+    req = RouteRequest.model_validate({"from":{"lat":0,"lon":400/111320},"to":{"lat":0,"lon":100/111320}})
+    diagnosis = route(d,req)
+    assert "одностороннее" in diagnosis["issues"][0]["title"]
+    assert [f["op"] for f in diagnosis["issues"][0]["fixes"]] == ["reverse_way","set_tags"]
     assert d.to_xml() == before
 
 

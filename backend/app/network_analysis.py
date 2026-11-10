@@ -100,20 +100,28 @@ def diagnose(doc, rg, a, b):
         return [issue("Нет пути: граф разорван",text,refs=refs,location=location,fixes=fixes)]
     if rg.restrictions:
         relaxed = r.RoutingGraph(g,rg.mode,rg.proj,rg.seg_index,{},[],rg.params,rg.segments)
-        if r.shortest_path(relaxed,a,b,"time"):
-            ids = sorted({rid for rule in rg.restrictions.values() for rid in rule["ids"]})
+        unrestricted = r.shortest_path(relaxed,a,b,"time")
+        if unrestricted:
+            blocking = set()
+            for first,second in zip(unrestricted["edges"],unrestricted["edges"][1:]):
+                rule = rg.restrictions.get((first[2]["way"],second[0]))
+                to_way = second[2]["way"]
+                if rule and (to_way in rule["no"] or (rule["only"] is not None and to_way not in rule["only"])):
+                    blocking.update(rule["ids"])
+            ids = sorted(blocking)
             return [issue("Нет пути: запрет поворота", "Без запретов путь существует. Проверьте ограничения; удаление допустимо только после проверки.",
                           refs=[{"kind":"relation","id":i} for i in ids],
                           fixes=[{"label":f"Удалить отношение {i}","op":"delete","args":{"kind":"relation","id":i}} for i in ids[:20]])]
     # Identify an actual directed obstruction on an undirected path.
-    path = nx.shortest_path(g.to_undirected(),a.a,b.a)
+    virtual,(start,end) = r.virtual_graph(rg,[a,b])
+    path = nx.shortest_path(virtual.to_undirected(),start,end)
     for u,v in zip(path,path[1:]):
-        if not g.has_edge(u,v):
-            wid = next(iter(g[v][u].values()))["way"]
+        if not virtual.has_edge(u,v):
+            wid = next(iter(virtual[v][u].values()))["way"]
             return [issue("Нет пути: одностороннее ребро", "Проверьте направление дороги по снимку перед изменением.",
                           refs=[{"kind":"way","id":wid}], category="direction",
                           fixes=[{"label":"Развернуть ребро","op":"reverse_way","args":{"way_id":wid}},
-                                 {"label":"Двустороннее движение","op":"set_tags","args":{"kind":"way","id":wid,"tags":{"oneway":None}}}])]
+                                 {"label":"Двустороннее движение","op":"set_tags","args":{"kind":"way","id":wid,"tags":{"oneway" if rg.mode == "car" else "oneway:foot":None}}}])]
     return [issue("Нет пути", "Направления или ограничения не позволяют проехать между точками. Разрыв не локализован.")]
 
 
