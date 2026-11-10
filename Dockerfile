@@ -15,23 +15,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
     UDS_STATIC_DIR=/app/static \
-    UDS_DATA_DIR=/data \
+    UDS_DATA_DIR=/data     UDS_SAMPLES_DIR=/app/samples \
     HOME=/tmp
 WORKDIR /app
 
-# eclipse-sumo pulls in the SUMO binaries (hundreds of MB). The image that CI
-# publishes, and `docker compose up` by default, leave it out. Opt in with
-# `--build-arg WITH_SUMO=1` or `WITH_SUMO=1 docker compose up --build`.
-ARG WITH_SUMO=0
+# eclipse-sumo brings netconvert (about +320 MB), which backs the «SUMO-проверка»
+# preflight before a file goes to the organisers. It is on by default, CI publishes
+# it too; build a slim image with `--build-arg WITH_SUMO=0`.
+ARG WITH_SUMO=1
 
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
- && if [ "$WITH_SUMO" = "1" ]; then pip install --no-cache-dir eclipse-sumo==1.21.0; fi \
+ && if [ "$WITH_SUMO" = "1" ]; then       pip install --no-cache-dir eclipse-sumo==1.21.0       && python -c "import os, subprocess, sumo; subprocess.run([os.path.join(sumo.SUMO_HOME, 'bin', 'netconvert'), '--version'], check=True, stdout=subprocess.DEVNULL)";     fi \
  && groupadd --gid 10001 app \
  && useradd --uid 10001 --gid app --home-dir /app --no-create-home --shell /usr/sbin/nologin app
 
 COPY --chown=app:app backend/app ./app
 COPY --chown=app:app --from=web /web/dist ./static
+# Sample files for the start screen: the task fragment as given and after auto-fix.
+COPY --chown=app:app data/example.osm data/irkutsk_fragment_fixed.osm ./samples/
 RUN mkdir -p /data && chown app:app /data
 
 USER app

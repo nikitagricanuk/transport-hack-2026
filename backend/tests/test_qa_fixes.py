@@ -295,7 +295,8 @@ def test_example_osm_roundtrip_and_directed_traps():
         m = again.ways[wid]
         assert (w.nodes, list(w.tags.items()), w.attrs) == (m.nodes, list(m.tags.items()), m.attrs)
     res = validate(doc)
-    assert res["summary"]["outside_strong"] == 318
+    # roads that run off <bounds> continue in the city and are not counted (was 318 before)
+    assert res["summary"]["outside_strong"] == 61
     traps = [i for i in res["issues"] if "ловуш" in i["title"].lower()]
     assert traps and any(i.get("locations") for i in traps)
     assert "не запускался" in res["summary"]["level_notes"]["webots"]

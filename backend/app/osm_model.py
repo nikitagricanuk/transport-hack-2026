@@ -188,7 +188,10 @@ class OsmDocument:
         return doc
 
     # ------------------------------------------------------------- serialize
-    def to_xml(self, renumber_new: bool = True, generator: str | None = None) -> bytes:
+    def to_xml(self, renumber_new: bool = True, generator: str | None = None,
+               extra_node_tags: dict[int, dict[str, str | None]] | None = None) -> bytes:
+        """Serialize. `extra_node_tags` override node tags in the output only; None drops a key."""
+        extra_node_tags = extra_node_tags or {}
         idmap: dict[Kind, dict[int, int]] = {k: {} for k in KINDS}
         if renumber_new:
             for kind in KINDS:
@@ -218,7 +221,12 @@ class OsmDocument:
             else:
                 lat, lon = f"{n.lat:.7f}", f"{n.lon:.7f}"
             out.append(f' <node id="{m("node", n.id)}" lat="{_esc(lat)}" lon="{_esc(lon)}"{_attrs(n.attrs)}')
-            _tags_xml(out, n.tags, "node")
+            extra = extra_node_tags.get(n.id)
+            if extra:
+                merged = {**n.tags, **extra}
+                _tags_xml(out, {k: v for k, v in merged.items() if v is not None}, "node")
+            else:
+                _tags_xml(out, n.tags, "node")
         for w in self.ways.values():
             out.append(f' <way id="{m("way", w.id)}"{_attrs(w.attrs)}')
             if not w.nodes and not w.tags:

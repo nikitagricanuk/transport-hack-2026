@@ -228,6 +228,7 @@ frontend/dist/
 # Local OSM working files. example.osm from the task is part of the repo.
 data/*.osm
 !data/example.osm
+!data/irkutsk_fragment_fixed.osm
 data/drafts/
 *.log
 !data/README.md

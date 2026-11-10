@@ -196,8 +196,8 @@ def _delete_node(doc: OsmDocument, tx: Transaction, nid: int) -> None:
 
 
 def _insert_on_way(doc: OsmDocument, tx: Transaction, wid: int, lat: float, lon: float,
-                   tags: dict | None, snap_m: float = 1.0) -> int:
-    """Put a node on the nearest segment of a way; reuse a vertex if very close."""
+                   tags: dict | None, snap_m: float = 1.0, avoid: set[int] | frozenset[int] = frozenset()) -> int:
+    """Put a node on the nearest segment of a way; reuse a vertex if very close (unless in ``avoid``)."""
     w = _way(doc, wid)
     if len(w.nodes) < 2:
         raise OpError("у ребра меньше двух узлов")
@@ -213,7 +213,7 @@ def _insert_on_way(doc: OsmDocument, tx: Transaction, wid: int, lat: float, lon:
     _, i, q, _t = best
     for ref in (w.nodes[i], w.nodes[i + 1]):
         n = doc.nodes[ref]
-        if dist(q, proj.to_xy(n.lat, n.lon)) <= snap_m:
+        if ref not in avoid and dist(q, proj.to_xy(n.lat, n.lon)) <= snap_m:
             if tags:
                 tx.touch("node", ref)
                 n.tags.update(_clean_tags(tags))
@@ -789,7 +789,11 @@ def op_connect_endpoint(doc, tx, node_id: int, way_id: int):
         msg = can_connect(w.tags, target_way.tags)
         if msg:
             raise OpError(msg)
-    target = _insert_on_way(doc, tx, target_way.id, n.lat, n.lon, None, snap_m=3.0)
+    # Snapping onto the node's own neighbour would collapse the short way between
+    # them (a 2-node stub or steps) and delete it; insert a fresh vertex instead.
+    neighbours = {r for w in doc.ways_of_node(n.id) for a, b in zip(w.nodes, w.nodes[1:])
+                  for r in (a, b) if n.id in (a, b) and r != n.id}
+    target = _insert_on_way(doc, tx, target_way.id, n.lat, n.lon, None, snap_m=3.0, avoid=neighbours)
     if target != n.id:
         _merge_nodes(doc, tx, target, n.id)
     return {"id": target}
@@ -814,6 +818,18 @@ def op_reverse_way(doc, tx, id: int):
 
 
 ATTACH_MAX_M = 30.0
+
+
+def op_delete_ways(doc, tx, ids: list[int]):
+    """Delete several ways in one undo step (e.g. an isolated fragment)."""
+    removed = []
+    for wid in ids:
+        if int(wid) in doc.ways:
+            _delete_way(doc, tx, int(wid))
+            removed.append(int(wid))
+    if not removed:
+        raise OpError("рёбра не найдены")
+    return {"ids": removed}
 
 
 def op_attach_to_road(doc, tx, node_id: int, way_id: int | None = None, max_m: float = ATTACH_MAX_M):
@@ -1230,6 +1246,7 @@ def op_smooth_z(doc, tx, way_id: int, ramp_m: float = RAMP_M, level_height: floa
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
     "smooth_z": (op_smooth_z, "Плавный Z-переход"),
     "attach_to_road": (op_attach_to_road, "Узел привязан к дороге"),
+    "delete_ways": (op_delete_ways, "Удалён фрагмент сети"),
     "place_signal": (op_place_signal, "Светофор установлен"),
     "set_tags": (op_set_tags, "Изменены теги"),
     "set_lanes": (op_set_lanes, "Изменены полосы"),
