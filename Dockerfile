@@ -32,8 +32,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY --chown=app:app backend/app ./app
 COPY --chown=app:app --from=web /web/dist ./static
-# Sample for the start screen: the task fragment exactly as given (fixes are the user's job).
-COPY --chown=app:app data/example.osm ./samples/
+# Start-screen samples: the original task fragment and a separate city-scale OSM extract.
+COPY --chown=app:app data/example.osm data/irkutsk_city.osm ./samples/
 RUN mkdir -p /data && chown app:app /data
 
 USER app
