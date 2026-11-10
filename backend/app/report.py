@@ -192,6 +192,19 @@ def build_xlsx(data: dict[str, Any]) -> bytes:
     table(ws, 1, 1, ["Тип", "ID", "Статус", "Название", "Тег", "Было", "Стало"], flat)
     widths(ws, [10, 14, 12, 28, 22, 24, 24])
 
+    # how every number was computed
+    if data.get("method"):
+        ws = wb.create_sheet("Методика")
+        _, end = table(ws, 1, 1, ["Величина", "Формула", "Обозначения"],
+                       [[m["name"], m["formula"], m["where"]] for m in data["method"]])
+        row = end + 2
+        for ex in data.get("explained", []):
+            ws.cell(row=row, column=1, value=f"Расчёт: {ex['name'] or '#' + str(ex['id'])}").font = Font(bold=True)
+            _, end = table(ws, row + 1, 1, ["Величина", "Формула", "Подстановка", "Результат", "Ед."],
+                           [[x["name"], x["formula"], x["substitution"], x["value"], x["unit"]] for x in ex["steps"]])
+            row = end + 2
+        widths(ws, [34, 30, 60, 14, 10])
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -345,6 +358,19 @@ def build_docx(data: dict[str, Any]) -> bytes:
     tbl(["Название", "Класс", "Полос", "Нагрузка", "Пропускная", "v/c", "LOS"],
         [[r["name"] or f"#{r['id']}", r["highway"], r["lanes"], r["volume"], r["capacity"], r["vc"], r["los"]]
          for r in top])
+    if data.get("method"):
+        doc.add_heading("Методика расчёта", 2)
+        for m in data["method"]:
+            par = doc.add_paragraph()
+            par.add_run(f"{m['name']}: ").bold = True
+            par.add_run(m["formula"])
+            if m["where"]:
+                par.add_run(f" — {m['where']}.")
+        for ex in data.get("explained", []):
+            doc.add_paragraph().add_run(f"Расчёт: {ex['name'] or '#' + str(ex['id'])}").bold = True
+            tbl(["Величина", "Формула", "Подстановка", "Результат"],
+                [[st["name"], st["formula"], st["substitution"], f"{st['value']} {st['unit']}".strip()]
+                 for st in ex["steps"]])
 
     cmp_ = data.get("comparison")
     if cmp_:
@@ -458,6 +484,16 @@ def build_pdf(data: dict[str, Any]) -> bytes:
     story.append(_pdf_table([["Название", "Класс", "Полос", "Нагрузка", "Пропускная", "v/c", "LOS"]]
                             + [[r["name"] or f"#{r['id']}", r["highway"], r["lanes"], r["volume"], r["capacity"],
                                 r["vc"], r["los"]] for r in top], st))
+    if data.get("method"):
+        story.append(Paragraph("Методика расчёта", st["h1"]))
+        for m in data["method"]:
+            story.append(Paragraph(f"<b>{m['name']}:</b> {m['formula']}" + (f" — {m['where']}." if m["where"] else ""),
+                                   st["p"]))
+        for ex in data.get("explained", []):
+            story.append(Paragraph(f"<b>Расчёт: {ex['name'] or '#' + str(ex['id'])}</b>", st["p"]))
+            story.append(_pdf_table([["Величина", "Формула", "Подстановка", "Результат"]]
+                                    + [[x["name"], x["formula"], x["substitution"], f"{x['value']} {x['unit']}".strip()]
+                                       for x in ex["steps"]], st, widths=[110, 100, 190, 80]))
 
     cmp_ = data.get("comparison")
     if cmp_:

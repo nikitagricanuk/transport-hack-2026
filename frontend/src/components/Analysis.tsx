@@ -1,6 +1,7 @@
 import ResizableTable from './ResizableTable';
 import { levelOfService } from '../utils/los';
-import { memo, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
+import { api } from '../api';
 import { useEnterKey } from '../utils/useEnterKey';
 import type { ChangesResult, Comparison, LoadRow, LoadState, Los, ReportData, ValidationResult } from '../types';
 import { fmt } from '../utils/geom';
@@ -203,7 +204,11 @@ function ComparisonView({ c, onShowRoad }: { c: Comparison; onShowRoad: (id: num
 }
 
 // ------------------------------------------------------- road load editor
-export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number | null) => void }) {
+export function RoadLoad({ row, onSet, docId, rev }: {
+  row: LoadRow; onSet: (volume: number | null) => void;
+  /** for «Как посчитано» */
+  docId?: string; rev?: number;
+}) {
   const [v, setV] = useState<number | null>(null);
   const val = v ?? row.volume;
   const max = Math.max(row.capacity * 1.6, 100);
@@ -245,6 +250,7 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
         <span>t: {fmt(row.t0_s, 0)} с свободно → {fmt(row.t_s, 0)} с</span>
         {row.custom && <button className="link small" onClick={() => onSet(null)}>по умолчанию</button>}
       </div>
+      {docId && <LoadExplain docId={docId} wayId={row.id} rev={rev ?? 0} />}
     </div>
   );
 }
@@ -424,6 +430,50 @@ export function ReportModal({ data, onClose, onDownload }: {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+interface ExplainStep { name: string; formula: string; substitution: string; value: number | string; unit: string; source?: string }
+
+/**
+ * «Как посчитано»: collapsed, only the main results; expanded, every step of the load
+ * model — the formula, the numbers put into it and the result (fetched from the server,
+ * so it is exactly what the model computed, signal cycle and green included).
+ */
+export function LoadExplain({ docId, wayId, rev }: { docId: string; wayId: number; rev: number }) {
+  const [open, setOpen] = useState(false);
+  const [steps, setSteps] = useState<ExplainStep[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setSteps(null);
+    api.explainLoad(docId, wayId)
+      .then((r) => { if (alive) { setSteps((r as { steps: ExplainStep[] }).steps); setError(null); } })
+      .catch((e: Error) => alive && setError(e.message));
+    return () => { alive = false; };
+  }, [open, docId, wayId, rev]);
+  return (
+    <div className="explain">
+      <button className="link small" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? '▾ Скрыть расчёт' : '▸ Как посчитано'}
+      </button>
+      {open && (error ? <p className="bad small">Расчёт не загрузился: {error}</p>
+        : !steps ? <p className="muted small">Загрузка расчёта…</p> : (
+          <table className="cmp explain-table">
+            <thead><tr><th>Величина</th><th>Формула и подстановка</th><th>Результат</th></tr></thead>
+            <tbody>
+              {steps.map((s, i) => (
+                <tr key={i} title={s.source}>
+                  <td>{s.name}</td>
+                  <td><span className="mono">{s.formula}</span><br /><span className="muted small">{s.substitution}</span></td>
+                  <td className="mono">{typeof s.value === 'number' ? fmt(s.value, s.value % 1 ? 2 : 0) : s.value} {s.unit}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ))}
     </div>
   );
 }

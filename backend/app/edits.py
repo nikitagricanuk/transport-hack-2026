@@ -1651,7 +1651,66 @@ def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
             "offset_m": [round(off_f, 2), round(off_b, 2)], "removed_restrictions": removed}
 
 
+def op_merge_ways(doc, tx, way_id: int, other_id: int):
+    """Join two roads that meet end to end into one way (the reverse of «Разделить ребро»).
+
+    The first way keeps its id and its tags; a two-way second road is reversed if needed
+    so the line runs on, a one-way pair must already run in the same direction. Tags that
+    differ are reported (the first way's values win). Routes that used the second road
+    now use the merged one.
+    """
+    w, o = _way(doc, int(way_id)), _way(doc, int(other_id))
+    if w.id == o.id:
+        raise OpError("выберите другое ребро")
+    if w.tags.get("highway") != o.tags.get("highway"):
+        raise OpError("объединяются только рёбра одного класса дороги")
+    if w.nodes[0] == w.nodes[-1] or o.nodes[0] == o.nodes[-1]:
+        raise OpError("замкнутое ребро объединить нельзя")
+    shared = {w.nodes[0], w.nodes[-1]} & {o.nodes[0], o.nodes[-1]}
+    if not shared:
+        raise OpError("рёбра не соединены концами")
+    joint = next(iter(shared))
+    for rel in doc.relations_with("way", o.id):
+        if _is_restriction(rel.tags) and joint in _via_node_ids(doc, rel):
+            raise OpError(f"в узле соединения действует запрет поворота {rel.id}: сначала удалите его")
+    dw, do = direction(w.tags), direction(o.tags)
+    if (dw != 0) != (do != 0):
+        raise OpError("одно ребро одностороннее, другое двустороннее — объединить нельзя")
+    a = list(w.nodes) if w.nodes[-1] == joint else list(reversed(w.nodes))
+    b = list(o.nodes) if o.nodes[0] == joint else list(reversed(o.nodes))
+    if dw != 0:
+        # one-way: the line must keep the travel direction of both parts
+        fwd_w = (a == w.nodes) == (dw > 0)
+        fwd_o = (b == o.nodes) == (do > 0)
+        if fwd_w != fwd_o:
+            raise OpError("односторонние рёбра направлены навстречу друг другу")
+    reversed_w = a != w.nodes
+    tags = reversed_tags(w.tags) if reversed_w and dw == 0 else dict(w.tags)
+    other_tags = reversed_tags(o.tags) if b != o.nodes and do == 0 else dict(o.tags)
+    differ = sorted(k for k in set(tags) | set(other_tags) if tags.get(k) != other_tags.get(k))
+    tx.touch("way", w.id)
+    w.nodes = a + b[1:]
+    if reversed_w and dw != 0:
+        # keep the stored order the way traffic goes
+        w.nodes = list(reversed(w.nodes))
+    w.tags = tags
+    for rel in list(doc.relations_with("way", o.id)):
+        tx.touch("relation", rel.id)
+        members: list[Member] = []
+        for m in rel.members:
+            nm = Member("way", w.id, m.role) if m.type == "way" and m.ref == o.id else m
+            if members and nm.type == "way" and members[-1].type == "way" and members[-1].ref == nm.ref:
+                continue
+            members.append(nm)
+        rel.members = members
+    tx.touch("way", o.id)
+    del doc.ways[o.id]
+    warnings = [f"теги различались, оставлены значения первого ребра: {', '.join(differ)}"] if differ else []
+    return _with_warnings({"id": w.id}, warnings)
+
+
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
+    "merge_ways": (op_merge_ways, "Рёбра объединены"),
     "move_selection": (op_move_selection, "Группа сдвинута"),
     "edit_segment": (op_edit_segment, "Атрибуты участка изменены"),
     "split_carriageways": (op_split_carriageways, "Дорога разделена на две проезжие части"),

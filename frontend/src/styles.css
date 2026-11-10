@@ -430,3 +430,17 @@ input[type="checkbox"]:disabled { cursor: default; }
 .analysis-tools td, .analysis-tools th { padding: 5px 3px; text-align: left; }
 .analysis-tools td { border-top: 1px solid #334155; }
 .analysis-tools > .row { flex-wrap: wrap; }
+
+/* «Как посчитано» */
+.explain { display: flex; flex-direction: column; gap: 6px; }
+.explain-table td { vertical-align: top; font-size: 12px; }
+.explain-table td:last-child { white-space: nowrap; }
+.phase-bar.live { position: relative; }
+.phase-now { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; box-shadow: 0 0 0 1px #0b1220; pointer-events: none; }
+.warn-text { color: #fbbf24; }
+
+/* properties of the clicked issue */
+.issue-details { position: absolute; right: 12px; top: 56px; z-index: 6; width: min(380px, calc(100% - 24px)); max-height: calc(100% - 80px); overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 10px; background: #0f172a; border: 1px solid #334155; color: #e2e8f0; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.issue-details p { margin: 0; }
+.issue-details .kv-row { grid-template-columns: 90px 1fr; }
+.check-sev.info { background: #1e293b; }

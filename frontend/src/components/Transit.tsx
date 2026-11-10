@@ -115,6 +115,9 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
   const [plan, setPlan] = useState<SignalPlan | null>(null);
   const [draft, setDraft] = useState<{ cycle?: number; main_share?: number }>({});
   const [error, setError] = useState<string | null>(null);
+  // the cycle runs: a clock that moves the marker over the phase bar
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), 250); return () => window.clearInterval(t); }, []);
   useEffect(() => {
     let alive = true;
     api.signal(docId, nodeId).then((p) => { if (alive) { setPlan(p); setError(null); } }).catch((e: Error) => alive && setError(e.message));
@@ -142,10 +145,20 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
   const gMain = Math.round(green * share);
   const gCross = green - gMain;
   const byGroup = (g: 'main' | 'cross') => plan.approaches.filter((a) => a.group === g);
+  // where we are in the cycle: main green → yellow → all-red → cross green → yellow → all-red
+  const tc = (now / 1000) % cycle;
+  const bounds = [gMain, gMain + yellow, gMain + yellow + allRed, gMain + yellow + allRed + gCross,
+    gMain + 2 * yellow + allRed + gCross, cycle];
+  const phaseIdx = bounds.findIndex((b) => tc < b);
+  const left = Math.max(0, Math.round(bounds[phaseIdx] - tc));
+  const LIGHT = ['зелёный', 'жёлтый', 'красный', 'красный', 'красный', 'красный'];
+  const LIGHT_X = ['красный', 'красный', 'красный', 'зелёный', 'жёлтый', 'красный'];
+  const lightClass = (t: string) => (t === 'зелёный' ? 'good' : t === 'жёлтый' ? 'warn-text' : 'bad');
   return (
     <div className="card stack10">
       <div className="row between"><b>Фазы светофора</b><span className="muted small">{plan.custom ? 'задано вручную' : 'по умолчанию'}</span></div>
-      <div className="phase-bar" aria-label={`Цикл ${cycle} с`}>
+      <div className="phase-bar live" aria-label={`Цикл ${cycle} с`}>
+        <span className="phase-now" style={{ left: `${(tc / cycle) * 100}%` }} aria-hidden="true" />
         <span className="ph main" style={{ flex: gMain }}>{gMain} с</span>
         <span className="ph yellow" style={{ flex: yellow }} title={`Жёлтый ${yellow} с`} />
         <span className="ph allred" style={{ flex: allRed }} title={`Все красные ${allRed} с`} />
@@ -153,6 +166,15 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
         <span className="ph yellow" style={{ flex: yellow }} title={`Жёлтый ${yellow} с`} />
         <span className="ph allred" style={{ flex: allRed }} title={`Все красные ${allRed} с`} />
       </div>
+      <div className="row between small" aria-live="off">
+        <span>Главное: <b className={lightClass(LIGHT[phaseIdx])}>{LIGHT[phaseIdx]}</b></span>
+        <span>Пересекающее: <b className={lightClass(LIGHT_X[phaseIdx])}>{LIGHT_X[phaseIdx]}</b></span>
+        <span className="mono muted">ещё {left} с</span>
+      </div>
+      <p className="small">
+        Пропускная способность подходов зависит от доли зелёного: c = n · s · g/C. Главное g/C = {gMain}/{cycle} ={' '}
+        {fmt(gMain / cycle, 2)}, пересекающее {gCross}/{cycle} = {fmt(gCross / cycle, 2)}.
+      </p>
       <p className="small muted">
         {gMain} + {yellow} + {allRed} + {gCross} + {yellow} + {allRed} = {cycle} с. Это планировочная оценка:
         SUMO строит программы светофоров сам, тайминг сохраняется в тегах uds:signal:*.

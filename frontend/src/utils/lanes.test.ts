@@ -89,3 +89,17 @@ test('T junction asphalt stays within the incident road edges instead of forming
   }
   assert.equal(buildLanes(roads, [junction]).surface.features.length, 3);
 });
+
+test('a slip road leaves from the outer lane of the main road, not from its centre line', async () => {
+  const { attachToLanes } = await import('./lanes.ts');
+  const kx = 111_320 * Math.cos((52.28 * Math.PI) / 180);
+  // main road eastbound 14 m wide; a 3.5 m ramp leaves at node 2 to the south-east (right side)
+  const main = { id: 1, coords: [[104.28, 52.28], [104.281, 52.28], [104.282, 52.28]], nodes: [1, 2, 3], halfWidth: 7 };
+  const ramp = { id: 2, coords: [[104.281, 52.28], [104.2815, 52.2797]], nodes: [2, 4], halfWidth: 1.75 };
+  const out = attachToLanes([main, ramp]);
+  const start = out.get(2)![0];
+  const southM = (52.28 - start[1]) * 110_540;
+  assert.ok(Math.abs(southM - (7 - 1.75)) < 0.05);        // shifted to the right edge of the main road
+  assert.ok(Math.abs((start[0] - 104.281) * kx) < 0.05);   // only sideways
+  assert.equal(out.has(1), false);                          // the main road itself is not moved
+});

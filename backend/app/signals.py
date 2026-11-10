@@ -2,7 +2,8 @@
 
 OSM has no standard tag for signal programs (SUMO builds phases itself), so the
 timing lives in the editor's scenario next to the load model. It feeds the
-load model: the green share of an approach scales its capacity.
+load model: an approach to a signal has capacity c = lanes · s · g/C — saturation
+flow s of its road class, green g of its phase, cycle C.
 
 Approaches are grouped geometrically: the main axis follows the highest-class
 road at the node, arms within 45 degrees of that axis (either direction) are
@@ -42,15 +43,15 @@ def _angle_diff(a: float, b: float) -> float:
     return min(d, 360 - d)
 
 
-def approaches(doc: OsmDocument, node_id: int) -> list[dict[str, Any]]:
-    """Every road arm at the node with its bearing and phase group."""
+def approaches(doc: OsmDocument, node_id: int, ways: list | None = None) -> list[dict[str, Any]]:
+    """Every road arm at the node with its bearing and phase group (`ways`: the ways at the node)."""
     n = doc.nodes.get(node_id)
     if n is None:
         return []
     proj = projection(doc)
     origin = proj.to_xy(n.lat, n.lon)
     arms: list[dict[str, Any]] = []
-    for w in doc.ways.values():
+    for w in (ways if ways is not None else doc.ways.values()):
         if not is_drivable(w.tags) or node_id not in w.nodes:
             continue
         for i, ref in enumerate(w.nodes):
@@ -72,15 +73,68 @@ def approaches(doc: OsmDocument, node_id: int) -> list[dict[str, Any]]:
     return arms
 
 
+# Saturation flow per lane during green, veh/h — the flow a queue discharges at.
+# Assumption: HCM base saturation flow 1900 pc/h/lane, reduced for narrower and busier
+# urban classes. Not calibrated to Irkutsk counts.
+SAT_FLOW = {
+    "motorway": 1900, "trunk": 1900, "primary": 1800, "secondary": 1700, "tertiary": 1600,
+    "unclassified": 1500, "residential": 1500, "living_street": 1200, "service": 1200, "road": 1500,
+}
+SAT_SOURCE = "HCM, базовый поток насыщения 1900 прив. ед./ч на полосу; понижен для классов — допущение"
+
+
+def sat_flow(highway: str) -> float:
+    return float(SAT_FLOW.get(highway.removesuffix("_link"), 1500))
+
+
+def timing(cfg: dict[str, Any] | None) -> tuple[int, float, int, int]:
+    """cycle C, main share, green of the main and of the cross phase (s); phases add up to C."""
+    cfg = cfg or {}
+    cycle = int(cfg.get("cycle", DEFAULT_CYCLE))
+    share = float(cfg.get("main_share", 0.5))
+    green = cycle - LOST_TIME_S
+    g_main = round(green * share)
+    return cycle, share, g_main, green - g_main
+
+
+def signal_approaches(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """For every way that approaches a signal: its green g, cycle C and saturation flow s.
+
+    Every signal counts, not only the ones with a custom plan: an untouched signal runs
+    the default two-phase plan (C = 90 s, even split). A way with signals at both ends
+    takes the stricter one (smaller g/C).
+    """
+    index = doc.node_way_index()
+    out: dict[int, dict[str, Any]] = {}
+    for node_id, n in doc.nodes.items():
+        if not is_signal(n.tags):
+            continue
+        ways = [doc.ways[x] for x in index.get(node_id, []) if x in doc.ways and is_drivable(doc.ways[x].tags)]
+        if len(ways) < 2 and not any(node_id in w.nodes[1:-1] for w in ways):
+            continue   # a signal on a dead end controls nothing
+        cycle, share, g_main, g_cross = timing(settings.get(node_id))
+        for arm in approaches(doc, node_id, ways):
+            g = g_main if arm["group"] == "main" else g_cross
+            info = {"node_id": node_id, "group": arm["group"], "green_s": g, "cycle_s": cycle,
+                    "g_c": g / cycle, "sat_flow": sat_flow(arm["highway"]), "custom": node_id in settings}
+            prev = out.get(arm["way_id"])
+            if prev is None or info["g_c"] < prev["g_c"]:
+                out[arm["way_id"]] = info
+    return out
+
+
 def capacity_factors(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> dict[int, float]:
-    """Capacity multiplier per way from the green share its approach gets (1.0 = even split)."""
+    """Capacity multiplier per way so that a signalised approach has c = lanes · s · g/C.
+
+    The load model multiplies lanes × class capacity per lane by this factor, so the
+    factor is s · g/C divided by the class capacity per lane.
+    """
+    from .analysis import LANE_CAPACITY
+
     out: dict[int, float] = {}
-    for node_id, cfg in settings.items():
-        share = float(cfg.get("main_share", 0.5))
-        for arm in approaches(doc, node_id):
-            g = share if arm["group"] == "main" else 1 - share
-            f = max(0.3, min(1.7, g / 0.5))
-            out[arm["way_id"]] = min(out.get(arm["way_id"], f), f)
+    for wid, info in signal_approaches(doc, settings).items():
+        hw = doc.ways[wid].tags.get("highway", "")
+        out[wid] = info["sat_flow"] * info["g_c"] / LANE_CAPACITY.get(hw, 500)
     return out
 
 
@@ -95,15 +149,14 @@ def plan(doc: OsmDocument, node_id: int, cfg: dict[str, Any] | None, rows: dict[
         a["volume"] = r["volume"] if r else None
         a["capacity"] = r["capacity"] if r else None
         a["vc"] = r["vc"] if r else None
-    # flow ratio y = v / s, with saturation flow s = capacity at an even split / 0.5
+    # flow ratio y = v / s, saturation flow of the approach s = lanes · s(class)
+    for a in arms:
+        r = rows.get(a["way_id"])
+        a["saturation"] = round((r["lanes"] if r else 1) * sat_flow(a["highway"]))
+
     def y(group: str) -> float:
-        vals = []
-        for a in arms:
-            if a["group"] != group or not a["capacity"]:
-                continue
-            factor = (share if group == "main" else 1 - share) / 0.5
-            sat = a["capacity"] / max(0.3, min(1.7, factor)) / 0.5
-            vals.append(a["volume"] / sat if sat else 0.0)
+        vals = [a["volume"] / a["saturation"] for a in arms
+                if a["group"] == group and a["volume"] is not None and a["saturation"]]
         return max(vals, default=0.0)
     y_main, y_cross = y("main"), y("cross")
     total = y_main + y_cross

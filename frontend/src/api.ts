@@ -166,6 +166,9 @@ export const api = {
   undo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/undo`, { method: 'POST' }),
   redo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/redo`, { method: 'POST' }),
   validate: (docId: string) => request<ValidationResult>(`/api/documents/${docId}/validate`),
+  /** hide an issue as a false alarm, or bring it back; answers with the new validation */
+  dismissIssue: (docId: string, key: string, dismissed: boolean) =>
+    request<ValidationResult>(`/api/documents/${docId}/issues/dismiss`, json({ key, dismissed })),
   sumo: (docId: string) => request<SumoResult>(`/api/documents/${docId}/check/sumo`, { method: 'POST' }),
   simulation: (docId: string, engine: 'sumo' | 'matsim' | 'webots', params: URLSearchParams, body: FormData,
     signal: AbortSignal) => request<SimulationRecording>(`/api/documents/${docId}/simulation/${engine}?${params}`, {
@@ -184,6 +187,8 @@ export const api = {
   discardDraft: (docId: string) =>
     request<{ ok: boolean }>(`/api/draft?doc_id=${encodeURIComponent(docId)}`, { method: 'DELETE' }),
   load: (docId: string) => request<LoadState>(`/api/documents/${docId}/load`),
+  /** every step of one road's load calculation: formula, substitution, result */
+  explainLoad: (docId: string, wayId: number) => request<unknown>(`/api/documents/${docId}/load/${wayId}/explain`),
   setLoad: (docId: string, body: { way_id?: number; volume?: number | null; multiplier?: number; reset_all?: boolean; time_of_day?:string;weather?:string;truck_share?:number;bus_share?:number }) =>
     request<LoadState>(`/api/documents/${docId}/load`, json(body)),
   addSnapshot: (docId: string, name: string) =>

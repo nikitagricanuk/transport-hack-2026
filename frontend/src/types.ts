@@ -126,6 +126,10 @@ export interface Issue {
   fix: Fix | null;
   fixes: Fix[];
   levels: string[];
+  /** stable identity (title + objects), used to hide a false alarm */
+  key?: string;
+  /** the user marked it «Это не ошибка»: hidden from the list and the totals */
+  dismissed?: boolean;
 }
 
 export interface ValidationResult {
@@ -137,6 +141,8 @@ export interface ValidationResult {
     outside_strong: number;
     levels: Record<'matsim' | 'sumo' | 'webots', 'ok' | 'risk' | 'fail'>;
     level_notes: Record<'matsim' | 'sumo' | 'webots', string>;
+    /** issues the user hid as false alarms */
+    dismissed?: number;
   };
 }
 

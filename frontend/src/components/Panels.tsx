@@ -141,13 +141,15 @@ export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
 
 export const BottomPanel = memo(function BottomPanel({
   validation, history, tab, onTab, onShow, onFix, validating, issueFilters, onIssueFilter, onSelectAllIssues, children,
-  onShowRefs, onDownloadLog, onFixAll,
+  onShowRefs, onDownloadLog, onFixAll, onDismiss,
 }: {
   onShowRefs?: (refs: { kind: Kind; id: number }[]) => void;
   /** save the edit log (every applied fix with author and time) as fix-log.md */
   onDownloadLog?: () => void;
   /** open «Править всё»: the confirmed list of safe fixes */
   onFixAll?: () => void;
+  /** «Это не ошибка»: hide the issue from the list (or bring it back) */
+  onDismiss?: (issue: Issue, dismissed: boolean) => void;
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: BottomTab; onTab: (t: BottomTab) => void;
   onShow: (i: Issue) => void; onFix: (i: Issue, fix: Fix) => void; validating: boolean;
@@ -159,7 +161,12 @@ export const BottomPanel = memo(function BottomPanel({
 }) {
   const issues = validation?.issues ?? [];
   const [expanded, setExpanded] = useState(false);
-  const visible = issues.filter((issue) => issueVisible(issueFilters, issue.category));
+  // issues the user hid as false alarms are listed only on demand, with «Вернуть»
+  const [showHidden, setShowHidden] = useState(false);
+  const hiddenCount = issues.filter((i) => i.dismissed).length;
+  // once the last hidden issue is restored, the list goes back to the active ones by itself
+  const hiddenMode = showHidden && hiddenCount > 0;
+  const visible = issues.filter((issue) => issueVisible(issueFilters, issue.category) && !!issue.dismissed === hiddenMode);
   // thousands of DOM rows make every re-render slow; show a page, load more on demand
   const [limit, setLimit] = useState(ISSUES_PAGE);
   return (
@@ -190,6 +197,12 @@ export const BottomPanel = memo(function BottomPanel({
             <button type="button" className="btn small primary" onClick={onFixAll}
               title="Показать все безопасные исправления списком и применить отмеченные; спорные останутся вам">Править всё…</button>
           )}
+          {hiddenCount > 0 && (
+            <button type="button" className="btn small" aria-pressed={hiddenMode} onClick={() => setShowHidden(!hiddenMode)}
+              title="Ошибки, которые вы отметили как ложные">
+              {hiddenMode ? 'К активным' : `Скрытые · ${hiddenCount}`}
+            </button>
+          )}
           {ISSUE_FILTERS.map((item) => (
             <label key={item.key} className="check">
               <input type="checkbox" checked={issueFilters[item.key]}
@@ -212,9 +225,13 @@ export const BottomPanel = memo(function BottomPanel({
               <span className="issue-desc">{i.description}</span>
               <span className="mono muted small">{i.refs.slice(0, 2).map((r) => `${r.kind}/${r.id}`).join(', ')}</span>
               <span className="issue-fixes">
-                {(i.fixes?.length ? i.fixes : i.fix ? [i.fix] : []).map((f) => (
+                {!i.dismissed && (i.fixes?.length ? i.fixes : i.fix ? [i.fix] : []).map((f) => (
                   <button key={`${f.op}:${f.label}`} className="btn small" onClick={() => onFix(i, f)}>{f.label}</button>
                 ))}
+                {onDismiss && i.key && (
+                  <button className="btn small ghost" title={i.dismissed ? 'Вернуть в список' : 'Это не ошибка — убрать из списка (файл не меняется)'}
+                    onClick={() => onDismiss(i, !i.dismissed)}>{i.dismissed ? 'Вернуть' : 'Скрыть'}</button>
+                )}
               </span>
             </div>
           )))}

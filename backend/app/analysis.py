@@ -381,3 +381,91 @@ def load_segments(doc, rows, chains=None):
                        'category':limiting['category'],
                        'name':' / '.join(dict.fromkeys(r['name'] for r in members if r['name']))})
     return result
+
+
+# ------------------------------------------------------------------ explanation
+# Formulas of the load model, in the order the numbers are produced (report «Методика»).
+METHOD = [
+    {"name": "Пропускная способность без светофора", "formula": "c = n · c_пол",
+     "where": "n — число полос (тег lanes, иначе 1 на направление); c_пол — пропускная способность полосы "
+              "по классу дороги, авт./ч (допущение сценария)"},
+    {"name": "Пропускная способность у светофора", "formula": "c = n · s · g / C",
+     "where": "s — поток насыщения полосы по классу дороги, авт./ч зелёного (HCM 1900, понижен — допущение); "
+              "g — зелёный фазы этого подхода, с; C — цикл светофора, с. Подход с двумя светофорами берёт меньшее g/C"},
+    {"name": "Интенсивность", "formula": "q = q_баз · k + q_ОТ",
+     "where": "q_баз — данные учёта, введённые вручную, иначе оценка c_исх · (v/c)_тип по классу дороги; "
+              "k — множитель спроса сценария; q_ОТ — автобусы маршрутов в приведённых авт. (×2,5)"},
+    {"name": "Коэффициент загрузки", "formula": "z = v/c = q / c", "where": ""},
+    {"name": "Уровень обслуживания", "formula": "A: z < 0,20; B: < 0,45; C: < 0,70; D: < 0,90; E: < 1,00; F: ≥ 1,00",
+     "where": "ОДМ 218.2.020-2012, табл. 1"},
+    {"name": "Время проезда", "formula": "t₀ = L / v;  t = t₀ · (1 + 0,15 · z⁴)",
+     "where": "L — длина ребра, м; v — разрешённая скорость (maxspeed, иначе по классу, ПДД 10.2); "
+              "функция BPR (Bureau of Public Roads, 1964)"},
+]
+
+
+def _num(x: float, digits: int = 0) -> str:
+    s = f"{x:,.{digits}f}".replace(",", " ").replace(".", ",")
+    return s
+
+
+def explain(row: dict[str, Any], doc: OsmDocument, signal: dict[str, Any] | None,
+            multiplier: float) -> dict[str, Any]:
+    """Every number of one road's load row with the formula and the values put into it."""
+    row = {**row, "volume": round(row["volume"]), "capacity": round(row["capacity"]),
+           "base_volume": round(row["base_volume"]), "vc": round(row["vc"], 3),
+           "t0_s": round(row["t0_s"], 1), "t_s": round(row["t_s"], 1)}
+    w = doc.ways.get(row["id"])
+    tags = w.tags if w is not None else {}
+    hw = row["highway"]
+    n = row["lanes"]
+    steps: list[dict[str, Any]] = []
+    lanes_src = "тег lanes" if "lanes" in tags else "по умолчанию: 1 полоса на направление"
+    steps.append({"name": "Число полос", "formula": "n", "substitution": lanes_src, "value": n, "unit": "полос"})
+    if signal:
+        s, g, cyc = signal["sat_flow"], signal["green_s"], signal["cycle_s"]
+        cap = n * s * g / cyc
+        steps.append({"name": "Светофор на подходе", "formula": "g / C",
+                      "substitution": f"{g} с / {cyc} с ({'план задан вручную' if signal['custom'] else 'план по умолчанию'}, "
+                                      f"фаза {'главного' if signal['group'] == 'main' else 'пересекающего'} направления, "
+                                      f"узел {signal['node_id']})",
+                      "value": round(g / cyc, 3), "unit": ""})
+        steps.append({"name": "Пропускная способность", "formula": "c = n · s · g / C",
+                      "substitution": f"{n} · {_num(s)} · {g} / {cyc}", "value": round(cap), "unit": "авт./ч",
+                      "source": "s — поток насыщения по классу (HCM, допущение)"})
+    else:
+        per = LANE_CAPACITY.get(hw, 500)
+        cap = n * per
+        steps.append({"name": "Пропускная способность", "formula": "c = n · c_пол",
+                      "substitution": f"{n} · {_num(per)} ({HIGHWAY_RU.get(_base_class(hw), hw)})",
+                      "value": round(cap), "unit": "авт./ч", "source": "c_пол по классу дороги — допущение сценария"})
+    if abs(cap - row["capacity"]) > 1:
+        steps.append({"name": "Пропускная способность с учётом сценария", "formula": "c",
+                      "substitution": "изменена сценарием (перекрытие, погода, время суток)",
+                      "value": row["capacity"], "unit": "авт./ч"})
+    if row["custom"]:
+        base_src = "данные учёта, введено вручную"
+    else:
+        share = DEFAULT_VC.get(_base_class(hw), 0.2)
+        base_src = f"нет данных учёта: оценка по классу, c_исх · {_num(share, 2)}"
+    steps.append({"name": "Базовая интенсивность", "formula": "q_баз", "substitution": base_src,
+                  "value": row["base_volume"], "unit": "авт./ч"})
+    steps.append({"name": "Интенсивность", "formula": "q = q_баз · k + q_ОТ",
+                  "substitution": f"{_num(row['base_volume'])} · {_num(multiplier, 2)} + {_num(row.get('transit_pcu', 0))}",
+                  "value": row["volume"], "unit": "авт./ч"})
+    steps.append({"name": "Коэффициент загрузки", "formula": "z = q / c",
+                  "substitution": f"{_num(row['volume'])} / {_num(row['capacity'])}", "value": row["vc"], "unit": ""})
+    steps.append({"name": "Уровень обслуживания", "formula": "по z", "substitution": "ОДМ 218.2.020-2012, табл. 1",
+                  "value": row["los"], "unit": ""})
+    steps.append({"name": "Время проезда без помех", "formula": "t₀ = L / v",
+                  "substitution": f"{_num(row['length_m'])} м / {_num(row['speed'])} км/ч", "value": row["t0_s"], "unit": "с"})
+    steps.append({"name": "Время проезда", "formula": "t = t₀ · (1 + 0,15 · z⁴)",
+                  "substitution": f"{_num(row['t0_s'], 1)} · (1 + 0,15 · {_num(row['vc'], 2)}⁴)", "value": row["t_s"],
+                  "unit": "с", "source": "функция BPR, 1964"})
+    return {
+        "id": row["id"], "name": row["name"],
+        # what the collapsed card shows
+        "summary": {"volume": row["volume"], "capacity": row["capacity"], "vc": row["vc"], "los": row["los"],
+                    "t_s": row["t_s"], "signal": bool(signal)},
+        "steps": steps,
+    }
