@@ -42,7 +42,7 @@ export default function StartScreen({ onLoaded }: { onLoaded: (d: DocState) => v
             <span className="muted small">Файлы в папке data/</span>
             {samples.map((s) => (
               <button key={s.name} className="btn" disabled={busy} onClick={() => run(api.openSample(s.name))}>
-                {s.name} <span className="muted mono">{(s.size / 1024 / 1024).toFixed(1)} МБ</span>
+                {s.name} <span className="muted mono">{(s.size / 1024 / 1024).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} МБ</span>
               </button>
             ))}
           </div>

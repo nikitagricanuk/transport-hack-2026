@@ -1,5 +1,7 @@
 import { useState } from 'react';
+import { useEnterKey } from '../utils/useEnterKey';
 import type { Fix, FixPreview, Issue } from '../types';
+import { fmt } from '../utils/geom';
 
 /** What the user is reviewing: an issue, one of its suggested fixes and its dry run. */
 export interface FixReviewState {
@@ -9,7 +11,7 @@ export interface FixReviewState {
   error: string | null;
 }
 
-const fmtM = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(2)} км` : `${Math.round(m)} м`);
+const fmtM = (m: number) => (m >= 1000 ? `${fmt(m / 1000, 2)} км` : `${Math.round(m)} м`);
 
 /**
  * Review card shown before a suggested fix is applied. The fix is drawn on the
@@ -26,6 +28,7 @@ export function FixReview({ review, onApply, onCancel }: {
   const removes = (preview?.removed_road_m ?? 0) > 0;
   const [checked, setChecked] = useState(false);
   const canApply = !!preview && !error && !preview.empty && (!removes || checked);
+  useEnterKey(canApply, onApply);  // Enter applies, Esc (in App) cancels
   return (
     <div className="fix-review" role="dialog" aria-label="Проверка исправления">
       <div className="fix-review-head">

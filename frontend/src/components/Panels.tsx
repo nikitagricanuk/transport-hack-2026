@@ -85,7 +85,7 @@ export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBase
         ))}
       </div>
       <div className="card stack10 m14">
-        <div className="row between"><b>Подложка</b><span className="mono muted small">{baseOpacity}%</span></div>
+        <div className="row between"><b>Подложка</b><span className="mono muted small">{baseOpacity} %</span></div>
         <label className="small muted stack4">Прозрачность
           <input type="range" min={0} max={100} value={baseOpacity} onChange={(e) => onBaseOpacity(Number(e.target.value))} />
         </label>
@@ -135,11 +135,13 @@ export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
 
 export const BottomPanel = memo(function BottomPanel({
   validation, history, tab, onTab, onShow, onFix, validating, issueFilters, onIssueFilter, onSelectAllIssues, children,
-  onShowRefs, onDownloadLog,
+  onShowRefs, onDownloadLog, onFixAll,
 }: {
   onShowRefs?: (refs: { kind: Kind; id: number }[]) => void;
   /** save the edit log (every applied fix with author and time) as fix-log.md */
   onDownloadLog?: () => void;
+  /** open «Править всё»: the confirmed list of safe fixes */
+  onFixAll?: () => void;
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: BottomTab; onTab: (t: BottomTab) => void;
   onShow: (i: Issue) => void; onFix: (i: Issue, fix: Fix) => void; validating: boolean;
@@ -175,6 +177,10 @@ export const BottomPanel = memo(function BottomPanel({
       {tab === 'issues' && (
         <div className="issue-filters" role="group" aria-label="Фильтры ошибок">
           <button type="button" className="btn small" onClick={onSelectAllIssues}>{allOn(issueFilters) ? 'Снять всё' : 'Выбрать всё'}</button>
+          {onFixAll && issues.length > 0 && (
+            <button type="button" className="btn small primary" onClick={onFixAll}
+              title="Показать все безопасные исправления списком и применить отмеченные; спорные останутся вам">Править всё…</button>
+          )}
           {ISSUE_FILTERS.map((item) => (
             <label key={item.key} className="check">
               <input type="checkbox" checked={issueFilters[item.key]}

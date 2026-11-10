@@ -29,3 +29,14 @@ test('buildLanes draws one surface, n+1 markings and one arrow line per lane', (
   const back = g.arrows.features[0].geometry.coordinates;
   assert.ok(back[0][0] > back[back.length - 1][0]);
 });
+
+test('lane width follows the road class (СП 42) and an explicit width tag', async () => {
+  const { laneWidthFor } = await import('./lanes.ts');
+  assert.equal(laneWidthFor({ highway: 'motorway' }, 2), 3.75);
+  assert.equal(laneWidthFor({ highway: 'secondary_link' }, 1), 3.5);
+  assert.equal(laneWidthFor({ highway: 'residential' }, 2), 3.0);
+  assert.equal(laneWidthFor({ highway: 'service' }, 1), 2.75);
+  assert.equal(laneWidthFor({ highway: 'primary', width: '13' }, 4), 3.25);
+  const g = buildLanes([{ id: 1, coords: [[104.28, 52.28], [104.281, 52.28]], forward: 1, backward: 1, laneW: 3 }]);
+  assert.equal(g.marks.features.length, 3);
+});
