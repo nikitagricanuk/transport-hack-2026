@@ -262,7 +262,10 @@ def polygon(result, how="buffer", buffer_m=40):
         pts = MultiPoint([xy for line in result.pieces for xy in line.coords])
         hull = concave_hull(pts, ratio=0.3)
         return hull if hull.geom_type in {"Polygon", "MultiPolygon"} else hull.buffer(buffer_m)
-    return unary_union(result.pieces).buffer(buffer_m)
+    # Buffer short pieces first, then use GEOS's cascaded polygon union. A
+    # single buffer over an entire city line network has quadratic overlap
+    # work and can take minutes. Eight cap segments are sub-metre at 40 m.
+    return unary_union([line.buffer(buffer_m, quad_segs=8) for line in result.pieces])
 
 
 def geojson(rg, geometry):
