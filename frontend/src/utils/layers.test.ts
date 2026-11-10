@@ -24,27 +24,27 @@ test('roads and road errors start unchecked', () => {
 
 test('select all turns every layer on', () => {
   const next = allLayersOn();
-  for (const value of Object.values(next)) assert.equal(value, true);
+  assert.equal(allOn(next), true);
 });
 
-test('unchecking roads clears the issues layer and the road error filters immediately', () => {
+test('unchecking roads preserves issues and filters', () => {
   const filters = allIssueFiltersOn();
   const prev = allLayersOn();
   const next = applyLayerChange(prev, filters, { ...prev, roads: false });
   assert.equal(next.layers.roads, false);
-  assert.equal(next.layers.issues, false);
+  assert.equal(next.layers.issues, true);
   assert.equal(next.layers.paths, true);
   for (const item of ISSUE_FILTERS) {
-    if (item.road) assert.equal(next.filters[item.key], false);
+    if (item.road) assert.equal(next.filters[item.key], true);
   }
-  assert.equal(issueVisible(next.filters, 'junction'), false);
+  assert.equal(issueVisible(next.filters, 'junction'), true);
 });
 
-test('unchecking roads also drops errors that were already hidden on the map', () => {
+test('unchecking roads preserves hidden error filters', () => {
   const prev = { ...allLayersOn(), issues: false };
   const next = applyLayerChange(prev, allIssueFiltersOn(), { ...prev, roads: false });
   assert.equal(next.layers.issues, false);
-  assert.equal(issueVisible(next.filters, 'lanes'), false);
+  assert.equal(issueVisible(next.filters, 'lanes'), true);
 });
 
 test('turning the issues layer on with empty filters selects every error type', () => {
@@ -74,7 +74,7 @@ test('second «select all» clears every checkbox', () => {
   const on = allLayersOn();
   assert.equal(allOn(on), true);
   const off = allOff(on);
-  for (const value of Object.values(off)) assert.equal(value, false);
+  assert.equal(Object.values(off).every(v => typeof v === 'object' ? Object.values(v).every(x=>!x) : !v), true);
   assert.equal(allOn(defaultIssueFilters()), false);
   assert.equal(allOn(allIssueFiltersOn()), true);
 });

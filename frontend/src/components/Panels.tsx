@@ -1,9 +1,10 @@
+import { PanelClose } from './PanelClose';
 import { memo, useState, type ReactNode } from 'react';
 import type { DrawGroup } from './MapView';
 import { HistoryList } from './Extras';
 import type { Kind } from '../types';
 import type { Fix, HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
-import { ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, allOn, issueVisible } from '../utils/layers';
+import { SUBGROUPS, ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, allOn, issueVisible } from '../utils/layers';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
 
 // ------------------------------------------------------------------ tools
@@ -19,7 +20,7 @@ export const TOOLS: { id: Tool; title: string; key: string; d: string }[] = [
 ];
 
 export const TOOL_HINTS: Record<Tool, string> = {
-  select: 'Клик — выбрать · перетащите вершину или весь объект · оранжевая точка разделяет дороги',
+  select: 'Ctrl/Cmd+клик — несколько · Shift+рамка · Alt+два клика — участок · клик — выбрать · перетащите вершину или весь объект · оранжевая точка разделяет дороги',
   way: 'Клик — точка (к узлу/ребру прилипает) · клик по существующей точке, двойной клик или Enter — завершить · Backspace — шаг назад · Esc — отмена',
   node: 'Клик по ребру — вставить узел; по пустому месту — отдельный узел',
   split: 'Клик по внутреннему узлу — разделить ребро',
@@ -31,7 +32,7 @@ export const TOOL_HINTS: Record<Tool, string> = {
 
 export function ToolRail({ tool, onTool }: { tool: Tool; onTool: (t: Tool) => void }) {
   return (
-    <div className="rail" role="toolbar" aria-label="Инструменты" aria-orientation="vertical">
+    <div className="rail" role="toolbar" aria-label="Инструменты" aria-orientation="vertical"><PanelClose panel="tools" />
       {TOOLS.map((t) => (
         <button key={t.id} className="tool" title={`${t.title} · ${t.key}`} aria-label={t.title}
           aria-pressed={tool === t.id} onClick={() => onTool(t.id)}>
@@ -45,19 +46,21 @@ export function ToolRail({ tool, onTool }: { tool: Tool; onTool: (t: Tool) => vo
 }
 
 // ---------------------------------------------------------------- layers
-const LAYERS: { key: keyof LayerVisibility; name: string; sw: string }[] = [
+const LAYERS: { key: Exclude<keyof LayerVisibility,'roadsSub'>; name: string; sw: string }[] = [
+  { key: 'nodes', name: 'Узлы', sw: '#94A3B8' },
+  { key: 'tramSignals', name: 'Трамвайные светофоры', sw: '#9333EA' },
   { key: 'roads', name: 'Дороги', sw: '#E8C36A' },
-  { key: 'paths', name: 'Пешеходные', sw: '#9CA3AF' },
+  { key: 'paths', name: 'Пешеходные зоны', sw: '#9CA3AF' },
   { key: 'rail', name: 'Трамвай / ж/д', sw: '#7C3AED' },
   { key: 'signals', name: 'Светофоры', sw: '#16A34A' },
-  { key: 'crossings', name: 'Переходы', sw: '#F8FAFC' },
-  { key: 'stops', name: 'Остановки', sw: '#0F766E' },
+  { key: 'crossings', name: 'Пеш. переходы', sw: '#F8FAFC' },
+  { key: 'stops', name: 'Остановки', sw: '#2563EB' },
   { key: 'buildings', name: 'Здания и зоны', sw: '#C9C5BC' },
   { key: 'issues', name: 'Ошибки графа', sw: '#EA580C' },
 ];
 
 const GROUP_LABEL: Record<DrawGroup, string> = {
-  zones: 'Зоны (газоны, парки)', buildings: 'Здания', paths: 'Пешеходные', roads: 'Дороги', rail: 'Трамвай / ж/д',
+  zones: 'Зоны (газоны, парки)', buildings: 'Здания', paths: 'Пешеходные зоны', roads: 'Дороги', rail: 'Трамвай / ж/д',
 };
 
 export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBaseOpacity, canApplyTemplate, onTemplate,
@@ -71,7 +74,7 @@ export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBase
 }) {
   return (
     <aside className="left" aria-label="Слои и шаблоны">
-      <h3 className="section">Слои</h3>
+      <PanelClose panel="left" /><h3 className="section">Слои</h3>
       <div className="layer-actions">
         <button type="button" className="btn small" onClick={onSelectAll}>{allOn(layers) ? 'Снять всё' : 'Выбрать всё'}</button>
       </div>
@@ -84,8 +87,11 @@ export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBase
           </label>
         ))}
       </div>
+      {(['roads','paths'] as const).map(group=><details className="m14" key={group}><summary>{group==='roads'?'Типы дорог':'Типы пешеходных зон'}</summary>
+        {SUBGROUPS.filter(([k])=>group==='paths'?['footway','path','steps','pedestrian','cycleway','track'].includes(k):!['footway','path','steps','pedestrian','cycleway','track'].includes(k)).map(([k,label])=><label className="check" key={k}><input type="checkbox" checked={layers.roadsSub?.[k]??true} onChange={()=>onLayers({...layers,roadsSub:{...layers.roadsSub,[k]:!(layers.roadsSub?.[k]??true)}})} />{label}</label>)}
+      </details>)}
       <div className="card stack10 m14">
-        <div className="row between"><b>Подложка</b><span className="mono muted small">{baseOpacity}%</span></div>
+        <div className="row between"><b>Подложка</b><span className="mono muted small">{baseOpacity} %</span></div>
         <label className="small muted stack4">Прозрачность
           <input type="range" min={0} max={100} value={baseOpacity} onChange={(e) => onBaseOpacity(Number(e.target.value))} />
         </label>
@@ -135,11 +141,13 @@ export type BottomTab = 'issues' | 'history' | 'load' | 'changes';
 
 export const BottomPanel = memo(function BottomPanel({
   validation, history, tab, onTab, onShow, onFix, validating, issueFilters, onIssueFilter, onSelectAllIssues, children,
-  onShowRefs, onDownloadLog,
+  onShowRefs, onDownloadLog, onFixAll,
 }: {
   onShowRefs?: (refs: { kind: Kind; id: number }[]) => void;
   /** save the edit log (every applied fix with author and time) as fix-log.md */
   onDownloadLog?: () => void;
+  /** open «Править всё»: the confirmed list of safe fixes */
+  onFixAll?: () => void;
   validation: ValidationResult | null; history: HistoryInfo | null;
   tab: BottomTab; onTab: (t: BottomTab) => void;
   onShow: (i: Issue) => void; onFix: (i: Issue, fix: Fix) => void; validating: boolean;
@@ -150,12 +158,13 @@ export const BottomPanel = memo(function BottomPanel({
   children?: ReactNode;
 }) {
   const issues = validation?.issues ?? [];
+  const [expanded, setExpanded] = useState(false);
   const visible = issues.filter((issue) => issueVisible(issueFilters, issue.category));
   // thousands of DOM rows make every re-render slow; show a page, load more on demand
   const [limit, setLimit] = useState(ISSUES_PAGE);
   return (
     <section className="bottom" aria-label="Проблемы и история">
-      <div className="tabs" role="tablist">
+      <div className="tabs" role="tablist"><PanelClose panel="bottom" />
         <button role="tab" aria-selected={tab === 'issues'} onClick={() => onTab('issues')}>Проблемы графа · {visible.length}</button>
         <button role="tab" aria-selected={tab === 'history'} onClick={() => onTab('history')}>История правок · {history?.entries.length ?? 0}</button>
         <button role="tab" aria-selected={tab === 'changes'} onClick={() => onTab('changes')}>До / после</button>
@@ -173,8 +182,14 @@ export const BottomPanel = memo(function BottomPanel({
         <span className="muted small">{validating ? 'проверка…' : 'проверка после каждой правки'}</span>
       </div>
       {tab === 'issues' && (
+        <>
+        <button className="link small" onClick={() => setExpanded(!expanded)}>{expanded ? 'Свернуть текст' : 'Развернуть текст ошибок'}</button>
         <div className="issue-filters" role="group" aria-label="Фильтры ошибок">
           <button type="button" className="btn small" onClick={onSelectAllIssues}>{allOn(issueFilters) ? 'Снять всё' : 'Выбрать всё'}</button>
+          {onFixAll && issues.length > 0 && (
+            <button type="button" className="btn small primary" onClick={onFixAll}
+              title="Показать все безопасные исправления списком и применить отмеченные; спорные останутся вам">Править всё…</button>
+          )}
           {ISSUE_FILTERS.map((item) => (
             <label key={item.key} className="check">
               <input type="checkbox" checked={issueFilters[item.key]}
@@ -183,8 +198,9 @@ export const BottomPanel = memo(function BottomPanel({
             </label>
           ))}
         </div>
+        </>
       )}
-      <div className="bottom-body">
+      <div className={`bottom-body ${expanded ? 'expanded-issues' : ''}`}>
         {tab === 'issues' && (issues.length === 0
           ? <p className="ok-msg">Проблем не найдено</p>
           : visible.length === 0

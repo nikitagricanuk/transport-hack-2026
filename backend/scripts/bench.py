@@ -62,6 +62,19 @@ def benchmark(c: TestClient, filename: str, raw: bytes, no_sumo: bool) -> None:
     if not no_sumo:
         r = timed("SUMO check", lambda: c.post(f"/api/documents/{doc_id}/check/sumo")).json()
         print(f"{'':<22} ok {r.get('ok')}, errors {len(r.get('errors', []))}, warnings {len(r.get('warnings', []))}, stats {r.get('stats')}")
+    from app import routing
+    rg = routing.build_graph(service._session(doc_id).doc,"car")
+    if rg.segments:
+        a,b,_,_,_ = rg.segments[len(rg.segments)//2]
+        root = f"/api/documents/{doc_id}/analysis/"
+        timed("analysis route",lambda:c.post(root+"route",json={"from":{"node_id":a},"to":{"node_id":b}}))
+        timed("analysis isochrone",lambda:c.post(root+"isochrone",json={"from":{"node_id":a},"count":5}))
+        stops = [n.id for n in service._session(doc_id).doc.nodes.values() if n.tags.get("highway") == "bus_stop"][:4]
+        timed("analysis catchment",lambda:c.post(root+"catchment",json={"set_a":stops[:2],"set_b":stops[2:]}))
+        walk = routing.build_graph(service._session(doc_id).doc,"walk")
+        if walk.segments:
+            start = walk.segments[len(walk.segments)//2][0]
+            timed("analysis PT",lambda:c.post(root+"pt-isochrone",json={"from":{"node_id":start}}))
     timed("export", lambda: c.get(f"/api/documents/{doc_id}/export"))
 
 

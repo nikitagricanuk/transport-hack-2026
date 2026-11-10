@@ -1,3 +1,10 @@
+import { createMutationQueue } from './utils/mutationQueue';
+import EditorMenus from './components/EditorMenus';
+import { PanelToggle } from './components/PanelClose';
+import SelectionEditor, { type Segment } from './components/SelectionEditor';
+import { toggleSelection } from './utils/selection';
+import type { FeatureCollection } from 'geojson';
+import type { PickedPoint, RouteQuery } from './utils/networkAnalysis';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { USER_NAME, api, downloadFile, type OpResponse } from './api';
 import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
@@ -10,6 +17,7 @@ import StartScreen from './components/StartScreen';
 import { FixReview, type FixReviewState } from './components/FixReview';
 import { OrganizerReport, SumoReport } from './components/CheckResults';
 import { Simulation } from './components/Simulation';
+import { FixAllDialog } from './components/FixAll';
 import { MenuBar, Splitter, useLayout } from './components/WindowLayout';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
@@ -32,6 +40,11 @@ const NO_ISSUES: Issue[] = [];
 
 export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
+  const [analysisOverlay, setAnalysisOverlay] = useState<FeatureCollection>({type:'FeatureCollection',features:[]});
+  const [analysisPick,setAnalysisPick] = useState(false);
+  const [analysisPicked,setAnalysisPicked] = useState<PickedPoint|null>(null);
+  const [multi, setMulti] = useState<NonNullable<Selection>[]>([]);
+  const [segment, setSegment] = useState<Segment | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -55,7 +68,7 @@ export default function App() {
   const onCursor = useCallback((ll: [number, number] | null, zoom: number) => {
     sendRef.current({ cursor: ll });
     if (cursorEl.current) {
-      cursorEl.current.textContent = (ll ? `${ll[1].toFixed(5)}° N · ${ll[0].toFixed(5)}° E   ` : '') + `z ${zoom.toFixed(1)}`;
+      cursorEl.current.textContent = (ll ? `${ll[1].toLocaleString('ru-RU', { minimumFractionDigits: 5, maximumFractionDigits: 5 })}° с. ш. · ${ll[0].toLocaleString('ru-RU', { minimumFractionDigits: 5, maximumFractionDigits: 5 })}° в. д.   ` : '') + `масштаб ${zoom.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}`;
     }
   }, []);
   const [mapDiff, setMapDiff] = useState<GeoDiff | null>(null);
@@ -68,8 +81,10 @@ export default function App() {
   const [threeD, setThreeD] = useState(false);
   const [highlight, setHighlight] = useState<{ kind: string; id: number }[]>([]);
   // a suggested fix under review: drawn on the map, applied only on the user's click
+  const mapHighlight = useMemo(() => [...highlight,...multi], [highlight,multi]);
   const [fixReview, setFixReview] = useState<FixReviewState | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [fixAllOpen, setFixAllOpen] = useState(false);
   const [followId, setFollowId] = useState<string | null>(null);
   const followRef = useRef<string | null>(null);
   const modeRef = useRef(mode);
@@ -250,22 +265,32 @@ export default function App() {
     }, 300);
   }, [doc, wantChanges]);
 
-  const loadAction = useCallback(async (p: Promise<LoadState>) => {
+  const loadMutations=useRef(createMutationQueue<LoadState>());
+  const loadRequest=useRef(0);
+  const loadAction = useCallback(async (request:()=>Promise<LoadState>) => {
+    const id=docIdRef.current, sequence=++loadRequest.current;
     try {
-      setLoad(await p);
-    } catch (e) {
+      const state=await loadMutations.current.run(request);
+      if(docIdRef.current===id && sequence===loadRequest.current)setLoad(state);
+    } catch(e) {
+      if(docIdRef.current!==id)return;
       setError((e as Error).message);
+      // Restore authoritative state when an optimistic edit is rejected.
+      if(id && sequence===loadRequest.current) {
+        try {const state=await api.load(id);if(docIdRef.current===id && sequence===loadRequest.current)setLoad(state);}catch{/* Keep the original error visible. */}
+      }
     }
   }, []);
   const onClosure = useCallback(async (wayId: number, closed: boolean) => {
     const id = docIdRef.current;
     if (!id) return;
     try {
-      const state = await api.setClosure(id, wayId, closed);
+      const state = await loadMutations.current.run(()=>api.setClosure(id, wayId, closed));
+      if(docIdRef.current!==id)return;
       setLoad(state);
       const c = state.closures?.find((x) => x.id === wayId);
       setNotice(!closed ? 'Перекрытие снято'
-        : c?.found ? `Дорога перекрыта: ${c.moved ?? 0} авт/ч ушли на объезд по ${c.ways.length} рёбрам`
+        : c?.found ? `Дорога перекрыта: ${c.moved ?? 0} авт./ч ушли на объезд по ${c.ways.length} рёбрам`
           + (c.partial ? ' (в обратную сторону объезда нет)' : '')
         : 'Дорога перекрыта, но объезда в пределах карты нет — поток теряется');
       if (c?.found) flash(c.ways.map((w) => ({ kind: 'way', id: w })), 8000);
@@ -296,15 +321,34 @@ export default function App() {
     const id = docIdRef.current;
     if (id) api.load(id).then(setLoad).catch(() => undefined);
   }, []);
-  const onMultiplier = useCallback((m: number) => { if (docId) loadAction(api.setLoad(docId, { multiplier: m })); }, [docId, loadAction]);
-  const onSnapshot = useCallback((name: string) => { if (docId) loadAction(api.addSnapshot(docId, name)); }, [docId, loadAction]);
-  const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
+  const loadTimer=useRef<ReturnType<typeof setTimeout>>();
+  useEffect(()=>()=>clearTimeout(loadTimer.current),[docId]);
+  const onMultiplier = useCallback((m: number) => { clearTimeout(loadTimer.current);loadTimer.current=setTimeout(()=>{if(docId)loadAction(()=>api.setLoad(docId,{multiplier:m}));},150); }, [docId, loadAction]);
+  const onSnapshot = useCallback((name: string) => { if (docId) loadAction(()=>api.addSnapshot(docId, name)); }, [docId, loadAction]);
+  const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(()=>api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
   const onResetLoad = useCallback(() => {
-    if (docId) loadAction(api.setLoad(docId, { reset_all: true }));
+    if (docId) loadAction(()=>api.setLoad(docId, { reset_all: true }));
     setComparison(null);
   }, [docId, loadAction]);
+  const volumeTimers=useRef(new Map<number,ReturnType<typeof setTimeout>>());
+  useEffect(()=>()=>{for(const timer of volumeTimers.current.values())clearTimeout(timer);volumeTimers.current.clear();},[docId]);
   const onSetLoad = useCallback((wayId: number, volume: number | null) => {
-    if (docId) loadAction(api.setLoad(docId, { way_id: wayId, volume }));
+    if(!docId)return;
+    if(volume!==null)setLoad(prev=>{
+      if(!prev)return prev;
+      const cfg=prev.settings??{};
+      const demand=({morning:1,day:.65,evening:1.1,night:.15} as Record<string,number>)[cfg.time_of_day??'morning'];
+      const pcu=1+(cfg.truck_share??0)+1.5*(cfg.bus_share??0);
+      return {...prev,rows:prev.rows.map(row=>{
+        if(row.id!==wayId || row.closed)return row;
+        const effective=Math.round(volume*prev.multiplier+(row.transit_pcu??0))*demand*pcu;
+        const vc=row.capacity?effective/row.capacity:0;
+        const los = vc<.2?'A':vc<.45?'B':vc<.7?'C':vc<.9?'D':vc<=1?'E':'F';
+        return {...row,volume:effective,base_volume:volume,custom:true,vc,los,t_s:row.t0_s*(1+.15*vc**4)};
+      })};
+    });
+    clearTimeout(volumeTimers.current.get(wayId));
+    volumeTimers.current.set(wayId,setTimeout(()=>{volumeTimers.current.delete(wayId);loadAction(()=>api.setLoad(docId,{way_id:wayId,volume}));},150));
   }, [docId, loadAction]);
   const onCompare = useCallback(async (a: string, b: string) => {
     if (!docId) return;
@@ -458,12 +502,16 @@ export default function App() {
       setTool('select');
       setBottomTab('load');
       setLoadColor(true);
+      // load colouring is the default view of analytics: make sure the roads are visible
+      setLayers((prev) => (prev.roads ? prev : { ...prev, roads: true }));
     } else {
       setLoadColor(false);
     }
     if (m === 'simulation') {
       setTool('select');
       setSelection(null);
+      setMulti([]);
+      setSegment(null);
       setOpenRoute(null);
     }
   };
@@ -510,7 +558,7 @@ export default function App() {
       let res: OpResponse;
       const list = Array.isArray(ops) ? ops : [ops];
       if (list.length === 1) res = await api.op(docId, list[0], opts?.label, opts?.reason);
-      else res = await api.batch(docId, list, opts?.label);
+      else res = await api.batch(docId, list, opts?.label, opts?.reason);
       ingest(res);
       const warnings = [
         ...(res.result?.warnings ?? []),
@@ -520,7 +568,7 @@ export default function App() {
       if (opts?.select === 'result') {
         const id = res.result?.id ?? res.results?.[res.results.length - 1]?.id;
         const op = list[list.length - 1].op;
-        if (id !== undefined) setSelection({ kind: op === 'add_way' ? 'way' : 'node', id });
+        if (id !== undefined) setSelection({ kind: op === 'add_way' || op === 'edit_segment' ? 'way' : 'node', id });
         else if (list[0].op === 'set_tags' && list[0].args.kind === 'node') setSelection({ kind: 'node', id: Number(list[0].args.id) });
       }
       return true;
@@ -535,10 +583,11 @@ export default function App() {
   // stable callbacks so memoized panels and the map skip unrelated re-renders
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
-  const onFix = useCallback((i: Issue, fix: Fix) => {
+  const onFix = useCallback((i: Issue, fix: Fix, probe?: RouteQuery) => {
     if (!docId) return;
+    setMode('edit');modeRef.current='edit';setAnalysisPick(false);
     setFixReview({ issue: i, fix, preview: null, error: null });
-    api.fixPreview(docId, { op: fix.op, args: fix.args })
+    api.fixPreview(docId, { op: fix.op, args: fix.args, probe })
       .then((preview) => {
         // frame what is added or removed (a long road that is only split would zoom too far out),
         // with at least ~80 m around a tiny change
@@ -562,10 +611,12 @@ export default function App() {
     const r = fixReview;
     if (!r) return;
     setFixReview(null);
+    setMode('edit');
     runOps({ op: r.fix.op, args: r.fix.args }, {
       label: r.fix.label + ': ' + r.issue.title,
       reason: r.issue.description,
-    });
+      select:r.fix.op==='edit_segment'?'result':'keep',
+    }).then(ok=>{if(ok && r.fix.op==='edit_segment'){setSegment(null);setMulti([]);}});
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
   // a review belongs to the document it was computed on
@@ -624,12 +675,42 @@ export default function App() {
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       const k = e.key.toLowerCase();
-      if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'я')) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+      // Esc and Ctrl+Z work the same way: first they cancel what is still in progress
+      // (a road being drawn, an open dialog, a fix under review, vertex or merge picking),
+      // and when nothing is pending they undo the last edit from the history.
+      const cancelUnsaved = (): boolean => {
+        if ((mapRef.current?.draftPointCount() ?? 0) > 0) { mapRef.current?.cancelDraft(); return true; }
+        if (organizer && organizer !== 'running') { setOrganizer(null); return true; }
+        if (sumo && sumo !== 'running') { setSumo(null); return true; }
+        if (exportCheck) { setExportCheck(false); return true; }
+        if (report !== undefined) { setReport(undefined); return true; }
+        if (tasksOpen) { setTasksOpen(false); return true; }
+        if (fixAllOpen) { setFixAllOpen(false); return true; }
+        if (fixReview) { setFixReview(null); return true; }
+        return mapRef.current?.cancelPending() ?? false;
+      };
+      const undoWithNotice = () => {
+        if (!doc?.history.can_undo) return;
+        undo();
+        if (doc.history.undo_label) setNotice(`Отменено: ${doc.history.undo_label}`);
+      };
+      if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'я')) {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else if (!cancelUnsaved()) undoWithNotice();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && (k === 'y' || k === 'н')) { e.preventDefault(); redo(); return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
-      if (e.key === 'Escape' && fixReview) { setFixReview(null); return; }
-      if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); return; }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (cancelUnsaved()) return;
+        if (selection || multi.length || segment || analysisPick) { setSelection(null);setMulti([]);setSegment(null);setAnalysisPick(false);return; }
+        if (tool !== 'select') { setTool('select'); return; }
+        undoWithNotice();
+        return;
+      }
       // Delete/Backspace remove the selection, unless a way draft owns the key
       // (then it only drops the latest draft point). That listener is capture
       // on this same window, and stopPropagation() does not suppress another
@@ -652,7 +733,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey, false);
     return () => window.removeEventListener('keydown', onKey, false);
-  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview]);
+  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview, organizer, sumo, exportCheck, report, tasksOpen, fixAllOpen, doc, multi, segment, analysisPick]);
 
   useEffect(() => { setHint(null); }, [tool]);
 
@@ -662,7 +743,7 @@ export default function App() {
     const name = `${team || 'team'}.osm`;
     try {
       const size = await downloadFile(api.exportUrl(doc.doc_id, team || 'team'), name, true);
-      setNotice(`Сохранён ${name} — ${(size / 1024 / 1024).toFixed(2)} МБ`);
+      setNotice(`Сохранён ${name} — ${(size / 1024 / 1024).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} МБ`);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -754,7 +835,8 @@ export default function App() {
   return (
     <div className="app" style={win.style}>
       {versionNotice}
-      <MenuBar layout={win.layout} onToggle={win.toggle} onReset={win.reset} />
+      <PanelToggle.Provider value={win.toggle}>
+      <MenuBar extra={<EditorMenus onReport={openReport} onDownload={(kind) => { downloadFile(api.reportUrl(doc.doc_id, kind), `report.${kind}`).catch((e:Error) => setError(e.message)); }} />} layout={win.layout} onToggle={win.toggle} onReset={win.reset} />
       <header className="top">
         <div className="brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -819,7 +901,7 @@ export default function App() {
           <input value={team} onChange={(e) => setTeam(e.target.value.replace(/[^\w\-]/g, ''))} aria-label="Название команды" />
           <span className="muted mono">.osm</span>
         </label>
-        <button className="btn" onClick={openReport} title="Отчёт с графиками, выгрузка в Word и Excel">Отчёт</button>
+
         <button className="btn primary" onClick={() => { setExportCheck(true); scheduleValidate(doc.doc_id); }}>Экспорт .osm</button>
       </header>
 
@@ -840,11 +922,24 @@ export default function App() {
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={mode === 'simulation' ? null : selection} tool={tool}
               layers={mode === 'simulation' ? { ...layers, roads: true, issues: false } : layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
-              threeD={threeD} highlight={highlight} onView={onView} fixPreview={mode === 'simulation' ? null : fixReview?.preview ?? null}
+              analysis={mode === 'simulation' ? undefined : analysisOverlay}
+              pickPoint={analysisPick && mode === 'analytics'} onPickPoint={setAnalysisPicked}
+              segment={segment} multiSelection={multi}
+              onToggleSelection={mode === 'simulation' ? undefined : (s) =>
+                setMulti((m) => toggleSelection(m.length ? m : selection ? [selection] : [], s))}
+              onBoxSelection={mode === 'simulation' ? undefined : setMulti}
+              onSegment={mode === 'simulation' ? undefined : setSegment}
+              threeD={threeD} highlight={mapHighlight} onView={onView} fixPreview={mode === 'simulation' ? null : fixReview?.preview ?? null}
               baseOpacity={baseOpacity} issues={mode === 'simulation' ? NO_ISSUES : mapIssues}
-              onSelect={mode === 'simulation' ? () => {} : setSelection} loadVc={loadVc}
+              onSelect={(s) => {
+                if (mode === 'simulation') return;
+                setSelection(s);
+                setMulti([]);
+                setSegment(null);
+              }} loadVc={loadVc} analytics={mode === 'analytics'}
               changes={mode !== 'simulation' && bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
+            {mode !== 'simulation' && analysisOverlay.features.some(f=>f.properties?.mock) && <div className="analysis-legend">Интервалы без OSM interval — условные (mock); скорость ОТ и ожидание — допущения</div>}
             {mode === 'simulation' ? <Simulation key={`${doc.doc_id}:${doc.rev}`} docId={doc.doc_id} map={mapRef} />
               : <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>}
             {mode !== 'simulation' && fixReview && (
@@ -865,7 +960,7 @@ export default function App() {
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
             validating={validating} onShow={showIssue} onFix={onFix}
             issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}
-            onShowRefs={onShowRefs} onDownloadLog={downloadEditLog}>
+            onShowRefs={onShowRefs} onDownloadLog={downloadEditLog} onFixAll={() => setFixAllOpen(true)}>
             {bottomTab === 'load' && (
               <LoadPanel load={load} comparison={comparison} onMultiplier={onMultiplier} onSnapshot={onSnapshot}
                 onDeleteSnapshot={onDeleteSnapshot} onCompare={onCompare} onReset={onResetLoad} onShowRoad={onShowRoad}
@@ -881,10 +976,14 @@ export default function App() {
           <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
             label="Ширина панели свойств" />
         )}
-        {mode === 'simulation' || !win.layout.visible.right ? null : mode === 'analytics' && !selection ? (
-          <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
-            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
-        ) : (
+        <AnalyticsPanel key={doc.doc_id} active={win.layout.visible.right && mode === 'analytics' && !selection}
+          analysis={{docId:doc.doc_id,rev:doc.rev,picked:analysisPicked,onPick:setAnalysisPick,onOverlay:setAnalysisOverlay,onFix,onShowRoad}}
+          docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
+          onFix={onFix} onScenarioChanged={refreshLoad} onDetour={async (id,index) => {
+              try {const next=await loadMutations.current.run(()=>api.setClosure(doc.doc_id,id,true,index));if(docIdRef.current!==doc.doc_id)return;setLoad(next);const options=next.closures?.find(c=>c.id===id)?.alternatives ?? [];setAnalysisOverlay({type:'FeatureCollection',features:options.flatMap((a,i)=>a.lines.map(coordinates=>({type:'Feature' as const,geometry:{type:'LineString' as const,coordinates},properties:{before:i!==index}})))});} catch(e){setError((e as Error).message);}
+            }} onReopen={(id) => onClosure(id,false)} onOpenTasks={() => setTasksOpen(true)} />
+        {mode !== 'simulation' && win.layout.visible.right && (mode !== 'analytics' || selection) && (mode === 'edit' && (multi.length > 1 || segment) ?
+          <SelectionEditor multi={multi} segment={segment} geo={doc.geo} onOp={onInspectorOp} onFix={onFix} onClear={() => {setMulti([]);setSegment(null);}} /> : (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
           onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}
@@ -892,8 +991,16 @@ export default function App() {
           closed={selection?.kind === 'way' && (load?.closures ?? []).some((c) => c.id === selection.id)}
           onClosure={onClosure} onObjectReport={objectReport} onAutofill={autofillBuildings}
           readOnly={mode === 'analytics'} />
-        )}
+        ))}
       </div>
+      {fixAllOpen && (
+        <FixAllDialog docId={doc.doc_id} onClose={() => setFixAllOpen(false)}
+          onApply={(ops, label) => { runOps(ops, { label }); }}
+          onShow={(loc, ref) => {
+            if (loc) mapRef.current?.flyTo(loc[0], loc[1], 18);
+            if (ref && (ref.kind === 'way' || ref.kind === 'node')) setSelection({ kind: ref.kind, id: ref.id });
+          }} />
+      )}
       {tasksOpen && <TasksModal docId={doc.doc_id} selection={selection} onClose={() => setTasksOpen(false)} />}
 
       <footer className="status mono">
@@ -940,6 +1047,7 @@ export default function App() {
           </div>
         </div>
       )}
+      </PanelToggle.Provider>
     </div>
   );
 }

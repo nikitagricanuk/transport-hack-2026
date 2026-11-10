@@ -60,3 +60,30 @@ def default_limit(highway: str) -> int:
     """Limit that applies without a sign: 20 in courtyards and residential zones, 60 elsewhere in town."""
     base = highway.removesuffix("_link")
     return LIVING_KMH if base in ("living_street", "service") else URBAN_KMH
+
+# Scenario correspondence, not a normative conversion from OSM to engineering class.
+# Classification vocabulary: ГОСТ Р 52398-2005; urban streets: СП 42.13330.2016, table 11.1.
+OSM_CATEGORY = {'motorway':'IА','trunk':'IБ','primary':'II','secondary':'III','tertiary':'IV',
+                'unclassified':'V','residential':'V','living_street':'V','service':'V','road':'V',
+                'footway':'V','path':'V','pedestrian':'V','steps':'V','cycleway':'V','track':'V'}
+ROAD_CATEGORIES = ('IА','IБ','IВ','II','III','IV','V')
+
+
+def road_category(tags):
+    override = tags.get('uds:category')
+    return override if override in ROAD_CATEGORIES else OSM_CATEGORY.get(tags.get('highway','').removesuffix('_link'),'V')
+
+
+# Lane width, m — СП 42.13330.2016, разд. 11 (ширина полосы движения): магистральные дороги
+# 3,75; магистральные улицы общегородского и районного значения 3,5; улицы местного
+# значения в жилой застройке 3,0; проезды 2,75. Same table as the frontend lane view.
+LANE_WIDTH_BY_CLASS = {
+    "motorway": 3.75, "trunk": 3.75, "primary": 3.5, "secondary": 3.5, "tertiary": 3.5,
+    "unclassified": 3.0, "residential": 3.0, "living_street": 3.0, "service": 2.75,
+}
+LANE_WIDTH_DEFAULT = 3.5
+
+
+def lane_width(tags: dict[str, str]) -> float:
+    base = tags.get("highway", "").removesuffix("_link")
+    return LANE_WIDTH_BY_CLASS.get(base, LANE_WIDTH_DEFAULT)

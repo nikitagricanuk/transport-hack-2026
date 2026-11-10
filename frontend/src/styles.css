@@ -403,3 +403,27 @@ input[type="checkbox"]:disabled { cursor: default; }
 .splitter:hover, .splitter:focus-visible, .splitter:active { background: var(--accent); outline: none; }
 .fix-review-note { padding: 8px; border-radius: 8px; background: #102033; border: 1px solid #1e3a5f; color: #bfdbfe; }
 .fix-review-note p { margin: 0; }
+.panel-close { align-self: flex-end; float: right; flex-shrink: 0; }
+.rail .panel-close { padding: 3px; }
+.inspector.analytics .inspector.analytics { width: 100%; border: 0; }
+.cmp th,.od th { position: relative; }
+.column-resize { position:absolute;right:0;top:0;width:7px;height:100%;cursor:col-resize;touch-action:none; }
+.expanded-issues .ellipsis,.expanded-issues .issue-text,.expanded-issues .issue-desc,.expanded-issues .issue-title { white-space:normal;overflow:visible;text-overflow:clip; }
+.analysis-legend { position:absolute;left:12px;bottom:30px;background:var(--panel);padding:8px;border-radius:6px;max-width:70%;font-size:12px;pointer-events:none; }
+
+
+.num-input { width: 110px; font-family: var(--mono); padding: 4px 6px; }
+
+/* «Править всё» */
+.modal.fix-all { width: min(760px, calc(100vw - 32px)); max-height: 86vh; display: flex; flex-direction: column; gap: 10px; }
+.fix-all-list { display: flex; flex-direction: column; gap: 4px; max-height: 30vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.fix-all-row { display: flex; gap: 10px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.fix-all-row:hover { background: #18202a; }
+.fix-all-row.disputed { cursor: default; }
+
+.analysis-tools [role="tablist"] { flex-wrap: wrap; }
+.analysis-tools input[type="number"] { max-width: 90px; }
+.analysis-tools table { width: 100%; border-collapse: collapse; }
+.analysis-tools td, .analysis-tools th { padding: 5px 3px; text-align: left; }
+.analysis-tools td { border-top: 1px solid #334155; }
+.analysis-tools > .row { flex-wrap: wrap; }

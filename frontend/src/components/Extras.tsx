@@ -1,3 +1,6 @@
+import { PanelClose } from './PanelClose';
+import { AnalysisTools, type AnalysisProps } from './AnalysisTools';
+import ResizableTable from './ResizableTable';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import type { HistoryEntry, Kind, LoadState, OdMatrix, Selection, Task, TaskCriterion, TaskResult } from '../types';
@@ -11,7 +14,7 @@ export const INTENSITY_PRESETS: { name: string; multiplier: number; hint: string
   { name: 'Межпиковый', multiplier: 0.65, hint: 'день' },
   { name: 'Выходной', multiplier: 0.5, hint: 'суббота' },
   { name: 'Ночь', multiplier: 0.15, hint: '00–05' },
-  { name: 'Перспектива +30%', multiplier: 1.3, hint: 'рост спроса' },
+  { name: 'Перспектива +30 %', multiplier: 1.3, hint: 'рост спроса' },
 ];
 
 export function IntensityPresets({ current, onPick }: { current: number; onPick: (m: number) => void }) {
@@ -33,7 +36,12 @@ const CLASS_RU: Record<string, string> = {
   residential: 'Жилые', service: 'Проезды', unclassified: 'Прочие', living_street: 'Жилые зоны',
 };
 
-export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onReopen, onOpenTasks }: {
+export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onReopen, onOpenTasks, onScenarioChanged, onDetour, onFix, analysis, active }: {
+  analysis: AnalysisProps;
+  active: boolean;
+  onFix: (issue: import('../types').Issue,fix:import('../types').Fix) => void;
+  onScenarioChanged: () => void;
+  onDetour: (id:number,index:number) => void;
   docId: string;
   rev: number;
   load: LoadState | null;
@@ -42,14 +50,21 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
   onReopen: (wayId: number) => void;
   onOpenTasks: () => void;
 }) {
+  const [opened,setOpened]=useState(active);
+  useEffect(()=>{if(active)setOpened(true);},[active]);
+  const [segmentLimit,setSegmentLimit] = useState(100);
+  const [category,setCategory] = useState('');
+  const [scenarioError,setScenarioError] = useState('');
+  const setScenario = async (body: object) => { try { await api.setLoad(docId, body); setScenarioError(''); onScenarioChanged(); } catch(e) {setScenarioError((e as Error).message);} };
   const [od, setOd] = useState<OdMatrix | null>(null);
   const [grid, setGrid] = useState(3);
   const [view, setView] = useState<'trips' | 'shares' | 'minutes'>('trips');
   useEffect(() => {
+    if(!active)return;
     let alive = true;
     api.od(docId, grid).then((m) => alive && setOd(m)).catch(() => undefined);
     return () => { alive = false; };
-  }, [docId, grid, rev]);
+  }, [docId, grid, rev, active]);
 
   const flows = useMemo(() => {
     if (!load) return null;
@@ -65,18 +80,30 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
     return { classes, top, transit, missing };
   }, [load]);
 
-  if (!load || !flows) return <aside className="inspector empty"><p>Расчёт аналитики…</p></aside>;
+  if (!load || !flows) return <aside className="inspector empty" style={{display:active?undefined:'none'}}><p>Расчёт аналитики…</p></aside>;
   const s = load.summary;
   const matrix = od ? (view === 'trips' ? od.trips : view === 'shares' ? od.shares : od.minutes) : [];
   const maxCell = Math.max(1, ...matrix.flat().map((v) => (typeof v === 'number' ? v : 0)));
   return (
-    <aside className="inspector analytics" aria-label="Аналитика сети">
+    <aside className="inspector analytics" aria-label="Аналитика сети" style={{display:active?undefined:'none'}}><PanelClose panel="right" />
       <div className="insp-head"><span className="badge">АНАЛИТИКА</span><h2>Потоки и сценарии</h2></div>
       <div className="insp-body stack16">
+        {opened && <AnalysisTools {...analysis} />}
         <section className="stack10">
           <b>Сценарий спроса</b>
           <IntensityPresets current={load.multiplier} onPick={onMultiplier} />
           <AnalyticsAssumptions />
+          <p className="small muted">Состав потока: легковые ×1, грузовые ×2, автобусы ×2,5 — допущения. Время суток: утро ×1, день ×0,65, вечер ×1,1, ночь ×0,15; ёмкость: сухо ×1, дождь ×0,85, снег ×0,65 — допущения.</p>
+          <label>Время суток<select value={load.settings?.time_of_day ?? 'morning'} onChange={e=>setScenario({time_of_day:e.target.value})}>{[['morning','Утро'],['day','День'],['evening','Вечер'],['night','Ночь']].map(([v,t])=><option key={v} value={v}>{t}</option>)}</select></label>
+          <label>Погода<select value={load.settings?.weather ?? 'dry'} onChange={e=>setScenario({weather:e.target.value})}>{[['dry','Сухо'],['rain','Дождь'],['snow','Снег']].map(([v,t])=><option key={v} value={v}>{t}</option>)}</select></label>
+          <label>Доля грузовых, %<input type="number" min={0} max={100} defaultValue={(load.settings?.truck_share ?? 0)*100} onBlur={e=>setScenario({truck_share:+e.target.value/100})} /></label>
+          <label>Доля автобусов, %<input type="number" min={0} max={100} defaultValue={(load.settings?.bus_share ?? 0)*100} onBlur={e=>setScenario({bus_share:+e.target.value/100})} /></label>
+          {scenarioError && <p className="bad">{scenarioError}</p>}
+          <label>Категория<select value={category} onChange={e=>setCategory(e.target.value)}><option value="">Все</option>{['IА','IБ','IВ','II','III','IV','V'].map(c=><option key={c}>{c}</option>)}</select></label>
+          <p className="small muted">Соответствие OSM → категория — допущение, переопределяется uds:category. Термины: ГОСТ Р 52398-2005; городские улицы — СП 42.13330.2016, табл. 11.1. z участка = максимум между перекрёстками.</p>
+          <p className="small muted">Показано до {segmentLimit} участков из {load.segments?.length ?? 0}</p>
+          <button className="link small" onClick={()=>setSegmentLimit(n=>n+100)}>Показать ещё 100 участков</button>
+          <ResizableTable id="load-segments" className="cmp"><thead><tr><th>Участок</th><th>м</th><th>z</th><th>Кат.</th></tr></thead><tbody>{load.segments?.filter(r=>!category || r.category===category).slice(0,segmentLimit).map(r=><tr key={r.id}><td><button className="link" onClick={()=>onShowRoad(r.ways[0])}>{r.name || r.ways.join(', ')}</button></td><td>{r.length_m.toFixed(0)}</td><td>{r.vc.toFixed(2)}</td><td>{r.category}</td></tr>)}</tbody></ResizableTable>
         </section>
 
         <section className="stack10">
@@ -101,7 +128,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
             <button key={r.id} className="link worst" onClick={() => onShowRoad(r.id)}>
               <span className="los-dot" style={{ background: LOS_COLOR[r.los] }}>{r.los}</span>
               <span className="grow ellipsis">{r.name || `${r.highway} #${r.id}`}</span>
-              <span className="mono small">{fmt(r.volume)} авт/ч</span>
+              <span className="mono small">{fmt(r.volume)} авт./ч</span>
             </button>
           ))}
           {flows.missing.length > 0 && (
@@ -124,8 +151,10 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
                 <button className="link" onClick={() => onShowRoad(c.id)}><b>{c.name || `#${c.id}`}</b></button>
                 <button className="btn small" onClick={() => onReopen(c.id)}>Открыть</button>
               </div>
+              {c.issues?.map(i=><div key={i.id}><b>{i.title}</b><p className="small">{i.description}</p>{i.fixes.map(f=><button key={f.label} className="btn small" onClick={()=>onFix(i,f)}>{f.label} · предпросмотр</button>)}</div>)}
+              {c.alternatives?.map((a,index)=><button key={index} className="btn small" aria-pressed={c.selected_alternative===index} onClick={()=>onDetour(c.id,index)}>Объезд {index+1}: {(a.time_s/60).toFixed(1)} мин · {(a.length_m/1000).toFixed(2)} км</button>)}
               <span className="small">{c.found
-                ? `Объезд по ${c.ways.length} рёбрам, +${fmt(Math.max(0, c.detour_s), 0)} с, перешло ${fmt(c.moved ?? c.volume)} авт/ч`
+                ? `Объезд по ${c.ways.length} рёбрам, +${fmt(Math.max(0, c.detour_s), 0)} с, перешло ${fmt(c.moved ?? c.volume)} авт./ч`
                   + (c.partial ? '; в обратном направлении объезда нет' : '')
                 : 'Объезда нет в пределах карты — поток не может проехать'}</span>
             </div>
@@ -146,7 +175,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
           </div>
           {!od ? <span className="small muted">Расчёт…</span> : od.zones.length === 0 ? <span className="small muted">Нет зданий для зон.</span> : (
             <div className="od-wrap">
-              <table className="od">
+              <ResizableTable id="extras-1" className="od">
                 <thead><tr><th>Из \ в</th>{od.zones.map((z) => <th key={z.id} title={`${z.residents} жит., ${z.jobs} раб. мест`}>{z.name}</th>)}</tr></thead>
                 <tbody>
                   {od.zones.map((z, i) => (
@@ -161,7 +190,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </ResizableTable>
             </div>
           )}
           {od && <span className="small muted">Гравитационная модель: {fmt(od.total)} поездок в час пик, жители — по этажности и квартирам,
@@ -198,7 +227,7 @@ export function HistoryList({ details, labels, onShow }: {
             {h.refs.slice(0, 3).map((r) => `${r.kind === 'way' ? 'ребро' : r.kind === 'node' ? 'узел' : 'отношение'} ${r.name || r.id} ${STATUS_RU[r.status]}`).join('; ')}
             {h.count > 3 ? ` и ещё ${h.count - 3}` : ''}
           </span>
-          {h.reason && <span className="hist-reason small"><b>Почему</b> {h.reason}</span>}
+          <span className="hist-reason small"><b>Почему</b> {h.reason || 'ручная правка'}</span>
         </button>
       ))}
     </>
@@ -394,7 +423,7 @@ export function BasemapControls({ base, onBase, overlay, onOverlayFile, onOverla
         <div className="card stack6">
           <div className="row between"><b className="ellipsis">{overlay.name}</b>
             <button className="icon-btn" aria-label="Убрать снимок" onClick={() => onOverlay(null)}>×</button></div>
-          <label className="small muted stack4">Прозрачность снимка {Math.round(overlay.opacity * 100)}%
+          <label className="small muted stack4">Прозрачность снимка {Math.round(overlay.opacity * 100)} %
             <input type="range" min={0.1} max={1} step={0.05} value={overlay.opacity}
               onChange={(e) => onOverlay({ ...overlay, opacity: Number(e.target.value) })} />
           </label>

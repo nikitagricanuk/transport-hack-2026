@@ -10,7 +10,7 @@ from .analysis import ANALYTICS_ASSUMPTIONS, LOS_SOURCE_URL
 SEV_RU = {"critical": "Критично", "warning": "Предупреждение", "info": "Замечание"}
 CAT_RU = {
     "connectivity": "Связность", "direction": "Направления", "junction": "Перекрёстки",
-    "lanes": "Полосы", "geometry": "Геометрия и Z", "data": "Данные",
+    "pedestrian": "Пешеходы", "lanes": "Полосы", "geometry": "Геометрия и Z", "data": "Данные",
 }
 STATUS_RU = {"added": "добавлен", "modified": "изменён", "deleted": "удалён", "changed": "изменён", "removed": "удалён"}
 TOTALS_RU = {
@@ -20,7 +20,7 @@ TOTALS_RU = {
 }
 LOAD_COLS = [
     ("id", "ID"), ("name", "Название"), ("highway", "Класс"), ("lanes", "Полос"), ("length_m", "Длина, м"),
-    ("capacity", "Пропускная, авт/ч"), ("volume", "Нагрузка, авт/ч"), ("vc", "v/c"), ("los", "Уровень"),
+    ("capacity", "Пропускная способность, авт./ч"), ("volume", "Нагрузка, авт./ч"), ("vc", "v/c"), ("los", "Уровень"),
     ("t0_s", "t свободн., с"), ("t_s", "t с нагрузкой, с"),
 ]
 
@@ -502,12 +502,12 @@ def build_object_xlsx(obj: dict[str, Any]) -> bytes:
         ws.cell(row=r, column=1, value="Почасовой профиль задан для сценария")
         top = r + 2
         ws.cell(row=top, column=1, value="Час").font = Font(bold=True)
-        ws.cell(row=top, column=2, value="Нагрузка, авт/ч").font = Font(bold=True)
+        ws.cell(row=top, column=2, value="Нагрузка, авт./ч").font = Font(bold=True)
         for h, v in enumerate(obj["hourly"]):
             ws.cell(row=top + 1 + h, column=1, value=f"{h:02d}:00")
             ws.cell(row=top + 1 + h, column=2, value=v)
         ch = LineChart()
-        ch.title, ch.y_axis.title = "Суточный профиль нагрузки (допущение)", "авт/ч"
+        ch.title, ch.y_axis.title = "Суточный профиль нагрузки (допущение)", "авт./ч"
         ch.height, ch.width = 8, 18
         ch.add_data(Reference(ws, min_col=2, min_row=top, max_row=top + 24), titles_from_data=True)
         ch.set_categories(Reference(ws, min_col=1, min_row=top + 1, max_row=top + 24))
@@ -543,7 +543,7 @@ def build_object_pdf(obj: dict[str, Any]) -> bytes:
             ax.legend(frameon=False)
         ax.set_xticks(range(0, 24, 2))
         ax.set_xlabel("час")
-        ax.set_ylabel("авт/ч")
+        ax.set_ylabel("авт./ч")
         ax.spines[["top", "right"]].set_visible(False)
         story += [Paragraph("Суточный профиль нагрузки (допущение)", st["h1"]), _pdf_image(_png(fig), 16)]
         plt.close(fig)

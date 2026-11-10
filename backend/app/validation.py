@@ -15,7 +15,7 @@ from .norms import (GRADE_SOURCE, LIVING_KMH, SPEED_SHORTHAND, SPEED_SOURCE, URB
                     max_grade, speed_kmh)
 
 Severity = Literal["critical", "warning", "info"]
-Category = Literal["connectivity", "direction", "junction", "lanes", "geometry", "data"]
+Category = Literal["connectivity", "direction", "junction", "lanes", "geometry", "data", "pedestrian"]
 
 GAP_M = 8.0          # dangling end closer than this to another road = broken junction
 CLOSE_JUNCTION_M = 2.0
@@ -177,6 +177,11 @@ class _Validator:
         self.check_elevation()
         self.check_signals_and_stops()
         self.check_connections()
+        self.check_pedestrian()
+
+    def check_pedestrian(self) -> None:
+        from .pedestrian import check
+        self.issues.extend(Issue(**item) for item in check(self.doc))
 
     def check_data(self) -> None:
         for w in self.doc.ways.values():

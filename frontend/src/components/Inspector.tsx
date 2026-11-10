@@ -1,3 +1,5 @@
+import { PanelClose } from './PanelClose';
+import { NODE_PRESETS, presetPatch, isPreset } from '../utils/nodePresets';
 import { memo, useState } from 'react';
 import type { LoadRow, NodeProps, Op, RouteDetail, Tags, WayProps } from '../types';
 import { SignalPanel, StopPanel } from './Transit';
@@ -53,7 +55,7 @@ export default memo(function Inspector({
   if (!way && !node) {
     return (
       <aside className="inspector empty" aria-label="Свойства объекта">
-        <p>Выберите ребро или узел на карте.</p>
+        <PanelClose panel="right" /><p>Выберите ребро или узел на карте.</p>
         <p className="muted">V — выбор, W — новое ребро, N — узел, S — разделить, M — соединить, T — светофор, P — переход.</p>
         <p className="muted">+ / − — масштаб, 0 — весь участок, F — полный экран (выход — снова F). Рисование ребра: Enter — готово, Esc или правая кнопка мыши — отменить, ⌫ — шаг назад.</p>
       </aside>
@@ -67,7 +69,7 @@ export default memo(function Inspector({
 
   return (
     <aside className="inspector" aria-label="Свойства объекта">
-      <div className="insp-head">
+      <PanelClose panel="right" /><div className="insp-head">
         <div className="row gap8">
           <span className="badge">{way ? (way.layer === 'road' ? 'РЕБРО' : way.layer.toUpperCase()) : 'УЗЕЛ'}</span>
           <span className="mono muted">{kind}/{id}</span>
@@ -128,7 +130,7 @@ export default memo(function Inspector({
           <StopPanel docId={docId} nodeId={node.id} rev={rev} openRoute={openRoute}
             onOpenRoute={(r) => onOpenRoute?.(r)} onChanged={() => onScenarioChanged?.()} />
         )}
-        {tab === 'attr' && node && <NodeAttributes tags={tags} setTags={setTags} />}
+        {tab === 'attr' && node && <NodeAttributes tags={tags} setTags={setTags} stopInRoute={!!node.stop_routes?.length || !!openRoute?.stop_list.some((st) => st.id === node.id)} />}
       </div>
       <div className="insp-foot wrap">
         {onObjectReport && (
@@ -241,7 +243,7 @@ function nodeTitle(tags: Tags) {
   return 'Узел';
 }
 
-function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
+export function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
   way: WayProps; tags: Tags; sharedJunctions?: number;
   setTags: (p: Record<string, string | null>, label?: string) => void;
   onOp: (op: Op | Op[], label?: string) => void;
@@ -258,7 +260,7 @@ function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
   return (
     <div className="stack16">
       <div className="grid2">
-        <label className="field"><span>Класс дороги</span>
+        <label className="field"><span>Классификация дороги</span>
           <select value={tags.highway ?? ''} onChange={(e) => setTags({ highway: e.target.value || null })}>
             <option value="">не указано</option>
             {HIGHWAY_CLASSES.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
@@ -308,6 +310,12 @@ function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
 
           <div className="card stack10">
             <div className="row between"><b>Полосы</b><span className="muted small">turn:lanes не подставляются</span></div>
+            {mode === 'no' && (
+              <button className="btn small" title="Как в OSM для разделённых дорог: две односторонние оси по центру своих направлений. Перекрёстки остаются общими; к любому направлению можно примыкать отдельно."
+                onClick={() => onOp({ op: 'split_carriageways', args: { way_id: way.id } }, 'Дорога разделена на две проезжие части')}>
+                Разделить на две проезжие части
+              </button>
+            )}
             <div className="grid2">
               <Stepper label="Встречные" value={mode === 'no' ? backward : 0} disabled={mode !== 'no'}
                 onChange={(v) => setLanes(forward, v, mode)} />
@@ -329,8 +337,8 @@ function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
 
           <div className="field"><span>Доступ для автомобилей</span>
             <div className="seg" role="group" aria-label="Доступ">
-              {([['', 'Открыт'], ['destination', 'Только к цели'], ['no', 'Запрещён']] as const).map(([v, label]) => (
-                <button key={label} aria-pressed={(tags.motor_vehicle ?? '') === v}
+              {([['', 'Открыт'], ['destination', 'Служебные машины'], ['no', 'Запрещён']] as const).map(([v, label]) => (
+                <button key={label} title={`motor_vehicle=${v || 'yes'}`} aria-pressed={(tags.motor_vehicle ?? '') === v}
                   onClick={() => setTags({ motor_vehicle: v || null }, 'Изменён доступ')}>{label}</button>
               ))}
             </div>
@@ -372,37 +380,19 @@ function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
   );
 }
 
-function NodeAttributes({ tags, setTags }: { tags: Tags; setTags: (p: Record<string, string | null>, label?: string) => void }) {
-  const presets: { label: string; tags: Record<string, string | null> }[] = [
-    { label: 'Светофор', tags: { highway: 'traffic_signals' } },
-    { label: 'Переход', tags: { highway: 'crossing', crossing: 'marked' } },
-    { label: 'Переход со светофором', tags: { highway: 'crossing', crossing: 'traffic_signals' } },
-    { label: 'Уступи дорогу', tags: { highway: 'give_way' } },
-    { label: 'Стоп', tags: { highway: 'stop' } },
-    { label: 'Обычный узел', tags: { highway: null, crossing: null } },
-  ];
-  return (
-    <div className="stack16">
-      <div className="field"><span>Тип узла</span>
-        <div className="preset-grid">
-          {presets.map((p) => (
-            <button key={p.label} className="btn" aria-pressed={Object.entries(p.tags).every(([k, v]) => (tags[k] ?? null) === v)}
-              onClick={() => setTags(p.tags, p.label)}>{p.label}</button>
-          ))}
-        </div>
-      </div>
-      {tags.highway === 'traffic_signals' && (
-        <div className="field"><span>traffic_signals:direction</span>
-          <div className="chips">
-            {['forward', 'backward', 'both'].map((d) => (
-              <button key={d} aria-pressed={tags['traffic_signals:direction'] === d}
-                onClick={() => setTags({ 'traffic_signals:direction': d })}>{d}</button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+function NodeAttributes({ tags, setTags, stopInRoute }: { tags: Tags; stopInRoute: boolean; setTags: (p: Record<string, string | null>, label?: string) => void }) {
+  return <div className="stack16"><div className="field"><span>Тип узла</span>
+    <div className="preset-grid">{NODE_PRESETS.map((p) => <button key={p.label} className="btn" aria-pressed={isPreset(tags, p)}
+      onClick={() => {
+        if (p.label !== 'Остановка' && (stopInRoute || tags.public_transport) && !window.confirm('Узел может входить в маршрут как остановка. Снять теги остановки?')) return;
+        setTags(presetPatch(tags, p), `Тип узла: ${p.label}`);
+      }}>{p.label}</button>)}</div></div>
+      {tags.highway === 'traffic_signals' && <label className="field">Дополнительная секция
+        <select value={tags['uds:signal:arrow'] ?? ''} onChange={(e) => setTags({ 'uds:signal:arrow': e.target.value || null })}>
+          <option value="">Обычный</option><option value="left">Стрелка налево</option><option value="right">Стрелка направо</option><option value="through">Стрелка прямо</option>
+        </select></label>}
+      {tags['uds:signal:tram'] === 'yes' && <p className="muted small">Трамвайный светофор. Схему сигналов сверяйте с ГОСТ Р 52289-2019.</p>}
+    </div>;
 }
 
 function NameField({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
