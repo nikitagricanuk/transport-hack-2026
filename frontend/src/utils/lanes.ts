@@ -89,9 +89,10 @@ export function buildLanes(roads: LaneRoad[], plates: LaneJunction[] = []): Lane
   const surface: Feature<Polygon>[] = [];
   const marks: Feature<LineString>[] = [];
   const arrows: Feature<LineString>[] = [];
-  // junction plates first: one patch of asphalt where carriageways of different widths meet
+  // Join the incident carriageway edges without adding a circular apron.
   for (const j of plates) {
-    surface.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [junctionPlate(j)] }, properties: { junction: true } });
+    const ring = junctionPlate(j, roads);
+    if (ring.length >= 4) surface.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] }, properties: { junction: true } });
   }
   const ends=new Map<string,LaneRoad[]>();
   for(const r of roads)for(const p of [r.coords[0],r.coords[r.coords.length-1]])if(p){const k=p.join(',');ends.set(k,[...(ends.get(k)??[]),r]);}
@@ -211,15 +212,29 @@ export function findJunctions(roads: { coords: number[][]; nodes: number[]; half
   return out;
 }
 
-/** A filled circle (the asphalt of a junction), as a polygon in lon/lat. */
-export function junctionPlate(j: LaneJunction, steps = 20): number[][] {
-  const kx = M_PER_DEG_LON_EQ * Math.cos((j.coord[1] * Math.PI) / 180);
-  const ring: number[][] = [];
-  for (let i = 0; i <= steps; i++) {
-    const a = (2 * Math.PI * i) / steps;
-    ring.push([j.coord[0] + (Math.cos(a) * j.radius) / kx, j.coord[1] + (Math.sin(a) * j.radius) / M_PER_DEG_LAT]);
+/** Convex patch bounded by the actual edges of the incident carriageways. */
+export function junctionPlate(j: LaneJunction, roads: LaneRoad[]): number[][] {
+  const points: number[][] = [];
+  for (const road of roads) {
+    if (road.coords.length < 2 || road.forward + road.backward < 1) continue;
+    const index = road.coords.findIndex(p => p[0] === j.coord[0] && p[1] === j.coord[1]);
+    if (index < 0) continue;
+    const half = (road.forward + road.backward) * (road.laneW ?? LANE_W) / 2;
+    points.push(offsetLine(road.coords, -half)[index], offsetLine(road.coords, half)[index]);
   }
-  return ring;
+  points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (a: number[], b: number[], c: number[]) =>
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  const chain = (input: number[][]) => {
+    const hull: number[][] = [];
+    for (const p of input) {
+      while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], p) <= 0) hull.pop();
+      hull.push(p);
+    }
+    return hull.slice(0, -1);
+  };
+  const hull = [...chain(points), ...chain([...points].reverse())];
+  return hull.length >= 3 ? [...hull, hull[0]] : [];
 }
 
 /**
