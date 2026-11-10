@@ -60,6 +60,15 @@ export function allIssueFiltersOn(): IssueFilters {
   };
 }
 
+/** Every value false: the second press of «Выбрать всё» clears all checkboxes. */
+export function allOff<T extends object>(values: T): T {
+  return Object.fromEntries(Object.keys(values).map((k) => [k, false])) as T;
+}
+
+export function allOn(values: object): boolean {
+  return Object.values(values).every(Boolean);
+}
+
 export function anyIssueFilter(filters: IssueFilters): boolean {
   return ISSUE_FILTERS.some((item) => filters[item.key]);
 }

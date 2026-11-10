@@ -142,6 +142,19 @@ export interface OrganizerResult {
   status: number;
   filename: string;
   message: string;
+  /** the server's reply with Russian labels */
+  fields?: { label: string; value: string }[];
+}
+
+/** One kind of netconvert message, interpreted for the user. */
+export interface CheckGroup {
+  key: string;
+  title: string;
+  hint: string;
+  severity: 'critical' | 'warning' | 'info';
+  count: number;
+  refs: { kind: Kind; id: number }[];
+  examples: string[];
 }
 
 export interface SumoResult {
@@ -152,6 +165,7 @@ export interface SumoResult {
   warning_count?: number;
   stats?: { edges: number; junctions: number; traffic_lights: number };
   message: string;
+  report?: { groups: CheckGroup[]; counts: { critical: number; warning: number; info: number } };
 }
 
 export type Selection = { kind: 'way' | 'node'; id: number } | null;

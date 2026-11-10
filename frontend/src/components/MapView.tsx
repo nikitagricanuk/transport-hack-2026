@@ -124,6 +124,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
   const draft = useRef<DraftPoint[]>([]);
   const mergeFirst = useRef<number | null>(null);
+  // building whose corners are editable: a click selects a building as a whole,
+  // a double click switches it to vertex editing until the selection changes
+  const vertexEdit = useRef<number | null>(null);
   const drag = useRef<{
     mode: 'node' | 'way';
     nodeId?: number;
@@ -730,7 +733,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       const line = p.geo?.ways.features.find((w) => w.properties.id === sel.id);
       const area = line ? undefined : p.geo?.areas.features.find((w) => w.properties.id === sel.id);
       const f = line ?? area;
-      if (f) {
+      const wholeBuilding = area?.properties.layer === 'building' && vertexEdit.current !== sel.id;
+      if (f && !wholeBuilding) {
         const coords = line ? line.geometry.coordinates : area!.geometry.coordinates[0];
         data = { type: 'FeatureCollection', features: coords.map((c, i) => ({
           type: 'Feature', geometry: { type: 'Point', coordinates: c },
@@ -746,6 +750,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const sel = props.selection;
     const wayId = sel?.kind === 'way' ? sel.id : 0;
     const nodeId = sel?.kind === 'node' ? sel.id : 0;
+    if (vertexEdit.current !== null && vertexEdit.current !== wayId) {
+      vertexEdit.current = null;
+      propsRef.current.onHint(null);  // drop the «Режим вершин» hint
+    }
     filterIf(map, 'way-selected', ['==', ['get', 'id'], wayId]);
     filterIf(map, 'way-selected-core', ['==', ['get', 'id'], wayId]);
     filterIf(map, 'node-selected', ['==', ['get', 'id'], nodeId]);
@@ -818,8 +826,13 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       const byLayer = (ids: string[]) => feats.find((f: MapGeoJSONFeature) => ids.includes(f.layer.id));
       const vert = byLayer(['verts']);
       const node = vert ?? byLayer(['pois', 'junctions']);
-      // the topmost area under the cursor wins, so a house over a lawn picks the house
-      const area = feats.find((f: MapGeoJSONFeature) => f.layer.id === 'buildings-fill' || f.layer.id === 'zones-fill');
+      // the topmost area under the cursor wins, so a house over a lawn picks the house;
+      // among buildings a click takes the whole building, Ctrl+click its part («корпус», building:part)
+      const areas = feats.filter((f: MapGeoJSONFeature) => f.layer.id === 'buildings-fill' || f.layer.id === 'zones-fill');
+      const isPart = (f: MapGeoJSONFeature) => !!propsRef.current.wayById(Number(f.properties.id))?.tags['building:part'];
+      const wantPart = e.originalEvent.ctrlKey || e.originalEvent.metaKey;
+      const area = areas.find((f) => (f.layer.id === 'buildings-fill' ? isPart(f) === wantPart : false))
+        ?? areas[0];
       const way = byLayer(['ways-hit']) ?? area;
       const join = byLayer(['join-handles']);
       return {
@@ -829,7 +842,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       };
     };
 
-    const finishDraft = () => {
+    const finishDraft = (closed = false) => {
       const pts = draft.current;
       draft.current = [];
       renderDraft();
@@ -837,7 +850,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       propsRef.current.onOp({ op: 'add_way', args: {
         points: pts.map((p) => (p.id !== undefined ? { id: p.id } : p.way_id !== undefined
           ? { lat: p.lat, lon: p.lon, way_id: p.way_id } : { lat: p.lat, lon: p.lon })),
-        tags: { highway: 'residential' } } }, { select: 'result' });
+        tags: { highway: 'residential' }, ...(closed ? { closed: true } : {}) } }, { select: 'result' });
     };
 
     const onClick = (e: MapMouseEvent) => {
@@ -922,18 +935,45 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
           } else if (wayId !== undefined && p.wayById(wayId)?.layer === 'road') {
             pt.way_id = wayId;
           }
-          draft.current = [...draft.current, pt];
-          renderDraft();
+          const prev = draft.current;
+          // a click on the point just placed (a second click in place) ends the road there
+          const last = prev[prev.length - 1];
+          if (last && pt.id !== undefined && last.id === pt.id) { finishDraft(); break; }
+          draft.current = [...prev, pt];
+          // reaching an existing point (a node of the graph, or the draft's own first point)
+          // ends the road: it is joined to that node and becomes one connected object
+          const first = prev[0];
+          const closesLoop = first !== undefined && prev.length >= 2
+            && Math.hypot(e.point.x - map.project([first.lon, first.lat]).x, e.point.y - map.project([first.lon, first.lat]).y) < HIT_PX;
+          if (closesLoop) {
+            draft.current = prev;
+            finishDraft(true);
+            p.onHint('Контур замкнут и завершён');
+          } else if (prev.length >= 1 && pt.id !== undefined) {
+            finishDraft();
+            p.onHint('Ребро присоединено к существующей точке и завершено');
+          } else renderDraft();
           break;
         }
       }
     };
 
     const onDbl = (e: MapMouseEvent) => {
-      if (propsRef.current.tool === 'way') {
+      const p = propsRef.current;
+      if (p.tool === 'way') {
         e.preventDefault();
         finishDraft();
+        return;
       }
+      if (p.tool !== 'select') return;
+      // double click on a building: edit its corners (vector mode)
+      const { wayId } = pick(e);
+      if (wayId === undefined || p.wayById(wayId)?.layer !== 'building') return;
+      e.preventDefault();
+      vertexEdit.current = wayId;
+      p.onSelect({ kind: 'way', id: wayId });
+      updateVerts();
+      p.onHint('Режим вершин: перетаскивайте точки здания · клик мимо или Esc — выход');
     };
 
     const onMove = (e: MapMouseEvent) => {
@@ -965,8 +1005,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         coords: coords.map((c) => [...c]),
         idx: nodes.flatMap((n, i) => (moving(n) ? [i] : [])),
       });
-      const vertexDrag = nodeId !== undefined && (
-        (p.selection?.kind === 'way' && p.wayById(p.selection.id)?.nodes.includes(nodeId)) ||
+      // a selected building moves as a whole until a double click turns on its corners
+      const selWay = p.selection?.kind === 'way' ? p.wayById(p.selection.id) : undefined;
+      const cornersLocked = selWay?.layer === 'building' && vertexEdit.current !== selWay.id;
+      const vertexDrag = nodeId !== undefined && !cornersLocked && (
+        (selWay?.nodes.includes(nodeId)) ||
         (p.selection?.kind === 'node' && p.selection.id === nodeId));
       if (vertexDrag) {
         e.preventDefault();

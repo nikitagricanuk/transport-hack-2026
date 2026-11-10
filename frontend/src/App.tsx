@@ -8,6 +8,8 @@ import { ChangesPanel, ExportCheck, LoadPanel, ReportModal } from './components/
 import { AnalyticsPanel, BasemapControls, TasksModal, type BaseMap, type ImageOverlay } from './components/Extras';
 import StartScreen from './components/StartScreen';
 import { FixReview, type FixReviewState } from './components/FixReview';
+import { OrganizerReport, SumoReport } from './components/CheckResults';
+import { MenuBar, Splitter, useLayout } from './components/WindowLayout';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
   ReportData, RouteDetail, Selection, SumoResult, Tool, ValidationResult, WayProps,
@@ -17,7 +19,7 @@ import { sharedHighwayNodes } from './utils/joins';
 import { saveName, savedName, useCollab, type CollabMessage } from './utils/collab';
 import { isDraftPointKeyClaimed, isFullscreenToggle, shouldDeleteSelection } from './utils/keys';
 import {
-  DEFAULT_LAYERS, allIssueFiltersOn, allLayersOn, applyLayerChange, defaultIssueFilters, issueVisible,
+  DEFAULT_LAYERS, allIssueFiltersOn, allLayersOn, allOff, allOn, applyLayerChange, defaultIssueFilters, issueVisible,
   type IssueFilterKey,
 } from './utils/layers';
 import { TEMPLATES, templateOps, type RoadTemplate } from './utils/osm';
@@ -99,6 +101,8 @@ export default function App() {
   const [sumo, setSumo] = useState<SumoResult | 'running' | null>(null);
   const [organizer, setOrganizer] = useState<OrganizerResult | 'running' | null>(null);
   const [booting, setBooting] = useState(true);
+  // panels shown/hidden from the «Окно» menu and their dragged sizes
+  const win = useLayout();
   const [stale, setStale] = useState(false);
   const mapRef = useRef<MapHandle>(null);
 
@@ -563,16 +567,25 @@ export default function App() {
     setLayers(applied.layers);
     setIssueFilters(applied.filters);
   }, [layers, issueFilters]);
+  // «Выбрать всё» toggles: a second press, with everything already on, clears every checkbox
   const onSelectAllLayers = useCallback(() => {
-    onLayers(allLayersOn());
-  }, [onLayers]);
+    if (allOn(layers)) {
+      setLayers(allOff(layers));
+      setIssueFilters(allOff(issueFilters));
+    } else onLayers(allLayersOn());
+  }, [onLayers, layers, issueFilters]);
   const onIssueFilter = useCallback((key: IssueFilterKey) => {
     setIssueFilters((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
   const onSelectAllIssues = useCallback(() => {
+    if (allOn(issueFilters)) {
+      setIssueFilters(allOff(issueFilters));
+      setLayers((prev) => ({ ...prev, issues: false }));
+      return;
+    }
     setIssueFilters(allIssueFiltersOn());
     setLayers((prev) => ({ ...prev, issues: true }));
-  }, []);
+  }, [issueFilters]);
   const mapIssues = useMemo(() => {
     if (!layers.issues || !validation) return NO_ISSUES;
     const shown = validation.issues.filter((issue) => issueVisible(issueFilters, issue.category));
@@ -681,8 +694,8 @@ export default function App() {
     try {
       setOrganizer(await api.organizer(doc.doc_id));
     } catch (e) {
-      setOrganizer(null);
-      setError((e as Error).message);
+      // the server already explains the rejection in Russian; show it in the dialog, not a toast
+      setOrganizer({ ok: false, status: 0, filename: '', message: (e as Error).message });
     }
   };
 
@@ -729,8 +742,9 @@ export default function App() {
   const changes = Object.values(doc.diff).reduce((s, d) => s + d.added + d.modified + d.deleted, 0);
 
   return (
-    <div className="app">
+    <div className="app" style={win.style}>
       {versionNotice}
+      <MenuBar layout={win.layout} onToggle={win.toggle} onReset={win.reset} />
       <header className="top">
         <div className="brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -799,12 +813,17 @@ export default function App() {
       </header>
 
       <div className="body">
-        {mode === 'edit' && <ToolRail tool={tool} onTool={setTool} />}
-        <LayersPanel layers={layers} onLayers={onLayers} onSelectAll={onSelectAllLayers}
-          baseOpacity={baseOpacity} onBaseOpacity={setBaseOpacity}
-          canApplyTemplate={selectedWay?.layer === 'road'} onTemplate={applyTemplate}
-          drawOrder={drawOrder} onDrawOrder={setDrawOrder}
-          basemap={<BasemapControls base={base} onBase={setBase} overlay={overlay} onOverlay={setOverlay} onOverlayFile={onOverlayFile} />} />
+        {mode === 'edit' && win.layout.visible.tools && <ToolRail tool={tool} onTool={setTool} />}
+        {win.layout.visible.left && (
+          <>
+            <LayersPanel layers={layers} onLayers={onLayers} onSelectAll={onSelectAllLayers}
+              baseOpacity={baseOpacity} onBaseOpacity={setBaseOpacity}
+              canApplyTemplate={selectedWay?.layer === 'road'} onTemplate={applyTemplate}
+              drawOrder={drawOrder} onDrawOrder={setDrawOrder}
+              basemap={<BasemapControls base={base} onBase={setBase} overlay={overlay} onOverlay={setOverlay} onOverlayFile={onOverlayFile} />} />
+            <Splitter panel="left" value={win.layout.size.left} onResize={(v) => win.resize('left', v)} label="Ширина панели слоёв" />
+          </>
+        )}
         <main className="center">
           <div className="map-wrap">
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
@@ -824,6 +843,11 @@ export default function App() {
             )}
             {error && <div className="toast error" role="alert">{error}<button className="icon-btn" aria-label="Закрыть" onClick={() => setError(null)}>×</button></div>}
           </div>
+          {win.layout.visible.bottom && (
+            <Splitter panel="bottom" value={win.layout.size.bottom} onResize={(v) => win.resize('bottom', v)}
+              label="Высота нижней панели" />
+          )}
+          {win.layout.visible.bottom && (
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
             validating={validating} onShow={showIssue} onFix={onFix}
             issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}
@@ -837,8 +861,13 @@ export default function App() {
               <ChangesPanel data={changesData} onShow={showElement} overlay={changesOverlay} onOverlay={setChangesOverlay} />
             )}
           </BottomPanel>
+          )}
         </main>
-        {mode === 'analytics' && !selection ? (
+        {win.layout.visible.right && (
+          <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
+            label="Ширина панели свойств" />
+        )}
+        {!win.layout.visible.right ? null : mode === 'analytics' && !selection ? (
           <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
             onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
         ) : (
@@ -869,12 +898,7 @@ export default function App() {
         <div className="modal-back" onClick={() => organizer !== 'running' && setOrganizer(null)}>
           <div className="modal" role="dialog" aria-label="Отправка на сервер проверки" onClick={(e) => e.stopPropagation()}>
             <h2>Сервер проверки</h2>
-            {organizer === 'running' ? <p>Отправка .osm…</p> : (
-              <>
-                <p className={organizer.ok ? 'good' : 'bad'}>{organizer.ok ? `Принято: ${organizer.filename}` : 'Сервер отклонил файл'}</p>
-                {organizer.message && <pre className="log">{organizer.message}</pre>}
-              </>
-            )}
+            {organizer === 'running' ? <p>Отправка .osm…</p> : <OrganizerReport result={organizer} />}
             {organizer !== 'running' && <button className="btn" onClick={() => setOrganizer(null)}>Закрыть</button>}
           </div>
         </div>
@@ -895,14 +919,8 @@ export default function App() {
         <div className="modal-back" onClick={() => sumo !== 'running' && setSumo(null)}>
           <div className="modal" role="dialog" aria-label="Результат SUMO netconvert" onClick={(e) => e.stopPropagation()}>
             <h2>Локальная проверка SUMO</h2>
-            {sumo === 'running' ? <p>netconvert работает…</p> : !sumo.available ? <p>{sumo.message}</p> : (
-              <>
-                <p className={sumo.ok ? 'good' : 'bad'}>{sumo.ok ? 'Сеть построена без ошибок' : 'netconvert сообщил об ошибках'}</p>
-                {sumo.stats && <p className="mono">рёбер {sumo.stats.edges} · перекрёстков {sumo.stats.junctions} · светофоров {sumo.stats.traffic_lights}</p>}
-                {sumo.errors.length > 0 && <pre className="log bad">{sumo.errors.join('\n')}</pre>}
-                <p className="muted">Предупреждений: {sumo.warning_count ?? sumo.warnings.length}</p>
-                {sumo.warnings.length > 0 && <pre className="log">{sumo.warnings.slice(0, 60).join('\n')}</pre>}
-              </>
+            {sumo === 'running' ? <p>netconvert строит сеть SUMO…</p> : !sumo.available ? <p>{sumo.message}</p> : (
+              <SumoReport sumo={sumo} onShow={(kind, id) => { setSumo(null); showElement(kind, id); }} />
             )}
             {sumo !== 'running' && <button className="btn" onClick={() => setSumo(null)}>Закрыть</button>}
           </div>
