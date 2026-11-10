@@ -22,7 +22,7 @@ export function laneWidthFor(tags: Record<string, string>, lanes: number): numbe
   return LANE_WIDTH_BY_CLASS[base] ?? LANE_W;
 }
 /** From this zoom roads are drawn at their real width with lanes and markings. */
-export const LANE_MINZOOM = 17;
+export const LANE_MINZOOM = 15;
 
 const M_PER_DEG_LAT = 110_540;
 const M_PER_DEG_LON_EQ = 111_320;

@@ -9,6 +9,7 @@ import { LANE_MINZOOM, buildLanes, laneSplit, laneWidthFor, type LaneRoad } from
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
+import { buildTrees } from '../utils/scenery';
 import { defaultCamera } from '../utils/view';
 
 export interface MapHandle {
@@ -312,21 +313,33 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview', 'analysis']) {
+        'trees', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview', 'analysis']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
       // translucent plans: the base map stays readable under buildings and zones
       map.addLayer({ id: 'zones-fill', type: 'fill', source: 'areas', filter: ['!=', ['get', 'layer'], 'building'],
         layout: { 'fill-sort-key': ['coalesce', ['get', 'z'], 0] },
-        paint: { 'fill-color': '#9CCB86', 'fill-opacity': 0.45 } });
+        paint: { 'fill-color': ['match', ['coalesce', ['get', 'landuse', ['get', 'tags']], ''], 'residential', '#D9D5CB', 'industrial', '#CDCBD4', 'commercial', '#E2D3CB', 'forest', '#84AB79', '#9CCB86'], 'fill-opacity': 0.45 } });
       map.addLayer({ id: 'zones-line', type: 'line', source: 'areas', filter: ['!=', ['get', 'layer'], 'building'],
         paint: { 'line-color': '#6A9E55', 'line-width': 1, 'line-opacity': 0.8 } });
+      map.addLayer({ id: 'tree-shadows', type: 'circle', source: 'trees', minzoom: 14,
+        paint: { 'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, 8, 21, 40],
+          'circle-color': '#284735', 'circle-opacity': 0.18, 'circle-translate': [2, 3], 'circle-pitch-alignment': 'map' } });
+      map.addLayer({ id: 'tree-canopies', type: 'circle', source: 'trees', minzoom: 14,
+        paint: { 'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, ['*', 6, ['get', 'size']], 21, ['*', 32, ['get', 'size']]],
+          'circle-color': ['match', ['get', 'shade'], 0, '#689665', 1, '#80A76E', '#527E59'],
+          'circle-stroke-color': '#496F4C', 'circle-stroke-width': 0.5, 'circle-opacity': 0.85, 'circle-pitch-alignment': 'map' } });
       map.addLayer({ id: 'buildings-fill', type: 'fill', source: 'areas', filter: ['==', ['get', 'layer'], 'building'],
         layout: { 'fill-sort-key': ['coalesce', ['get', 'z'], 0] },
         paint: { 'fill-color': '#B8B2A6', 'fill-opacity': 0.6 } });
       map.addLayer({ id: 'buildings-line', type: 'line', source: 'areas', filter: ['==', ['get', 'layer'], 'building'],
         paint: { 'line-color': '#8A8273', 'line-width': 1, 'line-opacity': 0.9 } });
+      map.addLayer({ id: 'building-numbers', type: 'symbol', source: 'areas', minzoom: 15,
+        filter: ['==', ['get', 'layer'], 'building'],
+        layout: { 'text-field': ['coalesce', ['get', 'addr:housenumber', ['get', 'tags']], ''],
+          'text-font': ['Open Sans Regular'], 'text-size': 11 },
+        paint: { 'text-color': '#565C61', 'text-halo-color': '#F4F2EC', 'text-halo-width': 1.2 } });
       map.addLayer({ id: 'area-selected', type: 'line', source: 'areas', filter: ['==', ['get', 'id'], 0],
         paint: { 'line-color': '#2563EB', 'line-width': 2.5 } });
       for (const style of PATH_STYLES) {
@@ -525,6 +538,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         src.setData(geo[id]);
       }
     }
+    (map.getSource('trees') as GeoJSONSource).setData(buildTrees(geo));
     rendered.current = geo;
     clearDrag();
     drawPeerSelections();
@@ -711,8 +725,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const map = mapRef.current;
     if (!ready || !map) return;
     const ids: Record<DrawGroup, string[]> = {
-      zones: ['zones-fill', 'zones-line'],
-      buildings: ['buildings-fill', 'buildings-line'],
+      zones: ['zones-fill', 'zones-line', 'tree-shadows', 'tree-canopies'],
+      buildings: ['buildings-fill', 'buildings-line', 'building-numbers'],
       paths: PATH_LAYER_IDS,
       roads: ['road-casing', 'road-fill', 'road-link', 'lane-surface', 'lane-marks', 'lane-dashes', 'lane-arrows', 'oneway', 'road-label'],
       rail: ['rail'],
@@ -832,7 +846,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       'lane-surface', 'lane-marks', 'lane-dashes', 'lane-arrows'], L.roads);
     showIf(map, PATH_LAYER_IDS, L.paths);
     showIf(map, ['rail'], L.rail);
-    showIf(map, ['zones-fill', 'zones-line', 'buildings-fill', 'buildings-line'], L.buildings);
+    showIf(map, ['zones-fill', 'zones-line', 'tree-shadows', 'tree-canopies', 'buildings-fill', 'buildings-line', 'building-numbers'], L.buildings);
     showIf(map, ['issues'], L.issues);
     const cats = [L.signals && 'signal', L.crossings && 'crossing', L.stops && 'stop', 'tagged'].filter(Boolean);
     filterIf(map, 'pois', ['in', ['get', 'category'], ['literal', cats]]);
