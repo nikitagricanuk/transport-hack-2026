@@ -49,7 +49,7 @@ export function StopPanel({ docId, nodeId, rev, openRoute, onOpenRoute, onChange
       <div className="kpis">
         <div><b>{info.routes.length}</b><span>маршрутов</span></div>
         <div><b>{fmt(info.vehicles_per_hour)}</b><span>авт./ч на остановке</span></div>
-        <div><b>{fmt(info.residents_400m)}</b><span>жителей в 400 м</span></div>
+        <div><b>{fmt(info.residents_400m)}</b><span>жителей в 400 м — оценка, допущение (30 м²/чел.)</span></div>
       </div>
       {info.routes.length === 0 && <span className="muted small">В файле нет маршрутов (relation route) через эту остановку.</span>}
       <div className="route-chips" role="list" aria-label="Маршруты">

@@ -1,3 +1,5 @@
+import type { PtResult, PtRoute } from './components/PtTools';
+import type { AnalysisResult } from './utils/networkAnalysis';
 import type {
   ChangesResult, Comparison, DocState, FixPreview, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
   SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
@@ -137,6 +139,11 @@ export interface AdapterComparison {
 }
 
 export const api = {
+  ptParams: (docId: string) => request<{routes: PtRoute[]}>(`/api/documents/${docId}/analysis/pt-params`),
+  analysisPt: (docId: string, body: unknown) => request<PtResult>(`/api/documents/${docId}/analysis/pt-isochrone`, json(body)),
+  analysisRoute: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/route`, json(body)),
+  analysisCatchment: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/catchment`, json(body)),
+  analysisIsochrone: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/isochrone`, json(body)),
   adapters: (docId: string, wayId: number, signal: AbortSignal) =>
     request<{ adapters: AdapterComparison }>(`/api/documents/${docId}/elements/way/${wayId}`, { signal })
       .then(({ adapters }) => adapters),
@@ -152,7 +159,7 @@ export const api = {
     request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label, reason })),
   /** «Править всё»: safe fixes and disputed issues; applies nothing */
   fixAllPlan: (docId: string) => request<unknown>(`/api/documents/${docId}/fix-all`),
-  fixPreview: (docId: string, op: Op) =>
+  fixPreview: (docId: string, op: Op & { probe?: unknown }) =>
     request<FixPreview>(`/api/documents/${docId}/fix-preview`, json(op)),
   batch: (docId: string, ops: Op[], label?: string) =>
     request<OpResponse>(`/api/documents/${docId}/batch`, json({ ops, label })),

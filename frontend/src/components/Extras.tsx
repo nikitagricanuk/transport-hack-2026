@@ -1,3 +1,4 @@
+import { AnalysisTools, type AnalysisProps } from './AnalysisTools';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import type { HistoryEntry, Kind, LoadState, OdMatrix, Selection, Task, TaskCriterion, TaskResult } from '../types';
@@ -33,7 +34,9 @@ const CLASS_RU: Record<string, string> = {
   residential: 'Жилые', service: 'Проезды', unclassified: 'Прочие', living_street: 'Жилые зоны',
 };
 
-export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onReopen, onOpenTasks }: {
+export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onReopen, onOpenTasks, analysis, active }: {
+  analysis: AnalysisProps;
+  active: boolean;
   docId: string;
   rev: number;
   load: LoadState | null;
@@ -42,14 +45,17 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
   onReopen: (wayId: number) => void;
   onOpenTasks: () => void;
 }) {
+  const [opened, setOpened] = useState(active);
+  useEffect(() => { if (active) setOpened(true); }, [active]);
   const [od, setOd] = useState<OdMatrix | null>(null);
   const [grid, setGrid] = useState(3);
   const [view, setView] = useState<'trips' | 'shares' | 'minutes'>('trips');
   useEffect(() => {
+    if (!active) return;
     let alive = true;
     api.od(docId, grid).then((m) => alive && setOd(m)).catch(() => undefined);
     return () => { alive = false; };
-  }, [docId, grid, rev]);
+  }, [docId, grid, rev, active]);
 
   const flows = useMemo(() => {
     if (!load) return null;
@@ -65,14 +71,15 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
     return { classes, top, transit, missing };
   }, [load]);
 
-  if (!load || !flows) return <aside className="inspector empty"><p>Расчёт аналитики…</p></aside>;
+  if (!load || !flows) return <aside className="inspector empty" style={{ display: active ? undefined : 'none' }}><p>Расчёт аналитики…</p></aside>;
   const s = load.summary;
   const matrix = od ? (view === 'trips' ? od.trips : view === 'shares' ? od.shares : od.minutes) : [];
   const maxCell = Math.max(1, ...matrix.flat().map((v) => (typeof v === 'number' ? v : 0)));
   return (
-    <aside className="inspector analytics" aria-label="Аналитика сети">
+    <aside className="inspector analytics" aria-label="Аналитика сети" style={{ display: active ? undefined : 'none' }}>
       <div className="insp-head"><span className="badge">АНАЛИТИКА</span><h2>Потоки и сценарии</h2></div>
       <div className="insp-body stack16">
+        {opened && <AnalysisTools {...analysis} />}
         <section className="stack10">
           <b>Сценарий спроса</b>
           <IntensityPresets current={load.multiplier} onPick={onMultiplier} />

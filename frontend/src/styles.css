@@ -403,3 +403,10 @@ input[type="checkbox"]:disabled { cursor: default; }
 .fix-all-row { display: flex; gap: 10px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
 .fix-all-row:hover { background: #18202a; }
 .fix-all-row.disputed { cursor: default; }
+
+.analysis-tools [role="tablist"] { flex-wrap: wrap; }
+.analysis-tools input[type="number"] { max-width: 90px; }
+.analysis-tools table { width: 100%; border-collapse: collapse; }
+.analysis-tools td, .analysis-tools th { padding: 5px 3px; text-align: left; }
+.analysis-tools td { border-top: 1px solid #334155; }
+.analysis-tools > .row { flex-wrap: wrap; }
