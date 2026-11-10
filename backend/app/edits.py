@@ -321,8 +321,11 @@ def op_insert_node(doc, tx, way_id: int, lat: float, lon: float, tags: dict | No
     return {"id": _insert_on_way(doc, tx, int(way_id), float(lat), float(lon), tags)}
 
 
-def op_add_way(doc, tx, points: list[dict], tags: dict | None = None):
-    """points: [{"id": node_id} | {"lat":..,"lon":..} | {"lat":..,"lon":..,"way_id":..}]"""
+def op_add_way(doc, tx, points: list[dict], tags: dict | None = None, closed: bool = False):
+    """points: [{"id": node_id} | {"lat":..,"lon":..} | {"lat":..,"lon":..,"way_id":..}]
+
+    closed: the road returns to its first point (a loop drawn back onto where it started).
+    """
     if len(points) < 2:
         raise OpError("ребро должно содержать минимум две точки")
     new_tags = _clean_tags(tags or {"highway": "residential"})
@@ -345,6 +348,11 @@ def op_add_way(doc, tx, points: list[dict], tags: dict | None = None):
     refs = _dedupe_consecutive(refs)
     if len(set(refs)) < 2:
         raise OpError("ребро должно соединять минимум два разных узла")
+    if closed:
+        if len(set(refs)) < 3:
+            raise OpError("замкнутое ребро должно содержать минимум три разных узла")
+        if refs[-1] != refs[0]:
+            refs.append(refs[0])
     wid = doc.new_id()
     tx.touch("way", wid)
     doc.ways[wid] = Way(id=wid, nodes=refs, tags=new_tags)

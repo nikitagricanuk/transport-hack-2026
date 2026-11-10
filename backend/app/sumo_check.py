@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .check_report import interpret_netconvert
+
 
 def find_netconvert() -> str | None:
     exe = shutil.which("netconvert")
@@ -95,6 +97,7 @@ def run_netconvert(osm_xml: bytes, timeout: int = 180) -> dict:
                 "junctions": len(re.findall(r"<junction ", text)),
                 "traffic_lights": len(re.findall(r"<tlLogic ", text)),
             }
-        return {"available": True, "ok": proc.returncode == 0 and not errors, "returncode": proc.returncode,
+        return {"available": True, "ok": proc.returncode == 0 and not errors,
+                "report": interpret_netconvert(errors, warnings), "returncode": proc.returncode,
                 "errors": errors[:100], "warnings": warnings[:200], "warning_count": len(warnings),
                 "stats": stats, "message": "ok" if proc.returncode == 0 else "netconvert завершился с ошибкой"}

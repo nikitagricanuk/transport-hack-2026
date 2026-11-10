@@ -346,3 +346,49 @@ li.fail .crit-mark { color: var(--bad); }
 .legend.added { color: #22C55E; }
 .legend.deleted { color: #EF4444; }
 .legend.modified { color: #3B82F6; }
+
+/* larger checkboxes everywhere (the browser default ~13px was hard to hit) */
+input[type="checkbox"] { width: 18px; height: 18px; min-width: 18px; margin: 0; cursor: pointer; accent-color: #3B82F6; vertical-align: middle; }
+input[type="checkbox"]:disabled { cursor: default; }
+
+/* interpreted SUMO / organiser check results */
+.check-groups { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow: auto; }
+.check-group { padding: 8px 10px; border-radius: 8px; border: 1px solid #263241; background: #111823; }
+.check-group.critical { border-color: #7f1d1d; }
+.check-group.warning { border-color: #78350f; }
+.check-group p { margin: 4px 0 0; }
+.check-sev { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #1e293b; color: #cbd5e1; white-space: nowrap; }
+.check-sev.critical { background: #7f1d1d; color: #fecaca; }
+.check-sev.warning { background: #78350f; color: #fde68a; }
+.check-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
+.kv { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+.kv-row { display: grid; grid-template-columns: 160px 1fr; gap: 8px; }
+.kv-row dd { margin: 0; word-break: break-word; }
+
+/* tag editor with Russian names: name on top, OSM key in small print */
+.tag-row { grid-template-columns: 140px minmax(0, 1fr) 28px 28px; }
+.tag-new { grid-template-columns: 140px minmax(0, 1fr) 28px; }
+.tag-key { font-family: inherit; font-size: 12px; color: #cfe0ff; display: flex; flex-direction: column; line-height: 1.2; white-space: normal; }
+.tag-osm { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-row select { font-size: 12px; padding: 4px 6px; min-width: 0; }
+.insp-body.read-only .tags select { pointer-events: none; opacity: .6; }
+
+/* window layout: menu bar, panel sizes from the splitters, hidden panels */
+.menubar { height: 28px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding: 0 8px; background: #0b1017; border-bottom: 1px solid var(--line); font-size: 13px; position: relative; z-index: 20; }
+.menu { position: relative; }
+.menu-title { border: 0; background: transparent; color: #cbd5e1; padding: 4px 10px; border-radius: 5px; cursor: pointer; }
+.menu-title:hover, .menu-title[aria-expanded='true'] { background: #1e2631; color: #fff; }
+.menu-list { position: absolute; top: calc(100% + 2px); left: 0; min-width: 260px; display: flex; flex-direction: column; padding: 4px; background: #121923; border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.45); }
+.menu-item { display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: #e2e8f0; text-align: left; padding: 6px 10px; border-radius: 5px; cursor: pointer; }
+.menu-item:hover { background: var(--accent); color: #fff; }
+.menu-check { width: 14px; display: inline-block; text-align: center; }
+.menu-sep { height: 1px; background: var(--line); margin: 4px 0; }
+.menubar-hint { margin-left: 12px; }
+.left { width: var(--left-w, 248px); }
+.inspector { width: var(--right-w, 340px); }
+.bottom { height: var(--bottom-h, 260px); }
+.inspector, .left { border-left: 0; border-right: 0; }
+.splitter { flex-shrink: 0; background: var(--line); position: relative; z-index: 2; touch-action: none; }
+.splitter.vertical { width: 4px; cursor: col-resize; }
+.splitter.horizontal { height: 4px; cursor: row-resize; }
+.splitter:hover, .splitter:focus-visible, .splitter:active { background: var(--accent); outline: none; }

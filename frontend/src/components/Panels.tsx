@@ -3,7 +3,7 @@ import type { DrawGroup } from './MapView';
 import { HistoryList } from './Extras';
 import type { Kind } from '../types';
 import type { Fix, HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
-import { ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, issueVisible } from '../utils/layers';
+import { ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, allOn, issueVisible } from '../utils/layers';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
 
 // ------------------------------------------------------------------ tools
@@ -20,7 +20,7 @@ export const TOOLS: { id: Tool; title: string; key: string; d: string }[] = [
 
 export const TOOL_HINTS: Record<Tool, string> = {
   select: 'Клик — выбрать · перетащите вершину или весь объект · оранжевая точка разделяет дороги',
-  way: 'Клик — точка (к узлу/ребру прилипает) · двойной клик или Enter — завершить · Backspace — шаг назад · Esc — отмена',
+  way: 'Клик — точка (к узлу/ребру прилипает) · клик по существующей точке, двойной клик или Enter — завершить · Backspace — шаг назад · Esc — отмена',
   node: 'Клик по ребру — вставить узел; по пустому месту — отдельный узел',
   split: 'Клик по внутреннему узлу — разделить ребро',
   merge: 'Клик по первому узлу, затем по второму — склеить',
@@ -73,7 +73,7 @@ export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBase
     <aside className="left" aria-label="Слои и шаблоны">
       <h3 className="section">Слои</h3>
       <div className="layer-actions">
-        <button type="button" className="btn small" onClick={onSelectAll}>Выбрать всё</button>
+        <button type="button" className="btn small" onClick={onSelectAll}>{allOn(layers) ? 'Снять всё' : 'Выбрать всё'}</button>
       </div>
       <div className="layer-list">
         {LAYERS.map((l) => (
@@ -174,7 +174,7 @@ export const BottomPanel = memo(function BottomPanel({
       </div>
       {tab === 'issues' && (
         <div className="issue-filters" role="group" aria-label="Фильтры ошибок">
-          <button type="button" className="btn small" onClick={onSelectAllIssues}>Выбрать всё</button>
+          <button type="button" className="btn small" onClick={onSelectAllIssues}>{allOn(issueFilters) ? 'Снять всё' : 'Выбрать всё'}</button>
           {ISSUE_FILTERS.map((item) => (
             <label key={item.key} className="check">
               <input type="checkbox" checked={issueFilters[item.key]}

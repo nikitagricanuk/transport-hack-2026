@@ -21,6 +21,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from .check_report import interpret_organizer, organizer_error_text
+
 ORGANIZER_URL = "http://innerlogistics.lovethosetrains.com:7078"
 _TEAM_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -94,12 +96,12 @@ def upload_osm(osm_bytes: bytes, token: str, team: str, base_url: str) -> dict:
         raise OrganizerError(502, f"сервер проверки недоступен: {exc}") from exc
     text = raw.decode("utf-8", errors="replace").strip()
     if status >= 400:
-        detail = text or f"HTTP {status}"
         # Keep the organisers' status when it is already a client error (bad token, bad file).
-        raise OrganizerError(status if 400 <= status < 500 else 502, f"сервер проверки: {detail[:1500]}")
+        raise OrganizerError(status if 400 <= status < 500 else 502, organizer_error_text(status, text[:1500]))
     return {
         "ok": True,
         "status": status,
         "filename": filename,
         "message": text or "Файл принят, пайплайн MatSim → SUMO → Webots поставлен в очередь.",
+        "fields": interpret_organizer(text),
     }

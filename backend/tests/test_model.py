@@ -72,6 +72,14 @@ def test_add_way_and_new_ids_are_renumbered(doc):
     assert doc.diff_summary()["way"]["added"] == 1
 
 
+def test_add_way_closed_returns_to_its_first_new_node(doc):
+    h = History()
+    pts = [{"lat": 52.2830, "lon": 104.2830}, {"lat": 52.2832, "lon": 104.2830}, {"lat": 52.2832, "lon": 104.2834}]
+    wid = apply_op(doc, h, "add_way", {"points": pts, "tags": {"highway": "service"}, "closed": True})["id"]
+    nodes = doc.ways[wid].nodes
+    assert len(nodes) == 4 and nodes[0] == nodes[-1] and len(set(nodes)) == 3
+
+
 def test_insert_split_merge(doc):
     h = History()
     nid = apply_op(doc, h, "insert_node", {"way_id": 100, "lat": 52.28001, "lon": 104.2815})["id"]

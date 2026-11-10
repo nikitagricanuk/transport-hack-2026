@@ -6,6 +6,8 @@ import {
   ISSUE_FILTERS,
   allIssueFiltersOn,
   allLayersOn,
+  allOff,
+  allOn,
   applyLayerChange,
   defaultIssueFilters,
   issueVisible,
@@ -66,4 +68,13 @@ test('a non-road layer toggle leaves error filters alone', () => {
   assert.equal(next.layers.buildings, false);
   assert.equal(next.layers.roads, true);
   assert.deepEqual(next.filters, filters);
+});
+
+test('second «select all» clears every checkbox', () => {
+  const on = allLayersOn();
+  assert.equal(allOn(on), true);
+  const off = allOff(on);
+  for (const value of Object.values(off)) assert.equal(value, false);
+  assert.equal(allOn(defaultIssueFilters()), false);
+  assert.equal(allOn(allIssueFiltersOn()), true);
 });
