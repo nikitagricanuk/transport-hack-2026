@@ -1400,10 +1400,12 @@ def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
     off_b = bw * lw / 2 + float(median_m) / 2
 
     index = doc.node_way_index()
-    anchors = {w.nodes[0], w.nodes[-1]} | {
-        n for n in w.nodes[1:-1] if any(x != w.id and "highway" in doc.ways[x].tags for x in index.get(n, []))}
     proj = _proj(doc)
     pts = [proj.to_xy(doc.nodes[n].lat, doc.nodes[n].lon) for n in w.nodes]
+
+    def xy(nid: int) -> tuple[float, float]:
+        n = doc.nodes[nid]
+        return proj.to_xy(n.lat, n.lon)
 
     def normal(i: int) -> tuple[float, float]:   # right-hand unit normal at vertex i
         a, b = pts[max(0, i - 1)], pts[min(len(pts) - 1, i + 1)]
@@ -1411,20 +1413,112 @@ def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
         length = (dx * dx + dy * dy) ** 0.5 or 1.0
         return dy / length, -dx / length
 
+    def others(nid: int) -> list[Way]:
+        return [doc.ways[x] for x in index.get(nid, []) if x != w.id and x in doc.ways and "highway" in doc.ways[x].tags]
+
+    def collinear(i: int, other: Way) -> bool:
+        """`other` goes on from this end of the road in roughly the same direction (within ~35°)."""
+        if i not in (0, len(w.nodes) - 1) or w.nodes[i] not in (other.nodes[0], other.nodes[-1]):
+            return False
+        k = other.nodes.index(w.nodes[i])
+        nb = other.nodes[k + 1] if k == 0 and len(other.nodes) > 1 else other.nodes[k - 1] if k > 0 else None
+        if nb is None or nb not in doc.nodes:
+            return False
+        inner = pts[1] if i == 0 else pts[-2]
+        ax, ay = pts[i][0] - inner[0], pts[i][1] - inner[1]          # along the road, outwards
+        bx, by = xy(nb)[0] - pts[i][0], xy(nb)[1] - pts[i][1]        # into the other way
+        la, lb = (ax * ax + ay * ay) ** 0.5 or 1.0, (bx * bx + by * by) ** 0.5 or 1.0
+        return (ax * bx + ay * by) / (la * lb) > 0.82                  # within ~35°
+
+    # a stop or another non-restriction relation member keeps its node; turn restrictions are
+    # carried over to the new junction nodes below
+    pinned = {m.ref for rel in doc.relations.values() if not _is_restriction(rel.tags)
+              for m in rel.members if m.type == "node"}
+    junctions = {i for i, n in enumerate(w.nodes) if others(n) or i in (0, len(w.nodes) - 1)}
+    # Shared points stay only where the road merges back into an undivided street, at a
+    # dead end, or where a relation (a turn restriction's via, a stop) pins the node.
+    # Everywhere else each carriageway gets its own junction on the crossing road.
+    merge = {i for i in junctions
+             if not others(w.nodes[i]) or w.nodes[i] in pinned
+             or any(direction(o.tags) == 0 and collinear(i, o) for o in others(w.nodes[i]))}
+
     right: list[int] = []
     left: list[int] = []
+    split_at: dict[int, tuple[int, int]] = {}   # crossing node → (its right, left copies)
     for i, nid in enumerate(w.nodes):
-        if nid in anchors:
+        if i in merge:
             right.append(nid)
             left.append(nid)
             continue
         nx, ny = normal(i)
         node_tags = doc.nodes[nid].tags
+        made: list[int] = []
         for side, off, out in ((1, off_f, right), (-1, off_b, left)):
-            lat, lon = proj.to_latlon(pts[i][0] + side * nx * off, pts[i][1] + side * ny * off)
-            out.append(_create_node(doc, tx, lat, lon, dict(node_tags)).id)
+            px, py = pts[i][0] + side * nx * off, pts[i][1] + side * ny * off
+            if i in junctions:
+                # put the junction on the crossing road itself where it reaches that side
+                for o in others(nid):
+                    k = o.nodes.index(nid)
+                    for j in (k - 1, k + 1):
+                        if 0 <= j < len(o.nodes) and o.nodes[j] in doc.nodes:
+                            vx, vy = xy(o.nodes[j])[0] - pts[i][0], xy(o.nodes[j])[1] - pts[i][1]
+                            lat_off = vx * nx + vy * ny
+                            if lat_off * side > 0 and abs(lat_off) > off * 1.1:
+                                frac = side * off / lat_off
+                                px, py = pts[i][0] + vx * frac, pts[i][1] + vy * frac
+                                break
+                    else:
+                        continue
+                    break
+            lat, lon = proj.to_latlon(px, py)
+            node = _create_node(doc, tx, lat, lon, dict(node_tags)).id
+            out.append(node)
+            made.append(node)
+        if i in junctions:
+            split_at[nid] = (made[0], made[1])
+    # every road that met the old axis now meets the carriageway on its side, and a road
+    # that crosses or ends there runs on across the median to the far carriageway
+    normals = {w.nodes[i]: normal(i) for i in range(len(w.nodes))}
+    for nid, (r_node, l_node) in split_at.items():
+        nx, ny = normals[nid]
+        jx, jy = pts[w.nodes.index(nid)]
+
+        def side_node(other_nid: int) -> int:
+            ox, oy = xy(other_nid)
+            return r_node if (ox - jx) * nx + (oy - jy) * ny >= 0 else l_node
+
+        i_end = w.nodes.index(nid)
+        for o in others(nid):
+            tx.touch("way", o.id)
+            if direction(o.tags) != 0 and collinear(i_end, o):
+                # the street goes on as an existing one-way carriageway: join only the new
+                # carriageway of the same direction. Traffic flowing into this node continues
+                # on the carriageway that leaves it, and the other way round.
+                d = direction(o.tags)
+                flows_in = (o.nodes[-1] == nid) if d > 0 else (o.nodes[0] == nid)
+                at_start = i_end == 0
+                target = (r_node if at_start else l_node) if flows_in else (l_node if at_start else r_node)
+                o.nodes = [target if ref == nid else ref for ref in o.nodes]
+                continue
+            new: list[int] = []
+            for k, ref in enumerate(o.nodes):
+                if ref != nid:
+                    new.append(ref)
+                    continue
+                prev = o.nodes[k - 1] if k > 0 else None
+                nxt = o.nodes[k + 1] if k + 1 < len(o.nodes) else None
+                if prev is not None and nxt is not None:
+                    a, b = side_node(prev), side_node(nxt)
+                    new.extend([a] if a == b else [a, b])
+                elif prev is not None:          # the road ends here: carry it across the median
+                    near = side_node(prev)
+                    new.extend([near, l_node if near == r_node else r_node])
+                elif nxt is not None:
+                    near = side_node(nxt)
+                    new.extend([l_node if near == r_node else r_node, near])
+            o.nodes = _dedupe_consecutive(new)
     tx.touch("way", w.id)
-    old_inner = [n for n in w.nodes if n not in anchors]
+    old_inner = [n for i, n in enumerate(w.nodes) if i not in merge]
     base_tags = dict(t)
     w.nodes = right
     w.tags = _direction_tags(base_tags, "forward")
@@ -1437,8 +1531,39 @@ def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
     # turn restrictions: «from» is the carriageway arriving at the via node, «to» the one
     # leaving it. The forward carriageway ends at the old last node and starts at the first,
     # the backward one the other way round.
+    removed: list[int] = []
     for rel in restrictions:
         via = _via_node_ids(doc, rel)
+        end = last if last in via else first
+        if end in split_at:
+            # the end was split into a junction per carriageway: «from» must arrive at, and «to»
+            # leave from, the same new node; if they no longer meet, the turn is impossible now
+            r_node, l_node = split_at[end]
+            at_start = end == first
+            arrive_at = (bid, l_node) if at_start else (w.id, r_node)
+            leave_at = (w.id, r_node) if at_start else (bid, l_node)
+            spots: dict[str, tuple[int, int]] = {}
+            for m in rel.members:
+                if m.type != "way" or m.role not in ("from", "to"):
+                    continue
+                if m.ref == w.id:
+                    spots[m.role] = arrive_at if m.role == "from" else leave_at
+                    continue
+                on = [n for n in (r_node, l_node) if m.ref in doc.ways and n in doc.ways[m.ref].nodes]
+                if len(on) != 1:
+                    raise OpError(f"запрет поворота {rel.id} на пересечении неоднозначен после разделения: "
+                                  "сначала исправьте или удалите его")
+                spots[m.role] = (m.ref, on[0])
+            tx.touch("relation", rel.id)
+            if spots.get("from", (0, 0))[1] != spots.get("to", (0, -1))[1]:
+                del doc.relations[rel.id]   # the two ways no longer meet: nothing left to forbid
+                removed.append(rel.id)
+                continue
+            node = spots["from"][1]
+            rel.members = [Member("way", spots[m.role][0], m.role) if m.type == "way" and m.role in spots
+                           else Member("node", node, "via") if m.role == "via" else m
+                           for m in rel.members]
+            continue
         arrive, leave = (w.id, bid) if last in via else (bid, w.id)
         tx.touch("relation", rel.id)
         rel.members = [Member("way", arrive if m.role == "from" else leave, m.role)
@@ -1462,7 +1587,7 @@ def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
             tx.touch("node", nid)
             del doc.nodes[nid]
     return {"id": w.id, "new_id": bid, "forward_lanes": fw, "backward_lanes": bw,
-            "offset_m": [round(off_f, 2), round(off_b, 2)]}
+            "offset_m": [round(off_f, 2), round(off_b, 2)], "removed_restrictions": removed}
 
 
 OPS: dict[str, tuple[Callable[..., dict], str]] = {

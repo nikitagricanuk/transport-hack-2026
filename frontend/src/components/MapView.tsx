@@ -5,7 +5,7 @@ import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
 import type { PickedPoint } from '../utils/networkAnalysis';
 import type { BaseMap, ImageOverlay } from './Extras';
-import { LANE_MINZOOM, buildLanes, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
+import { LANE_MINZOOM, buildLanes, findJunctions, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
@@ -741,14 +741,20 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map || !props.geo) return;
-    const roads: LaneRoad[] = props.geo.ways.features
+    const roads: (LaneRoad & { nodes: number[]; halfWidth: number })[] = props.geo.ways.features
       .filter((f) => f.properties.layer === 'road')
       .map((f) => {
         const split = laneSplit(f.properties.tags, f.properties.dir);
-        return { id: f.properties.id, coords: f.geometry.coordinates, ...split,
-          laneW: laneWidthFor(f.properties.tags, split.forward + split.backward) };
+        const laneW = laneWidthFor(f.properties.tags, split.forward + split.backward);
+        return { id: f.properties.id, coords: f.geometry.coordinates, nodes: f.properties.nodes, ...split, laneW,
+          halfWidth: ((split.forward + split.backward) * laneW) / 2 };
       });
-    const g = buildLanes(roads);
+    // where three or more road segments meet: one asphalt plate, and lane lines stop at its edge
+    const junctions = findJunctions(roads);
+    for (const r of roads) {
+      r.junctions = r.nodes.flatMap((id) => { const j = junctions.get(id); return j ? [j] : []; });
+    }
+    const g = buildLanes(roads, [...junctions.values()]);
     (map.getSource('lane-surface') as GeoJSONSource).setData(g.surface);
     (map.getSource('lane-marks') as GeoJSONSource).setData(g.marks);
     (map.getSource('lane-arrows') as GeoJSONSource).setData(g.arrows);

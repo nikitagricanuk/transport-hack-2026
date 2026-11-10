@@ -63,9 +63,14 @@ def test_split_into_two_carriageways_keeps_junctions_and_moves_each_direction_to
     doc.ways[100].tags.update({"lanes": "4", "turn:lanes:forward": "left|through", "maxspeed:backward": "40"})
     res = apply_op(doc, History(), "split_carriageways", {"way_id": 100})
     fwd, back = doc.ways[100], doc.ways[res["new_id"]]
-    # shared: both ends and node 2, where way 101 joins; node 3 became one point per carriageway
-    assert fwd.nodes[0] == 1 and fwd.nodes[1] == 2 and fwd.nodes[-1] == 4
-    assert back.nodes[0] == 4 and back.nodes[2:] == [2, 1] and back.nodes[1] < 0 and 3 not in doc.nodes
+    # shared only where the road merges back: node 1 (dead end) and node 4 (the street goes on
+    # as way 104). Node 3 became one point per carriageway.
+    assert fwd.nodes[0] == 1 and fwd.nodes[-1] == 4 and back.nodes[0] == 4 and back.nodes[-1] == 1
+    assert 3 not in doc.nodes
+    # way 101 crossed the old axis at node 2: now it crosses each carriageway at its own junction
+    right_j, left_j = fwd.nodes[1], back.nodes[2]
+    assert right_j < 0 and left_j < 0 and right_j != left_j and 2 not in doc.nodes
+    assert doc.ways[101].nodes in ([5, left_j, right_j, 6], [5, right_j, left_j, 6])
     assert fwd.tags["oneway"] == back.tags["oneway"] == "yes"
     assert fwd.tags["lanes"] == "2" and back.tags["lanes"] == "2"
     assert fwd.tags["turn:lanes"] == "left|through" and "turn:lanes:forward" not in fwd.tags
@@ -110,3 +115,47 @@ def test_split_carriageways_carries_end_restrictions_to_the_right_carriageway(do
     assert roles(700) == {"from": 100, "to": 104}            # forward carriageway arrives at node 4
     assert roles(702) == {"from": back, "to": 100}           # backward arrives at node 1, forward leaves it
     assert not [i for i in validate(doc)["issues"] if i["title"] == "Запрет поворота не применится"]
+
+
+def test_side_road_ending_at_a_divided_road_reaches_both_carriageways():
+    from app.osm_model import OsmDocument
+
+    xml = """<?xml version="1.0"?><osm version="0.6">
+      <node id="1" lat="52.2800" lon="104.2800"/><node id="2" lat="52.2800" lon="104.2810"/>
+      <node id="3" lat="52.2800" lon="104.2820"/><node id="4" lat="52.2800" lon="104.2830"/>
+      <node id="5" lat="52.2810" lon="104.2820"/>
+      <way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/>
+        <tag k="highway" v="primary"/><tag k="lanes" v="4"/></way>
+      <way id="11"><nd ref="5"/><nd ref="3"/><tag k="highway" v="residential"/></way>
+    </osm>"""
+    doc = OsmDocument.parse(xml.encode())
+    res = apply_op(doc, History(), "split_carriageways", {"way_id": 10})
+    fwd, back = doc.ways[10], doc.ways[res["new_id"]]
+    side = doc.ways[11].nodes
+    # the side road comes from the north (left of an eastbound road): it meets the westbound
+    # carriageway first and then goes on across the median to the eastbound one
+    assert side[0] == 5 and len(side) == 3
+    assert side[1] in back.nodes and side[2] in fwd.nodes
+    assert doc.nodes[side[1]].lat > doc.nodes[side[2]].lat
+
+
+def test_lermontova_joins_the_existing_carriageways_without_a_shared_point():
+    """The case from the screenshot: ул. Лермонтова 3+3 already continues as two one-way roads."""
+    from pathlib import Path
+
+    import pytest
+
+    from app.osm_model import OsmDocument
+
+    example = Path(__file__).resolve().parents[2] / "data" / "example.osm"
+    if not example.exists():
+        pytest.skip("example.osm not present")
+    doc = OsmDocument.parse(example.read_bytes())
+    res = apply_op(doc, History(), "split_carriageways", {"way_id": 35071296})
+    fwd, back = doc.ways[35071296], doc.ways[res["new_id"]]
+    assert fwd.nodes[-1] != back.nodes[0]                       # no shared point at the north end
+    assert doc.ways[80402426].nodes[0] == fwd.nodes[-1]         # northbound goes on as the existing one-way
+    assert doc.ways[80402497].nodes[-1] == back.nodes[0]        # southbound comes in from the existing one
+    assert res["removed_restrictions"] == [8259525]             # the U-turn there is now impossible anyway
+    via = [m.ref for m in doc.relations[8259526].members if m.role == "via"]
+    assert via == [back.nodes[0]]                               # «only straight on» moved to the new junction
