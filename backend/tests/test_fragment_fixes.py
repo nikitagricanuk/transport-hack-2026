@@ -131,3 +131,17 @@ def test_fixed_fragment_is_simulation_ready():
     assert v["summary"]["levels"]["matsim"] == "ok" and v["summary"]["levels"]["sumo"] == "ok"
     task = next(t for t in builtin_tasks(doc) if t["id"] == "fix-graph")
     assert check_task(doc, task, v, [])["done"]
+
+
+@pytest.mark.skipif(not FIXED.exists(), reason="fixed fragment not bundled")
+def test_kurchatova_closure_has_a_real_detour():
+    """Demo case: closing ул. Академика Курчатова reroutes its whole volume."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    c = TestClient(app)
+    doc_id = c.post("/api/documents", files={"file": ("f.osm", FIXED.read_bytes(), "application/xml")}).json()["doc_id"]
+    closure = c.post(f"/api/documents/{doc_id}/scenario/closures",
+                     json={"way_id": 80347185, "closed": True}).json()["closures"][0]
+    assert closure["found"] and not closure["partial"] and closure["moved"] > 0 and len(closure["ways"]) >= 3

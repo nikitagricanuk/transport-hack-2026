@@ -7,6 +7,10 @@ load model: the green share of an approach scales its capacity.
 Approaches are grouped geometrically: the main axis follows the highest-class
 road at the node, arms within 45 degrees of that axis (either direction) are
 "main", the others "cross".
+
+On export the timing is written onto the signal node as namespaced tags
+(`uds:signal:*`, see `timing_tags`). Adapters ignore unknown namespaces, so the
+file stays valid for MatSim/SUMO/Webots, and a re-import restores the plan.
 """
 
 from __future__ import annotations
@@ -122,3 +126,56 @@ def plan(doc: OsmDocument, node_id: int, cfg: dict[str, Any] | None, rows: dict[
         "webster": {"cycle": best_cycle, "main_share": best_share,
                     "saturated": total >= 0.95},
     }
+
+
+TAG_PREFIX = "uds:signal:"
+
+
+def is_signal(tags: dict[str, str]) -> bool:
+    return tags.get("highway") == "traffic_signals" or tags.get("crossing") == "traffic_signals"
+
+
+def timing_tags(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> dict[int, dict[str, str | None]]:
+    """`uds:signal:*` tag overrides per node for the configured timing.
+
+    Writes cycle, main_share and the derived green/yellow durations in seconds,
+    so the plan is readable without the editor. Nodes that carry such tags from
+    an earlier export but have no timing now (reset, or no longer a signal) get
+    None values, which drop the stale tags from the output.
+    """
+    out: dict[int, dict[str, str | None]] = {}
+    for n in doc.nodes.values():
+        stale = [k for k in n.tags if k.startswith(TAG_PREFIX)]
+        if stale:
+            out[n.id] = dict.fromkeys(stale)
+    for node_id, cfg in settings.items():
+        n = doc.nodes.get(node_id)
+        if n is None or not is_signal(n.tags):
+            continue
+        cycle = int(cfg.get("cycle", DEFAULT_CYCLE))
+        share = float(cfg.get("main_share", 0.5))
+        green = cycle - LOST_TIME_S
+        out[node_id] = {**out.get(node_id, {}),
+            TAG_PREFIX + "cycle": str(cycle),
+            TAG_PREFIX + "main_share": f"{share:.2f}",
+            TAG_PREFIX + "green_main": str(round(green * share)),
+            TAG_PREFIX + "green_cross": str(round(green * (1 - share))),
+            TAG_PREFIX + "yellow": str(YELLOW_S),
+        }
+    return out
+
+
+def timing_from_tags(doc: OsmDocument) -> dict[int, dict[str, Any]]:
+    """Read back timing written by `timing_tags` (invalid values are skipped)."""
+    out: dict[int, dict[str, Any]] = {}
+    for n in doc.nodes.values():
+        if not is_signal(n.tags) or TAG_PREFIX + "cycle" not in n.tags:
+            continue
+        try:
+            cycle = int(n.tags[TAG_PREFIX + "cycle"])
+            share = float(n.tags.get(TAG_PREFIX + "main_share", "0.5"))
+        except ValueError:
+            continue
+        if 30 <= cycle <= 180 and MIN_SHARE <= share <= MAX_SHARE:
+            out[n.id] = {"cycle": cycle, "main_share": share}
+    return out

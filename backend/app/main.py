@@ -147,13 +147,20 @@ def _state(s: Session, include_geo: bool = True) -> dict[str, Any]:
     return out
 
 
+def _export_xml(s: Session, renumber: bool = True) -> bytes:
+    """The .osm that leaves the editor: the graph plus signal timing as uds:signal:* tags."""
+    timing = {nid: cfg for nid, cfg in s.signal_timing.items() if nid in s.doc.nodes}
+    return s.doc.to_xml(renumber_new=renumber, extra_node_tags=signal_plans.timing_tags(s.doc, timing))
+
+
 def _open(data: bytes, filename: str) -> dict[str, Any]:
     try:
         doc = OsmDocument.parse(data)
     except Exception as e:  # noqa: BLE001 - shown to the user
         raise HTTPException(400, f"не удалось прочитать OSM: {e}") from e
     sid = uuid.uuid4().hex[:12]
-    SESSIONS[sid] = Session(id=sid, filename=filename, doc=doc)
+    SESSIONS[sid] = Session(id=sid, filename=filename, doc=doc,
+                            signal_timing=signal_plans.timing_from_tags(doc))
     _start_draft(SESSIONS[sid], data)
     return _state(SESSIONS[sid])
 
@@ -388,7 +395,8 @@ def _materialize_draft_unlocked(doc_id: str) -> Session:
         doc = OsmDocument.parse(osm_path.read_bytes())
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"не удалось прочитать черновик: {e}") from e
-    s = Session(id=doc_id, filename=str(meta.get("filename") or "draft.osm"), doc=doc)
+    s = Session(id=doc_id, filename=str(meta.get("filename") or "draft.osm"), doc=doc,
+                signal_timing=signal_plans.timing_from_tags(doc))
     _replay_journal(s)
     _load_analysis(s)
     SESSIONS[doc_id] = s
@@ -579,7 +587,7 @@ def run_validate(doc_id: str) -> Response:
 def export(doc_id: str, filename: str = Query("team.osm"), renumber: bool = True) -> Response:
     s = _session(doc_id)
     with s.lock:
-        data = s.doc.to_xml(renumber_new=renumber)
+        data = _export_xml(s, renumber)
     name = _safe_filename(filename)
     return Response(content=data, media_type="application/xml",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
@@ -589,7 +597,7 @@ def export(doc_id: str, filename: str = Query("team.osm"), renumber: bool = True
 def check_sumo(doc_id: str) -> dict[str, Any]:
     s = _session(doc_id)
     with s.lock:
-        xml = s.doc.to_xml(renumber_new=True)
+        xml = _export_xml(s)
     return run_netconvert(xml)
 
 
@@ -599,7 +607,7 @@ def check_organizer(doc_id: str) -> dict[str, Any]:
     try:
         token, team, base = credentials()
         with s.lock:
-            xml = s.doc.to_xml(renumber_new=True)
+            xml = _export_xml(s)
         return upload_osm(xml, token, team, base)
     except OrganizerError as e:
         status = e.status if 400 <= e.status < 500 else 502

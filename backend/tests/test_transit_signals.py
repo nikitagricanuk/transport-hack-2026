@@ -86,3 +86,21 @@ def test_transit_and_signal_api(raw):
     assert c.post(f"/api/documents/{doc_id}/signals/2", json={"main_share": 0.95}).status_code == 400
     reset = c.post(f"/api/documents/{doc_id}/signals/2", json={"reset": True}).json()
     assert reset["custom"] is False
+
+
+def test_signal_timing_is_exported_as_tags_and_restored_on_import(raw):
+    c = TestClient(app)
+    doc_id = c.post("/api/documents", files={"file": ("t.osm", raw, "application/xml")}).json()["doc_id"]
+    c.post(f"/api/documents/{doc_id}/ops", json={"op": "place_signal", "args": {"node_id": 2}})
+    c.post(f"/api/documents/{doc_id}/signals/2", json={"main_share": 0.6, "cycle": 100})
+    xml = c.get(f"/api/documents/{doc_id}/export").content
+    for tag in ('k="uds:signal:cycle" v="100"', 'k="uds:signal:main_share" v="0.60"',
+                'k="uds:signal:green_main" v="54"', 'k="uds:signal:green_cross" v="36"'):
+        assert tag.encode() in xml
+    # re-import restores the plan
+    doc2 = c.post("/api/documents", files={"file": ("t2.osm", xml, "application/xml")}).json()["doc_id"]
+    plan = c.get(f"/api/documents/{doc2}/signals/2").json()
+    assert plan["custom"] and plan["cycle"] == 100 and plan["main_share"] == 0.6
+    # a reset drops the stale tags from the next export
+    c.post(f"/api/documents/{doc2}/signals/2", json={"reset": True})
+    assert b"uds:signal:" not in c.get(f"/api/documents/{doc2}/export").content
