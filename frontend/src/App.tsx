@@ -498,7 +498,7 @@ export default function App() {
   }, [doc, selection, wayIndex, selectedNode]);
 
   // -------------------------------------------------------------- ops
-  const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }): Promise<boolean> => {
+  const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string; reason?: string }): Promise<boolean> => {
     if (!docId) return false;
     if (modeRef.current === 'analytics') {
       setNotice('Режим аналитики: граф не редактируется. Переключитесь на «Редактирование».');
@@ -508,7 +508,7 @@ export default function App() {
     try {
       let res: OpResponse;
       const list = Array.isArray(ops) ? ops : [ops];
-      if (list.length === 1) res = await api.op(docId, list[0], opts?.label);
+      if (list.length === 1) res = await api.op(docId, list[0], opts?.label, opts?.reason);
       else res = await api.batch(docId, list, opts?.label);
       ingest(res);
       const warnings = [
@@ -562,7 +562,10 @@ export default function App() {
     const r = fixReview;
     if (!r) return;
     setFixReview(null);
-    runOps({ op: r.fix.op, args: r.fix.args }, { label: r.fix.label + ': ' + r.issue.title + ' — ' + r.issue.description });
+    runOps({ op: r.fix.op, args: r.fix.args }, {
+      label: r.fix.label + ': ' + r.issue.title,
+      reason: r.issue.description,
+    });
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
   // a review belongs to the document it was computed on

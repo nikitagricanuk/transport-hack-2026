@@ -33,7 +33,7 @@ export function analysisOverlay(result: AnalysisResult | null, a?: AnalysisPoint
   const add = (r: AnalysisResult, before = false) => {
     if (r.path) features.push({ ...r.path, properties: { ...r.path.properties, before, colour: '#2563eb' } });
     for (const band of [...(r.bands ?? [])].reverse()) features.push({ type: 'Feature', geometry: band.geometry,
-      properties: { before, band: band.minutes, colour: ['#16a34a', '#65a30d', '#eab308', '#f97316', '#dc2626'][Math.min(4, Math.floor(band.minutes) - 1)] ?? '#16a34a' } });
+      properties: { before, band: band.minutes, colour: ['#16a34a', '#65a30d', '#eab308', '#f97316', '#dc2626'][Math.round(((r.bands ?? []).findIndex(b => b.minutes === band.minutes) / Math.max(1, (r.bands?.length ?? 1) - 1)) * 4)] ?? '#16a34a' } });
     for (const f of r.polygons?.features ?? []) features.push({ ...f, properties: { ...f.properties, before,
       colour: ({ A: '#2563eb', B: '#f97316', AB: '#9333ea', uncovered: '#64748b' } as Record<string,string>)[String(f.properties?.set)] } });
     if (!before) for (const f of r.building_features?.features ?? []) features.push({ ...f, properties: { ...f.properties,

@@ -73,6 +73,7 @@ export interface HistoryInfo {
 }
 
 export interface HistoryEntry {
+  reason?: string | null;
   label: string;
   author: string | null;
   at: number;

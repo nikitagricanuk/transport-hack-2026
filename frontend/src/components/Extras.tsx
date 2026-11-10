@@ -205,6 +205,7 @@ export function HistoryList({ details, labels, onShow }: {
             {h.refs.slice(0, 3).map((r) => `${r.kind === 'way' ? 'ребро' : r.kind === 'node' ? 'узел' : 'отношение'} ${r.name || r.id} ${STATUS_RU[r.status]}`).join('; ')}
             {h.count > 3 ? ` и ещё ${h.count - 3}` : ''}
           </span>
+          {h.reason && <span className="hist-reason small"><b>Почему</b> {h.reason}</span>}
         </button>
       ))}
     </>

@@ -133,7 +133,7 @@ def test_api_readonly_bands_and_catchment():
 
 def test_raw_restrictions_offer_repair_and_preview_is_readonly():
     d = OsmDocument.parse((Path(__file__).parents[2]/"data/example.osm").read_bytes())
-    repairs = [f for i in validate(d)["issues"] for f in i["fixes"] if f["op"] == "set_restriction_member"]
+    repairs = [f for i in validate(d)["issues"] for f in i["fixes"] if f["op"] == "replace_restriction_way"]
     assert repairs
     before = d.to_xml()
     assert preview(d,repairs[0]["op"],repairs[0]["args"])["counts"]["modified"] == 1
@@ -144,7 +144,7 @@ def test_edit_log_retains_review_reason(raw):
     c = TestClient(app)
     root = '/api/documents/'+c.post('/api/documents',files={'file':('test.osm',raw,'application/xml')}).json()['doc_id']
     label = 'Указать скорость: Нет maxspeed — ПДД 10.2: нет maxspeed'
-    response = c.post(root+'/ops',json={'op':'set_tags','args':{'kind':'way','id':100,'tags':{'maxspeed':'60'}},'label':label})
+    response = c.post(root+'/ops',json={'op':'set_tags','args':{'kind':'way','id':100,'tags':{'maxspeed':'60'}},'label':label,'reason':'ПДД 10.2: нет maxspeed'})
     assert response.status_code == 200,response.text
     assert '| ПДД 10.2: нет maxspeed |' in c.get(root+'/edit-log').text
     c.post(root+'/undo')
