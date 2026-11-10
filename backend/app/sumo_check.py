@@ -17,20 +17,24 @@ from pathlib import Path
 from .check_report import interpret_netconvert
 
 
-def find_netconvert() -> str | None:
-    exe = shutil.which("netconvert")
+def find_sumo_binary(name: str) -> str | None:
+    exe = shutil.which(name)
     if exe:
         return exe
     try:
         import sumo  # type: ignore[import-not-found]
 
-        cand = Path(sumo.SUMO_HOME) / "bin" / "netconvert"
+        cand = Path(sumo.SUMO_HOME) / "bin" / name
         for p in (cand, cand.with_suffix(".exe")):
             if p.exists():
                 return str(p)
     except Exception:
         pass
     return None
+
+
+def find_netconvert() -> str | None:
+    return find_sumo_binary("netconvert")
 
 
 def _ascii_tmp_root() -> str | None:

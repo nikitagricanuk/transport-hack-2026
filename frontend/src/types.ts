@@ -158,6 +158,12 @@ export interface CheckGroup {
   examples: string[];
 }
 
+/** Seconds, WGS84 longitude/latitude, and heading clockwise from north. */
+export type SimVehicle = [id: string, lon: number, lat: number, angle: number];
+export interface SimulationRecording {
+  frames: { time: number; vehicles: SimVehicle[] }[];
+}
+
 export interface SumoResult {
   available: boolean;
   ok: boolean | null;

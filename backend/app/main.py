@@ -42,6 +42,7 @@ from .geojson import geo_patch, to_geojson, vertices
 from .organizer import OrganizerError, credentials, upload_osm
 from .osm_model import OsmDocument
 from .sumo_check import find_netconvert, run_netconvert
+from .simulation import FILE_LIMIT, SimulationError, read_matsim, read_webots, run_sumo, unpack_recording
 from .validation import validate
 
 DATA_DIR = Path(os.environ.get("UDS_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
@@ -650,6 +651,38 @@ def check_sumo(doc_id: str) -> dict[str, Any]:
     with s.lock:
         xml = _export_xml(s)
     return run_netconvert(xml)
+
+
+@app.post("/api/documents/{doc_id}/simulation/sumo")
+def simulate_sumo(doc_id: str, vehicles: int = Query(60, ge=1, le=200)) -> dict:
+    s = _session(doc_id)
+    with s.lock:
+        xml = _export_xml(s)
+    try:
+        return run_sumo(xml, vehicles)
+    except SimulationError as e:
+        raise HTTPException(e.status, str(e)) from e
+
+
+@app.post("/api/documents/{doc_id}/simulation/matsim")
+def import_matsim(doc_id: str, network: UploadFile, events: UploadFile,
+                  crs: str = Query("EPSG:4326", pattern=r"^[Ee][Pp][Ss][Gg]:[0-9]{1,8}$"),
+                  start: int | None = Query(None, ge=0, le=604800)) -> dict:
+    _session(doc_id)
+    try:
+        return read_matsim(unpack_recording(network.file.read(FILE_LIMIT + 1)),
+                           unpack_recording(events.file.read(FILE_LIMIT + 1)), crs, start)
+    except SimulationError as e:
+        raise HTTPException(e.status, str(e)) from e
+
+
+@app.post("/api/documents/{doc_id}/simulation/webots")
+def import_webots(doc_id: str, recording: UploadFile) -> dict:
+    _session(doc_id)
+    try:
+        return read_webots(unpack_recording(recording.file.read(FILE_LIMIT + 1)))
+    except SimulationError as e:
+        raise HTTPException(e.status, str(e)) from e
 
 
 @app.post("/api/documents/{doc_id}/check/organizer")

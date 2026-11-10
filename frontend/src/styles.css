@@ -108,6 +108,14 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1p
 
 .center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .map-wrap { flex: 1; min-height: 0; position: relative; }
+.simulation-panel { position: absolute; z-index: 2; top: 12px; left: 12px; right: 12px; width: max-content; max-width: calc(100% - 24px); max-height: calc(100% - 24px); overflow: auto; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #111827; box-shadow: 0 2px 8px #0f172a24; }
+.simulation-panel form, .simulation-playback { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.simulation-panel label { display: grid; gap: 4px; font-size: 12px; }
+.simulation-panel input[type=number], .simulation-panel input[name=crs] { width: 105px; }
+.simulation-panel input[type=file] { max-width: min(205px, 100%); }
+.simulation-panel p { margin: 7px 0 0; }
+.simulation-playback { margin-top: 8px; align-items: center; }
+.simulation-playback input[type=range] { width: 145px; }
 .map { position: absolute; inset: 0; }
 .map-hint { position: absolute; top: 12px; left: 12px; max-width: 70%; padding: 8px 12px; background: #111827; color: #f3f4f6; border-radius: 8px; font-size: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); pointer-events: none; }
 .toast { position: absolute; top: 12px; right: 12px; max-width: 420px; display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; background: #2a1610; border: 1px solid #7c2d12; color: #fed7aa; }

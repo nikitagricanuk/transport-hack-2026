@@ -287,6 +287,9 @@ frontend (React + MapLibre)  ──HTTP──▶  backend (FastAPI)
 | GET | `/api/documents/{id}/edit-log` | журнал применённых правок (Markdown) — основа для `docs/fix-log.md` |
 | GET | `/api/documents/{id}/export?filename=team1` | скачать `.osm` |
 | POST | `/api/documents/{id}/check/sumo` | прогон `netconvert` |
+| POST | `/api/documents/{id}/simulation/sumo` | новый прогон и кадры движения SUMO ([режим «Симуляция»](docs/simulation.md)) |
+| POST | `/api/documents/{id}/simulation/matsim` | загрузка сети и событий MATSim |
+| POST | `/api/documents/{id}/simulation/webots` | загрузка траекторий Webots |
 | POST | `/api/documents/{id}/check/organizer` | отправить экспорт на сервер проверки |
 | GET / DELETE | `/api/draft` | восстановить или сбросить автосохранение |
 

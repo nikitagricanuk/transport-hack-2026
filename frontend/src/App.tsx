@@ -9,6 +9,7 @@ import { AnalyticsPanel, BasemapControls, TasksModal, type BaseMap, type ImageOv
 import StartScreen from './components/StartScreen';
 import { FixReview, type FixReviewState } from './components/FixReview';
 import { OrganizerReport, SumoReport } from './components/CheckResults';
+import { Simulation } from './components/Simulation';
 import { MenuBar, Splitter, useLayout } from './components/WindowLayout';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
@@ -61,7 +62,7 @@ export default function App() {
   // houses above lawns by default; the layers panel reorders the groups
   const [drawOrder, setDrawOrder] = useState<DrawGroup[]>(['zones', 'buildings', 'paths', 'roads', 'rail']);
   // two ways of working: editing the graph, or analysing flows and scenarios
-  const [mode, setMode] = useState<'edit' | 'analytics'>('edit');
+  const [mode, setMode] = useState<'edit' | 'analytics' | 'simulation'>('edit');
   const [base, setBase] = useState<BaseMap>('osm');
   const [overlay, setOverlay] = useState<ImageOverlay | null>(null);
   const [threeD, setThreeD] = useState(false);
@@ -71,7 +72,7 @@ export default function App() {
   const [tasksOpen, setTasksOpen] = useState(false);
   const [followId, setFollowId] = useState<string | null>(null);
   const followRef = useRef<string | null>(null);
-  const modeRef = useRef<'edit' | 'analytics'>('edit');
+  const modeRef = useRef(mode);
   modeRef.current = mode;
   followRef.current = followId;
   const highlightTimer = useRef<number>(0);
@@ -451,7 +452,7 @@ export default function App() {
     const first = refs.find((r) => r.kind === 'way' || r.kind === 'node');
     if (first) showElement(first.kind as 'way' | 'node', first.id);
   }, [flash, showElement]);
-  const switchMode = (m: 'edit' | 'analytics') => {
+  const switchMode = (m: typeof mode) => {
     setMode(m);
     if (m === 'analytics') {
       setTool('select');
@@ -459,6 +460,11 @@ export default function App() {
       setLoadColor(true);
     } else {
       setLoadColor(false);
+    }
+    if (m === 'simulation') {
+      setTool('select');
+      setSelection(null);
+      setOpenRoute(null);
     }
   };
   useEffect(() => { collab.send({ selection }); }, [collab, selection]);
@@ -495,8 +501,8 @@ export default function App() {
   // -------------------------------------------------------------- ops
   const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string; reason?: string }): Promise<boolean> => {
     if (!docId) return false;
-    if (modeRef.current === 'analytics') {
-      setNotice('Режим аналитики: граф не редактируется. Переключитесь на «Редактирование».');
+    if (modeRef.current !== 'edit') {
+      setNotice('Чтобы изменить граф, переключитесь на «Редактирование».');
       return false;
     }
     setError(null);
@@ -596,10 +602,10 @@ export default function App() {
   }, [layers.issues, validation, issueFilters]);
 
   const undo = useCallback(async () => {
-    if (doc?.history.can_undo) ingest(await api.undo(doc.doc_id));
+    if (modeRef.current !== 'simulation' && doc?.history.can_undo) ingest(await api.undo(doc.doc_id));
   }, [doc, ingest]);
   const redo = useCallback(async () => {
-    if (doc?.history.can_redo) ingest(await api.redo(doc.doc_id));
+    if (modeRef.current !== 'simulation' && doc?.history.can_redo) ingest(await api.redo(doc.doc_id));
   }, [doc, ingest]);
 
   const applyTemplate = useCallback((t: RoadTemplate) => {
@@ -638,6 +644,7 @@ export default function App() {
       if (e.key === '+' || e.key === '=' || e.code === 'NumpadAdd') { mapRef.current?.zoomBy(1); return; }
       if (e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract') { mapRef.current?.zoomBy(-1); return; }
       if (e.key === '0') { mapRef.current?.fitData(); return; }
+      if (modeRef.current === 'simulation') return;
       const byCode = TOOLS.find((x) => e.code === `Key${x.key}`);
       if (byCode) { setTool(byCode.id); return; }
       const tpl = TEMPLATES.find((x) => x.key === e.key);
@@ -765,13 +772,14 @@ export default function App() {
         </button>
         <div className="row gap2">
           <button className="icon-btn" aria-label="Отменить" title={`Отменить${doc.history.undo_label ? ': ' + doc.history.undo_label : ''} · Ctrl+Z`}
-            disabled={!doc.history.can_undo} onClick={undo}>↶</button>
+            disabled={mode === 'simulation' || !doc.history.can_undo} onClick={undo}>↶</button>
           <button className="icon-btn" aria-label="Повторить" title={`Повторить${doc.history.redo_label ? ': ' + doc.history.redo_label : ''} · Ctrl+Shift+Z`}
-            disabled={!doc.history.can_redo} onClick={redo}>↷</button>
+            disabled={mode === 'simulation' || !doc.history.can_redo} onClick={redo}>↷</button>
         </div>
         <div className="seg mode-seg" role="group" aria-label="Режим работы">
           <button aria-pressed={mode === 'edit'} onClick={() => switchMode('edit')}>Редактирование</button>
           <button aria-pressed={mode === 'analytics'} onClick={() => switchMode('analytics')}>Аналитика</button>
+          <button aria-pressed={mode === 'simulation'} onClick={() => switchMode('simulation')}>Симуляция</button>
         </div>
         <button className="btn" aria-pressed={threeD} onClick={() => setThreeD(!threeD)} title="Объёмный вид зданий">3D</button>
         <span className="grow" />
@@ -817,7 +825,7 @@ export default function App() {
 
       <div className="body">
         {mode === 'edit' && win.layout.visible.tools && <ToolRail tool={tool} onTool={setTool} />}
-        {win.layout.visible.left && (
+        {mode !== 'simulation' && win.layout.visible.left && (
           <>
             <LayersPanel layers={layers} onLayers={onLayers} onSelectAll={onSelectAllLayers}
               baseOpacity={baseOpacity} onBaseOpacity={setBaseOpacity}
@@ -829,14 +837,17 @@ export default function App() {
         )}
         <main className="center">
           <div className="map-wrap">
-            <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
+            <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={mode === 'simulation' ? null : selection} tool={tool}
+              layers={mode === 'simulation' ? { ...layers, roads: true, issues: false } : layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
-              threeD={threeD} highlight={highlight} onView={onView} fixPreview={fixReview?.preview ?? null}
-              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
-              changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
+              threeD={threeD} highlight={highlight} onView={onView} fixPreview={mode === 'simulation' ? null : fixReview?.preview ?? null}
+              baseOpacity={baseOpacity} issues={mode === 'simulation' ? NO_ISSUES : mapIssues}
+              onSelect={mode === 'simulation' ? () => {} : setSelection} loadVc={loadVc}
+              changes={mode !== 'simulation' && bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
-            <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
-            {fixReview && (
+            {mode === 'simulation' ? <Simulation key={`${doc.doc_id}:${doc.rev}`} docId={doc.doc_id} map={mapRef} />
+              : <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>}
+            {mode !== 'simulation' && fixReview && (
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
                 onApply={applyReviewedFix} onCancel={cancelFixReview} />
             )}
@@ -846,11 +857,11 @@ export default function App() {
             )}
             {error && <div className="toast error" role="alert">{error}<button className="icon-btn" aria-label="Закрыть" onClick={() => setError(null)}>×</button></div>}
           </div>
-          {win.layout.visible.bottom && (
+          {mode !== 'simulation' && win.layout.visible.bottom && (
             <Splitter panel="bottom" value={win.layout.size.bottom} onResize={(v) => win.resize('bottom', v)}
               label="Высота нижней панели" />
           )}
-          {win.layout.visible.bottom && (
+          {mode !== 'simulation' && win.layout.visible.bottom && (
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
             validating={validating} onShow={showIssue} onFix={onFix}
             issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}
@@ -866,11 +877,11 @@ export default function App() {
           </BottomPanel>
           )}
         </main>
-        {win.layout.visible.right && (
+        {mode !== 'simulation' && win.layout.visible.right && (
           <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
             label="Ширина панели свойств" />
         )}
-        {!win.layout.visible.right ? null : mode === 'analytics' && !selection ? (
+        {mode === 'simulation' || !win.layout.visible.right ? null : mode === 'analytics' && !selection ? (
           <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
             onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
         ) : (
