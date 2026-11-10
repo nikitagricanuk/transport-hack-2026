@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import type { HistoryEntry, Kind, LoadState, OdMatrix, Selection, Task, TaskCriterion, TaskResult } from '../types';
 import { fmt } from '../utils/geom';
-import { Bars, LOS_COLOR } from './Analysis';
+import { AnalyticsAssumptions, Bars, LOS_COLOR } from './Analysis';
 
 // --------------------------------------------------------- intensity presets
 export const INTENSITY_PRESETS: { name: string; multiplier: number; hint: string }[] = [
@@ -76,6 +76,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
         <section className="stack10">
           <b>Сценарий спроса</b>
           <IntensityPresets current={load.multiplier} onPick={onMultiplier} />
+          <AnalyticsAssumptions />
         </section>
 
         <section className="stack10">

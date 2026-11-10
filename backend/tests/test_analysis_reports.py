@@ -133,7 +133,11 @@ def test_reports_contain_numbers_and_charts(raw):
     r = c.get(f"/api/documents/{doc_id}/report.xlsx")
     assert r.status_code == 200 and 'report_t.xlsx' in r.headers["content-disposition"]
     wb = openpyxl.load_workbook(io.BytesIO(r.content))
-    assert wb.sheetnames == ["Сводка", "Дороги", "Проблемы", "Нагрузка", "Сравнение", "Изменения"]
+    assert wb.sheetnames == ["Сводка", "Дороги", "Проблемы", "Допущения и источники", "Нагрузка", "Сравнение", "Изменения"]
+    assert "ОДМ 218.2.020-2012" in wb["Допущения и источники"]["A1"].value
+    assert wb["Допущения и источники"]["A3"].hyperlink.target.startswith("https://")
+    assert wb["Нагрузка"]["L1"].value == "Источник спроса"
+    assert wb["Нагрузка"]["L2"].value == "Нет данных учёта"
     load_ids = [row[0].value for row in wb["Нагрузка"].iter_rows(min_col=1, max_col=1) if row[0].value is not None]
     assert load_ids[0] == "ID" and len(load_ids) == 6  # header + 5 roads
     assert len(wb["Дороги"]._charts) == 1 and len(wb["Сравнение"]._charts) == 2
@@ -167,3 +171,10 @@ def test_signal_off_road_is_attached_with_its_tags(doc):
     far = apply_op(doc, h, "add_node", {"lat": 52.2835, "lon": 104.2850, "tags": {"highway": "traffic_signals"}})["id"]
     with pytest.raises(OpError):
         apply_op(doc, h, "attach_to_road", {"node_id": far})
+
+
+def test_los_boundaries_follow_odm_table_one():
+    from app.analysis import los
+
+    values = [0.199, 0.20, 0.449, 0.45, 0.699, 0.70, 0.899, 0.90, 1.0, 1.001]
+    assert [los(value) for value in values] == list("ABBCCDDEEF")
