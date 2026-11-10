@@ -77,6 +77,7 @@ class Session:
     closures: set[int] = field(default_factory=set)        # roads closed by an accident or works
     tasks: list[dict[str, Any]] = field(default_factory=list)  # user-made Packet Tracer style tasks
     original_validation: dict[str, Any] | None = None
+    validation_cache: tuple | None = None
     load_cache: tuple | None = None
     detour_cache: tuple | None = None
     segments_cache: tuple | None = None
@@ -551,7 +552,8 @@ def _analysis_context(s, req=None):
                                closed=frozenset(s.closures) if req and req.use_closures else frozenset(),
                                loads=dict(s.loads), multiplier=s.multiplier, transit_freq=dict(s.transit_freq),
                                signal_timing={k:dict(v) for k,v in s.signal_timing.items()},
-                               analysis_settings=dict(s.analysis_settings),closure_choices=dict(s.closure_choices))
+                               analysis_settings=dict(s.analysis_settings),closure_choices=dict(s.closure_choices),
+                               validation_issues=s.validation_cache[1]["issues"] if s.validation_cache and s.validation_cache[0]==s.revision else [])
 
 
 def _before_graph(ctx, doc, req):
@@ -577,7 +579,7 @@ def pt_isochrone(doc_id: str, req: PtRequest) -> Response:
 @app.post("/api/documents/{doc_id}/analysis/route")
 def analysis_route(doc_id: str, req: RouteRequest) -> Response:
     ctx = _analysis_context(_session(doc_id),req)
-    out = network_analysis.route(ctx.doc,req,ctx.graph)
+    out = network_analysis.route(ctx.doc,req,ctx.graph,related_issues=ctx.validation_issues)
     network_analysis.compare(ctx.doc,req,out,lambda doc:network_analysis.route(doc,req,_before_graph(ctx,doc,req)))
     return _json({**out,"revision":ctx.revision})
 
@@ -716,7 +718,9 @@ def delete_draft(doc_id: str | None = None) -> dict[str, bool]:
 def run_validate(doc_id: str) -> Response:
     s = _session(doc_id)
     with s.lock:
-        return _json(validate(s.doc))
+        if not s.validation_cache or s.validation_cache[0]!=s.revision:
+            s.validation_cache=(s.revision,validate(s.doc))
+        return _json(s.validation_cache[1])
 
 
 _STATUS_RU = {"added": "добавлен", "deleted": "удалён", "modified": "изменён"}

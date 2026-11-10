@@ -1,3 +1,4 @@
+import { createMutationQueue } from './utils/mutationQueue';
 import EditorMenus from './components/EditorMenus';
 import { PanelToggle } from './components/PanelClose';
 import SelectionEditor, { type Segment } from './components/SelectionEditor';
@@ -261,18 +262,28 @@ export default function App() {
     }, 300);
   }, [doc, wantChanges]);
 
-  const loadAction = useCallback(async (p: Promise<LoadState>) => {
+  const loadMutations=useRef(createMutationQueue<LoadState>());
+  const loadRequest=useRef(0);
+  const loadAction = useCallback(async (request:()=>Promise<LoadState>) => {
+    const id=docIdRef.current, sequence=++loadRequest.current;
     try {
-      setLoad(await p);
-    } catch (e) {
+      const state=await loadMutations.current.run(request);
+      if(docIdRef.current===id && sequence===loadRequest.current)setLoad(state);
+    } catch(e) {
+      if(docIdRef.current!==id)return;
       setError((e as Error).message);
+      // Restore authoritative state when an optimistic edit is rejected.
+      if(id && sequence===loadRequest.current) {
+        try {const state=await api.load(id);if(docIdRef.current===id && sequence===loadRequest.current)setLoad(state);}catch{/* Keep the original error visible. */}
+      }
     }
   }, []);
   const onClosure = useCallback(async (wayId: number, closed: boolean) => {
     const id = docIdRef.current;
     if (!id) return;
     try {
-      const state = await api.setClosure(id, wayId, closed);
+      const state = await loadMutations.current.run(()=>api.setClosure(id, wayId, closed));
+      if(docIdRef.current!==id)return;
       setLoad(state);
       const c = state.closures?.find((x) => x.id === wayId);
       setNotice(!closed ? 'Перекрытие снято'
@@ -309,11 +320,11 @@ export default function App() {
   }, []);
   const loadTimer=useRef<ReturnType<typeof setTimeout>>();
   useEffect(()=>()=>clearTimeout(loadTimer.current),[docId]);
-  const onMultiplier = useCallback((m: number) => { clearTimeout(loadTimer.current);loadTimer.current=setTimeout(()=>{if(docId)loadAction(api.setLoad(docId,{multiplier:m}));},150); }, [docId, loadAction]);
-  const onSnapshot = useCallback((name: string) => { if (docId) loadAction(api.addSnapshot(docId, name)); }, [docId, loadAction]);
-  const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
+  const onMultiplier = useCallback((m: number) => { clearTimeout(loadTimer.current);loadTimer.current=setTimeout(()=>{if(docId)loadAction(()=>api.setLoad(docId,{multiplier:m}));},150); }, [docId, loadAction]);
+  const onSnapshot = useCallback((name: string) => { if (docId) loadAction(()=>api.addSnapshot(docId, name)); }, [docId, loadAction]);
+  const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(()=>api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
   const onResetLoad = useCallback(() => {
-    if (docId) loadAction(api.setLoad(docId, { reset_all: true }));
+    if (docId) loadAction(()=>api.setLoad(docId, { reset_all: true }));
     setComparison(null);
   }, [docId, loadAction]);
   const volumeTimers=useRef(new Map<number,ReturnType<typeof setTimeout>>());
@@ -334,7 +345,7 @@ export default function App() {
       })};
     });
     clearTimeout(volumeTimers.current.get(wayId));
-    volumeTimers.current.set(wayId,setTimeout(()=>{volumeTimers.current.delete(wayId);loadAction(api.setLoad(docId,{way_id:wayId,volume}));},150));
+    volumeTimers.current.set(wayId,setTimeout(()=>{volumeTimers.current.delete(wayId);loadAction(()=>api.setLoad(docId,{way_id:wayId,volume}));},150));
   }, [docId, loadAction]);
   const onCompare = useCallback(async (a: string, b: string) => {
     if (!docId) return;
@@ -913,7 +924,7 @@ export default function App() {
           analysis={{docId:doc.doc_id,rev:doc.rev,picked:analysisPicked,onPick:setAnalysisPick,onOverlay:setAnalysisOverlay,onFix,onShowRoad}}
           docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
           onFix={onFix} onScenarioChanged={refreshLoad} onDetour={async (id,index) => {
-              try {const next=await api.setClosure(doc.doc_id,id,true,index);setLoad(next);const options=next.closures?.find(c=>c.id===id)?.alternatives ?? [];setAnalysisOverlay({type:'FeatureCollection',features:options.flatMap((a,i)=>a.lines.map(coordinates=>({type:'Feature' as const,geometry:{type:'LineString' as const,coordinates},properties:{before:i!==index}})))});} catch(e){setError((e as Error).message);}
+              try {const next=await loadMutations.current.run(()=>api.setClosure(doc.doc_id,id,true,index));if(docIdRef.current!==doc.doc_id)return;setLoad(next);const options=next.closures?.find(c=>c.id===id)?.alternatives ?? [];setAnalysisOverlay({type:'FeatureCollection',features:options.flatMap((a,i)=>a.lines.map(coordinates=>({type:'Feature' as const,geometry:{type:'LineString' as const,coordinates},properties:{before:i!==index}})))});} catch(e){setError((e as Error).message);}
             }} onReopen={(id) => onClosure(id,false)} onOpenTasks={() => setTasksOpen(true)} />
         {win.layout.visible.right && (mode !== 'analytics' || selection) && (mode === 'edit' && (multi.length > 1 || segment) ?
           <SelectionEditor multi={multi} segment={segment} geo={doc.geo} onOp={onInspectorOp} onFix={onFix} onClear={() => {setMulti([]);setSegment(null);}} /> : (

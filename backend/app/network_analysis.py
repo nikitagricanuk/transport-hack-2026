@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import asdict
 
 import networkx as nx
@@ -76,28 +77,45 @@ def diagnose(doc, rg, a, b):
     ca = next(c for c in components if a.a in c)
     cb = next(c for c in components if b.a in c)
     if ca != cb:
-        index = r.GridIndex(30)
-        for n in cb:
-            index.insert_point(*g.nodes[n]["xy"], n)
-        pair, distance = None, math.inf
+        from .edits import way_level
+        from .roads import can_connect
+        deadline=time.monotonic()+2
+        index=r.GridIndex(30)
+        for segment in rg.segments:
+            u,v,wid,pa,pb=segment
+            if u in cb and v in cb:
+                index.insert_box(*pa,*pb,segment)
+        best=None
         for n in ca:
-            xy = g.nodes[n]["xy"]
-            for m in index.query(*xy,30):
-                d = math.dist(xy,g.nodes[m]["xy"])
-                if d < distance:
-                    pair,distance = (n,m),d
-        fixes, refs, location = [], [], None
-        if pair:
-            n,m = pair
-            location = [doc.nodes[n].lon,doc.nodes[n].lat]
-            refs = [{"kind":"node","id":n},{"kind":"node","id":m}]
-            if distance <= 30:
-                fixes.append({"label":f"Соединить ({distance:.0f} м) — проверить по снимку", "op":"add_way",
-                              "args":{"points":[{"id":n},{"id":m}],
-                                      "tags":{"highway":"footway" if rg.mode == "walk" else "service"}}})
-        text = f"Компоненты: {len(ca)} и {len(cb)} узлов. "
-        text += f"Ближайший разрыв в радиусе поиска: {distance:.1f} м." if pair else "Разрыв не локализован в радиусе 30 м."
-        return [issue("Нет пути: граф разорван",text,refs=refs,location=location,fixes=fixes)]
+            if time.monotonic()>deadline:
+                break
+            xy=g.nodes[n]['xy']
+            incident={e['way'] for _,_,e in [*g.in_edges(n,data=True),*g.out_edges(n,data=True)]}
+            source=[doc.ways[wid] for wid in incident]
+            for u,v,wid,pa,pb in index.query(*xy,30):
+                q,fraction,distance=r.project_on_segment(xy,pa,pb)
+                target=doc.ways[wid]
+                tags={'highway':'footway' if rg.mode=='walk' else 'service'}
+                if distance>30 or any(way_level(w.tags)!=way_level(target.tags) for w in source):
+                    continue
+                if any(can_connect(tags,w.tags) for w in source+[target]):
+                    continue
+                if best is None or distance<best[0]:
+                    best=(distance,n,wid,q,fraction,u,v)
+        fixes,refs,location=[],[],None
+        if best:
+            distance,n,wid,q,fraction,u,v=best
+            lat,lon=rg.proj.to_latlon(*q)
+            target={'id':u} if fraction<1e-8 else {'id':v} if fraction>1-1e-8 else {'lat':lat,'lon':lon,'way_id':wid}
+            refs=[{'kind':'node','id':n},{'kind':'way','id':wid}]
+            location=[doc.nodes[n].lon,doc.nodes[n].lat]
+            if g.to_undirected(as_view=True).degree(n)==1:
+                fixes.append({'label':f'Присоединить конец ({distance:.0f} м) — проверить по снимку','op':'connect_endpoint','args':{'node_id':n,'way_id':wid}})
+            fixes.append({'label':f'Соединить ({distance:.0f} м) — проверить по снимку','op':'add_way',
+                          'args':{'points':[{'id':n},target],'tags':{'highway':'footway' if rg.mode=='walk' else 'service'}}})
+        text=f'Компоненты: {len(ca)} и {len(cb)} узлов. '
+        text+=f'Ближайший совместимый разрыв: {best[0]:.1f} м.' if best else 'Разрыв не локализован в радиусе 30 м.'
+        return [issue('Нет пути: граф разорван',text,refs=refs,location=location,fixes=fixes)]
     if rg.restrictions:
         relaxed = r.RoutingGraph(g,rg.mode,rg.proj,rg.seg_index,{},[],rg.params,rg.segments)
         unrestricted = r.shortest_path(relaxed,a,b,"time")
@@ -125,7 +143,7 @@ def diagnose(doc, rg, a, b):
     return [issue("Нет пути", "Направления или ограничения не позволяют проехать между точками. Разрыв не локализован.")]
 
 
-def route(doc, req, rg=None, *, diagnosis=True):
+def route(doc, req, rg=None, *, diagnosis=True, related_issues=()):
     rg = rg or r.build_graph(doc,req.mode,walk_kmh=req.walk_kmh,use_restrictions=req.use_restrictions)
     out = {**base(rg),"found":False,"path":None,"stats":None,"mode":rg.mode,"metric":req.metric}
     (a,b),out["issues"] = snaps(doc,rg,[req.start.model_dump(),req.to.model_dump()])
@@ -135,6 +153,13 @@ def route(doc, req, rg=None, *, diagnosis=True):
     if result is None:
         if diagnosis:
             out["issues"] = diagnose(doc,rg,a,b)
+            components=list(nx.weakly_connected_components(rg.g))
+            source=next(c for c in components if a.a in c)
+            target=next(c for c in components if b.a in c)
+            if source!=target:
+                smaller=min((source,target),key=len)
+                ways={wid for u,v,wid,_,_ in rg.segments if u in smaller or v in smaller}
+                out['issues'].extend(i for i in related_issues if i['category'] in {'connectivity','junction','pedestrian'} and any(ref['kind']=='way' and ref['id'] in ways for ref in i['refs']))
         return out
     streets = {}
     for _,_,e in result["edges"]:
@@ -217,7 +242,7 @@ def catchment(doc,req,rg):
                 out["issues"].append(issue("Остановка не связана с пешеходной сетью", "Нет привязки в пределах 60 м.",
                                            refs=[{"kind":"node","id":nid}],prefix="catch",category="pedestrian"))
         g,nodes = r.virtual_graph(rg,selected)
-        result = r.reach(rg,dict.fromkeys(nodes,0),out["limit_m"],"length",graph=g)
+        result = r.reach(rg,{node:snap.distance for node,snap in zip(nodes,selected)},out["limit_m"],"length",graph=g)
         polygons.append(r.polygon(result,"buffer",req.buffer_m))
         results.append(result)
     a,b = polygons

@@ -81,3 +81,37 @@ test('reports menu and help close on Escape', () => {
   act(() => window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' })));
   assert.equal(host.querySelector('[role=dialog]'), null);
 });
+
+test('column drag stores the width and release stops resizing', () => {
+  act(() =>
+    root.render(
+      <ResizableTable id="drag-test">
+        <thead>
+          <tr>
+            <th>Road</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>A</td>
+          </tr>
+        </tbody>
+      </ResizableTable>,
+    ),
+  );
+  const th = host.querySelector('th')!,
+    handle = host.querySelector('[role=separator]')!;
+  th.getBoundingClientRect = () => ({ width: 100 }) as DOMRect;
+  const pointer = (type: string, x: number) => {
+    const event = new dom.window.MouseEvent(type, { clientX: x, bubbles: true });
+    Object.defineProperty(event, 'pointerId', { value: 1 });
+    act(() => handle.dispatchEvent(event));
+  };
+  pointer('pointerdown', 10);
+  pointer('pointermove', 40);
+  assert.equal(th.style.width, '130px');
+  assert.deepEqual(JSON.parse(localStorage.getItem('uds-table-drag-test')!), [130]);
+  pointer('pointerup', 40);
+  pointer('pointermove', 100);
+  assert.equal(th.style.width, '130px');
+});

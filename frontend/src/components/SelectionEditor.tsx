@@ -29,29 +29,52 @@ export default function SelectionEditor({
   const common = multi.length
     ? Object.keys(
         (multi[0].kind === 'way'
-          ? [...geo.ways.features,...geo.areas.features].find((f) => f.properties.id === multi[0].id)
+          ? [...geo.ways.features, ...geo.areas.features].find((f) => f.properties.id === multi[0].id)
           : geo.nodes.features.find((f) => f.properties.id === multi[0].id)
         )?.properties.tags ?? {},
       ).filter((k) =>
         multi.every((ref) => {
           const tags = (
             ref.kind === 'way'
-              ? [...geo.ways.features,...geo.areas.features].find((f) => f.properties.id === ref.id)
+              ? [...geo.ways.features, ...geo.areas.features].find((f) => f.properties.id === ref.id)
               : geo.nodes.features.find((f) => f.properties.id === ref.id)
           )?.properties.tags;
           return tags && k in tags;
         }),
       )
     : [];
-  const segmentWay = segment ? geo.ways.features.find(f=>f.properties.id===segment.way_id) : undefined;
-  const metrics = segment && segmentWay ? segmentGeometry(segmentWay.geometry.coordinates,segment.start,segment.end) : null;
-  const reviewSegment = (tags:Record<string,string|null>, attributes:Op[] = []) => {
-    if(!segment)return;
-    const fix:Fix={label:'Изменить участок (ребро будет разделено до 3 частей)',op:'edit_segment',args:{...segment,tags,attributes}};
-    onFix({id:'segment-edit',severity:'info',category:'data',title:'Редактирование участка',description:'Изменить только выбранный участок одной отменяемой транзакцией с обновлением отношений.',refs:[{kind:'way',id:segment.way_id}],location:null,fix,fixes:[fix],levels:[]},fix);
+  const segmentWay = segment ? geo.ways.features.find((f) => f.properties.id === segment.way_id) : undefined;
+  const metrics =
+    segment && segmentWay
+      ? segmentGeometry(segmentWay.geometry.coordinates, segment.start, segment.end)
+      : null;
+  const reviewSegment = (tags: Record<string, string | null>, attributes: Op[] = []) => {
+    if (!segment) return;
+    const fix: Fix = {
+      label: 'Изменить участок (ребро будет разделено до 3 частей)',
+      op: 'edit_segment',
+      args: { ...segment, tags, attributes },
+    };
+    onFix(
+      {
+        id: 'segment-edit',
+        severity: 'info',
+        category: 'data',
+        title: 'Редактирование участка',
+        description:
+          'Изменить только выбранный участок одной отменяемой транзакцией с обновлением отношений.',
+        refs: [{ kind: 'way', id: segment.way_id }],
+        location: null,
+        fix,
+        fixes: [fix],
+        levels: [],
+      },
+      fix,
+    );
   };
   const apply = () => {
-    if (segment) { reviewSegment({[key]:value||null});
+    if (segment) {
+      reviewSegment({ [key]: value || null });
     } else
       onOp(
         multi.map((ref) => ({ op: 'set_tags', args: { ...ref, tags: { [key]: value || null } } })),
@@ -68,8 +91,14 @@ export default function SelectionEditor({
         </button>
       </div>
       <div className="insp-body stack10">
-        {segmentWay && <WayAttributes way={segmentWay.properties} tags={segmentWay.properties.tags}
-          setTags={patch=>reviewSegment(patch)} onOp={ops=>reviewSegment({},Array.isArray(ops)?ops:[ops])} />}
+        {segmentWay && (
+          <WayAttributes
+            way={segmentWay.properties}
+            tags={segmentWay.properties.tags}
+            setTags={(patch) => reviewSegment(patch)}
+            onOp={(ops) => reviewSegment({}, Array.isArray(ops) ? ops : [ops])}
+          />
+        )}
 
         <p className="small">
           {segment
@@ -96,7 +125,15 @@ export default function SelectionEditor({
                   const t = TEMPLATES.find((t) => t.name === e.target.value);
                   if (t)
                     onOp(
-                      multi.filter((r) => r.kind === 'way' && geo.ways.features.some(f=>f.properties.id===r.id && f.properties.layer==='road')).flatMap((r) => templateOps(r.id, t)),
+                      multi
+                        .filter(
+                          (r) =>
+                            r.kind === 'way' &&
+                            geo.ways.features.some(
+                              (f) => f.properties.id === r.id && f.properties.layer === 'road',
+                            ),
+                        )
+                        .flatMap((r) => templateOps(r.id, t)),
                       'Шаблон для выбранных рёбер',
                     );
                 }}

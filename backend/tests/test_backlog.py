@@ -196,3 +196,47 @@ def test_segment_lane_attributes_preview_is_atomic():
     assert sum(w.tags.get('lanes')=='3' for w in doc.ways.values())==1
     h.undo()
     assert doc.to_xml()==before
+
+
+def test_diagnosed_oneway_fix_has_valid_preview_arguments(tmp_path,monkeypatch):
+    monkeypatch.setattr(main,'DRAFT_DIR',tmp_path)
+    doc=xml([(1,0),(2,100)],way(10,[1,2],'<tag k="oneway" v="yes"/>'))
+    c=TestClient(main.app)
+    did=c.post('/api/documents',files={'file':('t.osm',doc.to_xml(),'application/xml')}).json()['doc_id']
+    query={'from':{'node_id':2},'to':{'node_id':1}}
+    route=c.post(f'/api/documents/{did}/analysis/route',json=query).json()
+    assert not route['found']
+    fix=route['issues'][0]['fixes'][0]
+    response=c.post(f'/api/documents/{did}/fix-preview',json={**fix,'probe':query})
+    assert response.status_code==200,response.text
+    assert response.json()['probe']['found']
+    assert main.SESSIONS[did].revision==0
+
+
+def test_component_diagnosis_connects_to_middle_of_edge_without_mutation():
+    from app.fix_preview import preview
+    coords={1:(52.259,104.262),2:(52.26,104.262),3:(52.26015,104.258),4:(52.26015,104.266)}
+    ns=''.join(f'<node id="{n}" lat="{lat}" lon="{lon}"/>' for n,(lat,lon) in coords.items())
+    ws=way(10,[1,2],'<tag k="highway" v="footway"/>')+way(20,[3,4],'<tag k="highway" v="footway"/>')
+    doc=OsmDocument.parse(f'<osm version="0.6">{ns}{ws}</osm>'.encode())
+    query=RouteRequest.model_validate({'from':{'node_id':1},'to':{'node_id':4},'mode':'walk'})
+    out=network_analysis.route(doc,query)
+    assert not out['found']
+    fix=out['issues'][0]['fixes'][0]
+    assert fix['op']=='connect_endpoint' and fix['args']['way_id']==20
+    before=doc.to_xml()
+    result=preview(doc,fix['op'],fix['args'],probe=lambda d:network_analysis.route(d,query))
+    assert result['probe']['found'] and doc.to_xml()==before
+
+
+def test_validation_cache_is_revision_scoped(raw,tmp_path,monkeypatch):
+    monkeypatch.setattr(main,'DRAFT_DIR',tmp_path)
+    c=TestClient(main.app)
+    did=c.post('/api/documents',files={'file':('t.osm',raw,'application/xml')}).json()['doc_id']
+    with patch('app.main.validate',wraps=main.validate) as compute:
+        c.get(f'/api/documents/{did}/validate')
+        c.get(f'/api/documents/{did}/validate')
+        assert compute.call_count==1
+        c.post(f'/api/documents/{did}/ops',json={'op':'set_tags','args':{'kind':'way','id':100,'tags':{'maxspeed':'50'}}})
+        c.get(f'/api/documents/{did}/validate')
+        assert compute.call_count==2
