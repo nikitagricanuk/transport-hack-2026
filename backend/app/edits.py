@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from .geo import GridIndex, LocalProjection, dist, project_on_segment, segment_intersection
 from .osm_model import Element, Kind, Member, Node, OsmDocument, Relation, Way, clone
-from .norms import max_grade
+from .norms import lane_width, max_grade
 from .roads import can_connect, direction, is_drivable, lane_tags, parse_int, reversed_tags
 
 
@@ -1348,7 +1348,125 @@ def op_replace_restriction_way(doc, tx, relation_id: int, role: str, old_id: int
     return {"id": rel.id}
 
 
+def _direction_tags(tags: dict[str, str], side: str) -> dict[str, str]:
+    """Tags of one carriageway: ``*:forward`` (or ``*:backward``) become plain keys,
+    the other direction's keys are dropped, the road becomes one-way."""
+    other = "backward" if side == "forward" else "forward"
+    out: dict[str, str] = {}
+    for k, v in tags.items():
+        if f":{other}" in k or k in ("oneway",):
+            continue
+        out[k.replace(f":{side}", "")] = v
+    for k, v in tags.items():   # direction-specific values win over the shared ones
+        if f":{side}" in k:
+            out[k.replace(f":{side}", "")] = v
+    out["oneway"] = "yes"
+    return out
+
+
+def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
+    """Turn a two-way road into two one-way carriageways (as OSM maps divided roads).
+
+    Each carriageway sits at the centre of its own direction: offset from the old
+    axis by half its lanes (lane width by class, СП 42.13330.2016) plus half the
+    median. The ends and every node where another road joins stay shared, so the
+    network stays connected there; in between, new roads can be attached to either
+    direction. The old way keeps its id as the forward carriageway; the backward
+    one is a new way drawn in its own direction of travel.
+    """
+    w = _way(doc, int(way_id))
+    if not is_drivable(w.tags):
+        raise OpError("разделить можно только проезжую дорогу")
+    if direction(w.tags) != 0:
+        raise OpError("дорога уже односторонняя")
+    if len(w.nodes) < 3:
+        raise OpError("у дороги нет промежуточных точек: сначала добавьте узел посередине")
+    first, last = w.nodes[0], w.nodes[-1]
+    restrictions = [rel for rel in doc.relations_with("way", w.id) if _is_restriction(rel.tags)]
+    for rel in restrictions:
+        if not _via_node_ids(doc, rel) & {first, last}:
+            raise OpError(f"запрет поворота {rel.id} проходит через середину дороги: сначала исправьте или удалите его")
+    t = w.tags
+    total = parse_int(t.get("lanes"))
+    fw, bw = parse_int(t.get("lanes:forward")), parse_int(t.get("lanes:backward"))
+    if fw is None and bw is None:
+        fw = bw = max(1, (total or 2) // 2)
+    elif fw is None:
+        fw = max(1, (total or bw + 1) - bw)
+    elif bw is None:
+        bw = max(1, (total or fw + 1) - fw)
+    lw = lane_width(t)
+    off_f = fw * lw / 2 + float(median_m) / 2
+    off_b = bw * lw / 2 + float(median_m) / 2
+
+    index = doc.node_way_index()
+    anchors = {w.nodes[0], w.nodes[-1]} | {
+        n for n in w.nodes[1:-1] if any(x != w.id and "highway" in doc.ways[x].tags for x in index.get(n, []))}
+    proj = _proj(doc)
+    pts = [proj.to_xy(doc.nodes[n].lat, doc.nodes[n].lon) for n in w.nodes]
+
+    def normal(i: int) -> tuple[float, float]:   # right-hand unit normal at vertex i
+        a, b = pts[max(0, i - 1)], pts[min(len(pts) - 1, i + 1)]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = (dx * dx + dy * dy) ** 0.5 or 1.0
+        return dy / length, -dx / length
+
+    right: list[int] = []
+    left: list[int] = []
+    for i, nid in enumerate(w.nodes):
+        if nid in anchors:
+            right.append(nid)
+            left.append(nid)
+            continue
+        nx, ny = normal(i)
+        node_tags = doc.nodes[nid].tags
+        for side, off, out in ((1, off_f, right), (-1, off_b, left)):
+            lat, lon = proj.to_latlon(pts[i][0] + side * nx * off, pts[i][1] + side * ny * off)
+            out.append(_create_node(doc, tx, lat, lon, dict(node_tags)).id)
+    tx.touch("way", w.id)
+    old_inner = [n for n in w.nodes if n not in anchors]
+    base_tags = dict(t)
+    w.nodes = right
+    w.tags = _direction_tags(base_tags, "forward")
+    w.tags["lanes"] = str(fw)
+    bid = doc.new_id()
+    tx.touch("way", bid)
+    back_tags = _direction_tags(base_tags, "backward")
+    back_tags["lanes"] = str(bw)
+    doc.ways[bid] = Way(id=bid, nodes=list(reversed(left)), tags=back_tags)
+    # turn restrictions: «from» is the carriageway arriving at the via node, «to» the one
+    # leaving it. The forward carriageway ends at the old last node and starts at the first,
+    # the backward one the other way round.
+    for rel in restrictions:
+        via = _via_node_ids(doc, rel)
+        arrive, leave = (w.id, bid) if last in via else (bid, w.id)
+        tx.touch("relation", rel.id)
+        rel.members = [Member("way", arrive if m.role == "from" else leave, m.role)
+                       if m.type == "way" and m.ref == w.id and m.role in ("from", "to") else m
+                       for m in rel.members]
+    # routes and other relations that used the road now use both carriageways
+    for rel in doc.relations_with("way", w.id):
+        if _is_restriction(rel.tags):
+            continue
+        tx.touch("relation", rel.id)
+        members: list[Member] = []
+        for m in rel.members:
+            members.append(m)
+            if m.type == "way" and m.ref == w.id:
+                members.append(Member("way", bid, m.role))
+        rel.members = members
+    # the old inner points are no longer on any road: drop them unless something else uses them
+    still_used = {r for x in doc.ways.values() for r in x.nodes}
+    for nid in old_inner:
+        if nid not in still_used and not any(True for _ in doc.relations_with("node", nid)):
+            tx.touch("node", nid)
+            del doc.nodes[nid]
+    return {"id": w.id, "new_id": bid, "forward_lanes": fw, "backward_lanes": bw,
+            "offset_m": [round(off_f, 2), round(off_b, 2)]}
+
+
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
+    "split_carriageways": (op_split_carriageways, "Дорога разделена на две проезжие части"),
     "replace_restriction_way": (op_replace_restriction_way, "Исправлено ребро запрета поворота"),
     "set_restriction_via": (op_set_restriction_via, "Исправлен узел запрета поворота"),
     "smooth_z": (op_smooth_z, "Плавный Z-переход"),
