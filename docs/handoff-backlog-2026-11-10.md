@@ -82,3 +82,11 @@ Baseline `6ca3e6f` city without SUMO, under concurrent load: open **11.31 s**, v
 - Local QA servers were started on ports 8000 and 5173. They are development processes, not deployment.
 - A detached baseline worktree exists at `/tmp/transport-backlog-baseline`; preserve/remove it through normal Git worktree commands as needed.
 - No PR was merged and no production state was modified.
+
+## PR creation update
+
+Draft PR: https://github.com/nikitagricanuk/transport-hack-2026/pull/23
+
+Fresh checks on implementation commit `86d456b`: **154 backend tests passed; 28 utility + 11 DOM frontend tests passed; Ruff, TypeScript and production build passed**.
+
+At PR creation, `main` had advanced to `528bba4` through PR #22 (`feat/handoff-analysis`), which independently adds overlapping analysis work. A read-only `git merge-tree` check confirmed content/add-add conflicts, including routing, AnalysisTools, API/main, validation and related UI/tests. This draft intentionally preserves the implemented branch for review; it has **not** reconciled the newer main, merged, or deployed. Next integration work must compare the two implementations and retain the accepted changes from main rather than overwriting them.
