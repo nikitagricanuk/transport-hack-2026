@@ -14,7 +14,7 @@ export const INTENSITY_PRESETS: { name: string; multiplier: number; hint: string
   { name: 'Межпиковый', multiplier: 0.65, hint: 'день' },
   { name: 'Выходной', multiplier: 0.5, hint: 'суббота' },
   { name: 'Ночь', multiplier: 0.15, hint: '00–05' },
-  { name: 'Перспектива +30%', multiplier: 1.3, hint: 'рост спроса' },
+  { name: 'Перспектива +30 %', multiplier: 1.3, hint: 'рост спроса' },
 ];
 
 export function IntensityPresets({ current, onPick }: { current: number; onPick: (m: number) => void }) {
@@ -128,7 +128,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
             <button key={r.id} className="link worst" onClick={() => onShowRoad(r.id)}>
               <span className="los-dot" style={{ background: LOS_COLOR[r.los] }}>{r.los}</span>
               <span className="grow ellipsis">{r.name || `${r.highway} #${r.id}`}</span>
-              <span className="mono small">{fmt(r.volume)} авт/ч</span>
+              <span className="mono small">{fmt(r.volume)} авт./ч</span>
             </button>
           ))}
           {flows.missing.length > 0 && (
@@ -154,7 +154,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
               {c.issues?.map(i=><div key={i.id}><b>{i.title}</b><p className="small">{i.description}</p>{i.fixes.map(f=><button key={f.label} className="btn small" onClick={()=>onFix(i,f)}>{f.label} · предпросмотр</button>)}</div>)}
               {c.alternatives?.map((a,index)=><button key={index} className="btn small" aria-pressed={c.selected_alternative===index} onClick={()=>onDetour(c.id,index)}>Объезд {index+1}: {(a.time_s/60).toFixed(1)} мин · {(a.length_m/1000).toFixed(2)} км</button>)}
               <span className="small">{c.found
-                ? `Объезд по ${c.ways.length} рёбрам, +${fmt(Math.max(0, c.detour_s), 0)} с, перешло ${fmt(c.moved ?? c.volume)} авт/ч`
+                ? `Объезд по ${c.ways.length} рёбрам, +${fmt(Math.max(0, c.detour_s), 0)} с, перешло ${fmt(c.moved ?? c.volume)} авт./ч`
                   + (c.partial ? '; в обратном направлении объезда нет' : '')
                 : 'Объезда нет в пределах карты — поток не может проехать'}</span>
             </div>
@@ -423,7 +423,7 @@ export function BasemapControls({ base, onBase, overlay, onOverlayFile, onOverla
         <div className="card stack6">
           <div className="row between"><b className="ellipsis">{overlay.name}</b>
             <button className="icon-btn" aria-label="Убрать снимок" onClick={() => onOverlay(null)}>×</button></div>
-          <label className="small muted stack4">Прозрачность снимка {Math.round(overlay.opacity * 100)}%
+          <label className="small muted stack4">Прозрачность снимка {Math.round(overlay.opacity * 100)} %
             <input type="range" min={0.1} max={1} step={0.05} value={overlay.opacity}
               onChange={(e) => onOverlay({ ...overlay, opacity: Number(e.target.value) })} />
           </label>

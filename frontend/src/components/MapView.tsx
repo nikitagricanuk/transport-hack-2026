@@ -9,10 +9,11 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
 import type { BaseMap, ImageOverlay } from './Extras';
-import { LANE_MINZOOM, buildLanes, laneSplit, type LaneRoad } from '../utils/lanes';
+import { LANE_MINZOOM, buildLanes, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
+import { buildTrees } from '../utils/scenery';
 import { defaultCamera } from '../utils/view';
 
 export interface MapHandle {
@@ -30,6 +31,10 @@ export interface MapHandle {
   toggleFullscreen: () => void;
   /** Points in the way currently being drawn. Zero when that draft is idle. */
   draftPointCount: () => number;
+  /** drop the way being drawn (Esc / Ctrl+Z while drawing) */
+  cancelDraft: () => void;
+  /** leave vertex editing or merge picking; true when something was cancelled */
+  cancelPending: () => boolean;
   flyTo: (lon: number, lat: number, zoom?: number) => void;
   fitBounds: (b: [number, number, number, number]) => void;
 }
@@ -65,6 +70,8 @@ interface Props {
   layers: LayerVisibility;
   baseOpacity: number;
   issues: Issue[];
+  /** analytics mode: roads without a load colour are plain white instead of their class colour */
+  analytics?: boolean;
   /** v/c per way id: roads are coloured by congestion while set */
   loadVc: Map<number, number> | null;
   /** edits vs the loaded file, drawn as "before" (dashed) and "after" overlays while set */
@@ -245,6 +252,13 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     resetView,
     toggleFullscreen: () => toggleMapFullscreen(mapRef.current),
     draftPointCount: () => draft.current.length,
+    cancelDraft: () => cancelDraft(),
+    cancelPending: () => {
+      let any = false;
+      if (vertexEdit.current !== null) { vertexEdit.current = null; updateVerts(); propsRef.current.onHint(null); any = true; }
+      if (mergeFirst.current !== null) { mergeFirst.current = null; propsRef.current.onHint(null); any = true; }
+      return any;
+    },
     flyTo: (lon, lat, zoom = 18) => mapRef.current?.flyTo({ center: [lon, lat], zoom, speed: 1.6 }),
     fitBounds: (b) => mapRef.current?.fitBounds([[b[1], b[0]], [b[3], b[2]]], { padding: 40, duration: 0 }),
   }));
@@ -312,21 +326,33 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'analysis', 'segment-selection', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
+        'trees', 'analysis', 'segment-selection', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
       // translucent plans: the base map stays readable under buildings and zones
       map.addLayer({ id: 'zones-fill', type: 'fill', source: 'areas', filter: ['!=', ['get', 'layer'], 'building'],
         layout: { 'fill-sort-key': ['coalesce', ['get', 'z'], 0] },
-        paint: { 'fill-color': '#9CCB86', 'fill-opacity': 0.45 } });
+        paint: { 'fill-color': ['match', ['coalesce', ['get', 'landuse', ['get', 'tags']], ''], 'residential', '#D9D5CB', 'industrial', '#CDCBD4', 'commercial', '#E2D3CB', 'forest', '#84AB79', '#9CCB86'], 'fill-opacity': 0.45 } });
       map.addLayer({ id: 'zones-line', type: 'line', source: 'areas', filter: ['!=', ['get', 'layer'], 'building'],
         paint: { 'line-color': '#6A9E55', 'line-width': 1, 'line-opacity': 0.8 } });
+      map.addLayer({ id: 'tree-shadows', type: 'circle', source: 'trees', minzoom: 14,
+        paint: { 'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, 8, 21, 40],
+          'circle-color': '#284735', 'circle-opacity': 0.18, 'circle-translate': [2, 3], 'circle-pitch-alignment': 'map' } });
+      map.addLayer({ id: 'tree-canopies', type: 'circle', source: 'trees', minzoom: 14,
+        paint: { 'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, ['*', 6, ['get', 'size']], 21, ['*', 32, ['get', 'size']]],
+          'circle-color': ['match', ['get', 'shade'], 0, '#689665', 1, '#80A76E', '#527E59'],
+          'circle-stroke-color': '#496F4C', 'circle-stroke-width': 0.5, 'circle-opacity': 0.85, 'circle-pitch-alignment': 'map' } });
       map.addLayer({ id: 'buildings-fill', type: 'fill', source: 'areas', filter: ['==', ['get', 'layer'], 'building'],
         layout: { 'fill-sort-key': ['coalesce', ['get', 'z'], 0] },
         paint: { 'fill-color': '#B8B2A6', 'fill-opacity': 0.6 } });
       map.addLayer({ id: 'buildings-line', type: 'line', source: 'areas', filter: ['==', ['get', 'layer'], 'building'],
         paint: { 'line-color': '#8A8273', 'line-width': 1, 'line-opacity': 0.9 } });
+      map.addLayer({ id: 'building-numbers', type: 'symbol', source: 'areas', minzoom: 15,
+        filter: ['==', ['get', 'layer'], 'building'],
+        layout: { 'text-field': ['coalesce', ['get', 'addr:housenumber', ['get', 'tags']], ''],
+          'text-font': ['Open Sans Regular'], 'text-size': 11 },
+        paint: { 'text-color': '#565C61', 'text-halo-color': '#F4F2EC', 'text-halo-width': 1.2 } });
       map.addLayer({ id: 'area-selected', type: 'line', source: 'areas', filter: ['==', ['get', 'id'], 0],
         paint: { 'line-color': '#2563EB', 'line-width': 2.5 } });
       for (const style of PATH_STYLES) {
@@ -532,6 +558,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         src.setData(geo[id]);
       }
     }
+    (map.getSource('trees') as GeoJSONSource).setData(buildTrees(geo));
     rendered.current = geo;
     clearDrag();
     drawPeerSelections();
@@ -543,6 +570,15 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, props.geo]);
+
+  // analytics: one neutral white for every road class, congestion colours on top
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    for (const id of ['road-fill', 'road-link']) {
+      if (map.getLayer(id)) map.setPaintProperty(id, 'line-color', roadLineColor(!!props.analytics));
+    }
+  }, [ready, props.analytics]);
 
   // Only roads whose v/c changed receive feature-state updates.
   const paintedLoad = useRef(new Map<string | number,number>());
@@ -709,8 +745,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const map = mapRef.current;
     if (!ready || !map) return;
     const ids: Record<DrawGroup, string[]> = {
-      zones: ['zones-fill', 'zones-line'],
-      buildings: ['buildings-fill', 'buildings-line'],
+      zones: ['zones-fill', 'zones-line', 'tree-shadows', 'tree-canopies'],
+      buildings: ['buildings-fill', 'buildings-line', 'building-numbers'],
       paths: PATH_LAYER_IDS,
       roads: ['road-casing', 'road-fill', 'road-link', 'lane-surface', 'lane-marks', 'lane-dashes', 'lane-arrows', 'oneway', 'road-label'],
       rail: ['rail'],
@@ -727,7 +763,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     if (!ready || !map || !props.geo) return;
     const roads: LaneRoad[] = props.geo.ways.features
       .filter((f) => f.properties.layer === 'road')
-      .map((f) => ({ id: f.properties.id, coords: f.geometry.coordinates, ...laneSplit(f.properties.tags, f.properties.dir) }));
+      .map((f) => {
+        const split = laneSplit(f.properties.tags, f.properties.dir);
+        return { id: f.properties.id, coords: f.geometry.coordinates, ...split,
+          laneW: laneWidthFor(f.properties.tags, split.forward + split.backward) };
+      });
     const g = buildLanes(roads);
     (map.getSource('lane-surface') as GeoJSONSource).setData(g.surface);
     (map.getSource('lane-marks') as GeoJSONSource).setData(g.marks);
@@ -828,11 +868,16 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     showIf(map, ['stop-symbol', 'stop-label'], L.stops);
     showIf(map, PATH_LAYER_IDS, L.paths);
     showIf(map, ['rail'], L.rail);
-    showIf(map, ['zones-fill', 'zones-line', 'buildings-fill', 'buildings-line'], L.buildings);
+    showIf(map, ['zones-fill', 'zones-line', 'tree-shadows', 'tree-canopies', 'buildings-fill', 'buildings-line', 'building-numbers'], L.buildings);
     showIf(map, ['issues'], L.issues);
     const cats = [L.signals && 'signal', L.crossings && 'crossing', L.tramSignals && 'tram_signal', L.nodes && 'tagged'].filter(Boolean);
     filterIf(map, 'pois', ['in', ['get', 'category'], ['literal', cats]]);
-  }, [ready, props.layers]);
+    // the invisible hit layer must follow the toggles too: a hidden road, path or track
+    // cannot be clicked, hovered or dragged
+    const hit = [L.roads && 'road', L.paths && 'path', L.rail && 'rail'].filter(Boolean);
+    const hidden=(props.geo?.ways.features??[]).filter(f=>L.roadsSub?.[f.properties.highway]===false).map(f=>f.properties.id);
+    filterIf(map, 'ways-hit', ['all',['in', ['get', 'layer'], ['literal', hit]],['!', ['in',['get','id'],['literal',hidden]]]]);
+  }, [ready, props.layers, props.geo]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -872,7 +917,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const map=mapRef.current;if(!ready || !map)return;
     const hidden=Object.entries(props.layers.roadsSub??{}).filter(([,v])=>!v).map(([k])=>k);
     const ids=(props.geo?.ways.features??[]).filter(f=>hidden.includes(f.properties.highway)).map(f=>f.properties.id);
-    for(const layer of ['road-casing','road-fill','road-link','road-label','oneway','ways-hit',...PATH_LAYER_IDS,'lane-surface','lane-marks','lane-dashes','lane-arrows']){
+    for(const layer of ['road-casing','road-fill','road-link','road-label','oneway',...PATH_LAYER_IDS,'lane-surface','lane-marks','lane-dashes','lane-arrows']){
       if(!map.getLayer(layer))continue;
       if(!subgroupBase.current.has(layer))subgroupBase.current.set(layer,map.getFilter(layer) || undefined);
       const base=subgroupBase.current.get(layer);

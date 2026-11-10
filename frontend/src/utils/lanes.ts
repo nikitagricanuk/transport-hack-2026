@@ -1,9 +1,28 @@
 import type { Feature, FeatureCollection, LineString, Polygon } from 'geojson';
 
-/** Lane width used for the physical view, metres. */
+/** Default lane width, metres (магистральные улицы, СП 42.13330.2016). */
 export const LANE_W = 3.5;
+
+/**
+ * Lane width by road class, metres — СП 42.13330.2016, разд. 11 (ширина полосы движения):
+ * магистральные дороги 3,75; магистральные улицы общегородского и районного значения 3,5;
+ * улицы местного значения в жилой застройке 3,0; проезды 2,75. The mapping of OSM classes
+ * to the street categories of the СП is ours.
+ */
+export const LANE_WIDTH_BY_CLASS: Record<string, number> = {
+  motorway: 3.75, trunk: 3.75, primary: 3.5, secondary: 3.5, tertiary: 3.5,
+  unclassified: 3.0, residential: 3.0, living_street: 3.0, service: 2.75,
+};
+
+/** Lane width for a way: its own width tag split over the lanes, else the class value. */
+export function laneWidthFor(tags: Record<string, string>, lanes: number): number {
+  const w = parseFloat((tags.width ?? '').replace(',', '.'));
+  if (Number.isFinite(w) && w > 0 && lanes > 0) return Math.min(4.5, Math.max(2.5, w / lanes));
+  const base = (tags.highway ?? '').replace(/_link$/, '');
+  return LANE_WIDTH_BY_CLASS[base] ?? LANE_W;
+}
 /** From this zoom roads are drawn at their real width with lanes and markings. */
-export const LANE_MINZOOM = 17;
+export const LANE_MINZOOM = 15;
 
 const M_PER_DEG_LAT = 110_540;
 const M_PER_DEG_LON_EQ = 111_320;
@@ -13,6 +32,8 @@ export interface LaneRoad {
   coords: number[][];
   forward: number;
   backward: number;
+  /** metres; LANE_W when not given */
+  laneW?: number;
 }
 
 export interface LaneGeometry {
@@ -86,7 +107,8 @@ export function buildLanes(roads: LaneRoad[]): LaneGeometry {
     const r={...raw,coords:rounded.length?rounded:display};
     const n = r.forward + r.backward;
     if (n < 1 || r.coords.length < 2) continue;
-    const half = (n * LANE_W) / 2;
+    const lw = r.laneW ?? LANE_W;
+    const half = (n * lw) / 2;
     const left = offsetLine(r.coords, -half);
     const right = offsetLine(r.coords, half);
     surface.push({
@@ -95,13 +117,13 @@ export function buildLanes(roads: LaneRoad[]): LaneGeometry {
       properties: { id: r.id },
     });
     // Match width at a two-way join, then return to own width within 25 metres.
-    const ownHalf=n*LANE_W/2;
+    const ownHalf=half;
     const widths=r.coords.map((p)=>{
       const distance=(a:number[],b:number[])=>Math.hypot((a[0]-b[0])*M_PER_DEG_LON_EQ*Math.cos(p[1]*Math.PI/180),(a[1]-b[1])*M_PER_DEG_LAT);
       let width=ownHalf;
       for(const [end,at] of [[r.coords[0],0],[r.coords[r.coords.length-1],r.coords.length-1]] as const){
         const linked=ends.get(end.join(','));
-        if(linked?.length===2){const other=linked.find(w=>w.id!==r.id);if(other){const blend=(n+other.forward+other.backward)*LANE_W/4;width+=(blend-ownHalf)*Math.max(0,1-distance(p,end)/25);}}
+        if(linked?.length===2){const other=linked.find(w=>w.id!==r.id);if(other){const blend=(n*lw+(other.forward+other.backward)*(other.laneW??LANE_W))/4;width+=(blend-ownHalf)*Math.max(0,1-distance(p,end)/25);}}
         void at;
       }
       return width;
@@ -114,12 +136,12 @@ export function buildLanes(roads: LaneRoad[]): LaneGeometry {
       const kind = j === 0 || j === n ? 'edge' : j === r.backward && r.backward > 0 && r.forward > 0 ? 'center' : 'lane';
       marks.push({
         type: 'Feature',
-        geometry: { type: 'LineString', coordinates: j === 0 ? left : j === n ? offsetLine(r.coords, half) : offsetLine(r.coords, -half + j * LANE_W) },
+        geometry: { type: 'LineString', coordinates: j === 0 ? left : j === n ? offsetLine(r.coords, half) : offsetLine(r.coords, -half + j * lw) },
         properties: { id: r.id, kind },
       });
     }
     for (let i = 0; i < n; i++) {
-      const line = offsetLine(r.coords, -half + LANE_W * (i + 0.5));
+      const line = offsetLine(r.coords, -half + lw * (i + 0.5));
       const backward = i < r.backward;
       arrows.push({
         type: 'Feature',

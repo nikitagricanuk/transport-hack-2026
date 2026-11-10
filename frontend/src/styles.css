@@ -404,6 +404,15 @@ input[type="checkbox"]:disabled { cursor: default; }
 .analysis-legend { position:absolute;left:12px;bottom:30px;background:var(--panel);padding:8px;border-radius:6px;max-width:70%;font-size:12px;pointer-events:none; }
 
 
+.num-input { width: 110px; font-family: var(--mono); padding: 4px 6px; }
+
+/* «Править всё» */
+.modal.fix-all { width: min(760px, calc(100vw - 32px)); max-height: 86vh; display: flex; flex-direction: column; gap: 10px; }
+.fix-all-list { display: flex; flex-direction: column; gap: 4px; max-height: 30vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.fix-all-row { display: flex; gap: 10px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.fix-all-row:hover { background: #18202a; }
+.fix-all-row.disputed { cursor: default; }
+
 .analysis-tools [role="tablist"] { flex-wrap: wrap; }
 .analysis-tools input[type="number"] { max-width: 90px; }
 .analysis-tools table { width: 100%; border-collapse: collapse; }

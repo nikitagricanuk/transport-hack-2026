@@ -67,12 +67,17 @@ export function casingWidthExtra(): ExpressionSpecification {
   return ['+', matchHighway((mark) => mark.casingExtra, FALLBACK_CASING_EXTRA), ['case', ['get', 'bridge'], 1.6, 0]];
 }
 
-/** Normal colour, or green → red while a load scenario is painted via feature-state. */
-export function roadLineColor(): ExpressionSpecification {
+/**
+ * Normal colour, or green → red while a load scenario is painted via feature-state.
+ * `neutral` (analytics mode): every road without a load value is plain white, whatever
+ * its class colour, so only the congestion colours carry meaning.
+ */
+export const NEUTRAL_ROAD = '#FFFFFF';
+export function roadLineColor(neutral = false): ExpressionSpecification {
   return [
     'case',
     ['<', ['to-number', ['coalesce', ['feature-state', 'vc'], -1]], 0],
-    roadColor(),
+    neutral ? NEUTRAL_ROAD : roadColor(),
     // smooth gradient: free flow green, through yellow and orange, to dark red for a jam
     ['interpolate', ['linear'], ['to-number', ['coalesce', ['feature-state', 'vc'], 0]],
       0, '#16A34A', 0.5, '#84CC16', 0.75, '#EAB308', 0.9, '#F97316', 1.0, '#DC2626', 1.3, '#7F1D1D'],

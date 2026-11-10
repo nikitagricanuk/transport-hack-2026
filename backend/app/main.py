@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__, report
 from .collab import HUB, Peer, clean_presence
-from . import fix_preview
+from . import fix_all, fix_preview
 from . import signals as signal_plans
 from . import routing, network_analysis, scenario, transit
 from .analysis_requests import RouteRequest, IsochroneRequest, CatchmentRequest, PtRequest
@@ -723,6 +723,14 @@ def run_validate(doc_id: str) -> Response:
         return _json(s.validation_cache[1])
 
 
+@app.get("/api/documents/{doc_id}/fix-all")
+def fix_all_plan(doc_id: str) -> Response:
+    """«Править всё»: safe fixes to confirm as a list, disputed ones left to the user. Applies nothing."""
+    s = _session(doc_id)
+    with s.lock:
+        return _json(fix_all.plan(validate(s.doc)))
+
+
 _STATUS_RU = {"added": "добавлен", "deleted": "удалён", "modified": "изменён"}
 _KIND_RU = {"node": "узел", "way": "ребро", "relation": "отношение"}
 
@@ -1114,8 +1122,8 @@ def _object_report(s: Session, kind: str, eid: int) -> dict[str, Any]:
         row = next((r for r in _rows(s) if r["id"] == eid), None)
         if row:
             facts += [["Класс", row["highway"]], ["Полос", row["lanes"]], ["Длина, м", row["length_m"]],
-                      ["Скорость, км/ч", row["speed"]], ["Пропускная, авт/ч", row["capacity"]],
-                      ["Нагрузка в пик, авт/ч", row["volume"]], ["v/c", row["vc"]], ["Уровень обслуживания", row["los"]],
+                      ["Скорость, км/ч", row["speed"]], ["Пропускная способность, авт./ч", row["capacity"]],
+                      ["Нагрузка в пик, авт./ч", row["volume"]], ["v/c", row["vc"]], ["Уровень обслуживания", row["los"]],
                       ["Время проезда свободно / с нагрузкой, с", f"{row['t0_s']} / {row['t_s']}"],
                       ["Транспорт общего пользования, лег. экв./ч", row.get("transit_pcu", 0)]]
             obj["hourly"] = [round(row["volume"] * k) for k in report.HOURLY_PROFILE]

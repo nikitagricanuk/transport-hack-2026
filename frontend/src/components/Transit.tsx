@@ -21,30 +21,36 @@ export function StopPanel({ docId, nodeId, rev, openRoute, onOpenRoute, onChange
 }) {
   const [info, setInfo] = useState<StopInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [routeLoading, setRouteLoading] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
+    setInfo(null);
     api.stop(docId, nodeId).then((d) => { if (alive) { setInfo(d); setError(null); } }).catch((e: Error) => alive && setError(e.message));
     return () => { alive = false; };
   }, [docId, nodeId, rev]);
 
   const open = async (routeId: number) => {
     if (openRoute?.id === routeId) { onOpenRoute(null); return; }
+    setRouteLoading(routeId);
     try {
       onOpenRoute(await api.route(docId, routeId));
+      setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      setError(`Маршрут не загрузился: ${(e as Error).message}`);
+    } finally {
+      setRouteLoading(null);
     }
   };
 
-  if (error) return <p className="bad small">{error}</p>;
-  if (!info) return <p className="muted small">Маршруты остановки…</p>;
+  if (error && !info) return <p className="bad small">Данные остановки не загрузились: {error}</p>;
+  if (!info) return <p className="muted small">Загрузка данных остановки и маршрутов…</p>;
   return (
     <div className="card stack10">
       <div className="row between"><b>Остановка</b><span className={`load-pill ${info.load_label === 'высокая' ? 'hi' : info.load_label === 'средняя' ? 'mid' : 'lo'}`}>
         загруженность: {info.load_label}</span></div>
       <div className="kpis">
         <div><b>{info.routes.length}</b><span>маршрутов</span></div>
-        <div><b>{fmt(info.vehicles_per_hour)}</b><span>машин в час</span></div>
+        <div><b>{fmt(info.vehicles_per_hour)}</b><span>авт./ч на остановке</span></div>
         <div><b>{fmt(info.residents_400m)}</b><span>оценка жителей в радиусе 400 м по площади зданий (не ИД5)</span></div>
       </div>
       {info.routes.length === 0 && <span className="muted small">В файле нет маршрутов (relation route) через эту остановку.</span>}
@@ -57,6 +63,8 @@ export function StopPanel({ docId, nodeId, rev, openRoute, onOpenRoute, onChange
           </button>
         ))}
       </div>
+      {routeLoading !== null && <span className="muted small">Загрузка маршрута…</span>}
+      {error && <span className="bad small">{error}</span>}
       {openRoute && <RouteCard docId={docId} route={openRoute} onRoute={onOpenRoute} onChanged={onChanged} />}
       <span className="muted small">Загруженность — оценка: жители в шаговой доступности на одну машину в час.</span>
     </div>
@@ -67,14 +75,17 @@ function RouteCard({ docId, route, onRoute, onChanged }: {
   docId: string; route: RouteDetail; onRoute: (r: RouteDetail | null) => void; onChanged: () => void;
 }) {
   const [freq, setFreq] = useState<number | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const value = freq ?? route.frequency;
   const commit = async (v: number | null) => {
     setFreq(null);
     try {
       onRoute(await api.setRouteFrequency(docId, route.id, v));
+      setSaveError(null);
       onChanged();
-    } catch {
-      /* the panel keeps the previous value */
+    } catch (e) {
+      // the panel keeps the previous value and says why
+      setSaveError(`Интервал не сохранён: ${(e as Error).message}`);
     }
   };
   return (
@@ -85,11 +96,12 @@ function RouteCard({ docId, route, onRoute, onChanged }: {
       </div>
       <span className="small">{route.from || '…'} → {route.to || '…'}</span>
       <span className="muted small">{route.stops} остановок, на карте видно {route.lines.length} участков в пределах файла</span>
-      <label className="field"><span>Интервал движения: {fmt(value, 1)} машин в час (каждые {value > 0 ? fmt(60 / value, 0) : '—'} мин){route.custom_frequency ? ' · задано вручную' : ''}</span>
+      <label className="field"><span>Интервал движения: {fmt(value, 1)} авт./ч (каждые {value > 0 ? fmt(60 / value, 0) : '—'} мин){route.custom_frequency ? ' · задано вручную' : ''}</span>
         <input type="range" min={0} max={30} step={1} value={value} aria-label="Машин в час"
           onChange={(e) => setFreq(Number(e.target.value))}
           onPointerUp={() => freq !== null && commit(freq)} onKeyUp={() => freq !== null && commit(freq)} />
       </label>
+      {saveError && <span className="bad small">{saveError}</span>}
       {route.custom_frequency && <button className="link small" onClick={() => commit(null)}>вернуть значение из OSM</button>}
       <span className="muted small">Автобусы маршрута добавляют свой поток (×2,5 легковых) к нагрузке дорог.</span>
     </div>
@@ -151,7 +163,7 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
         <input type="number" min={1} max={170} value={gCross} onChange={(e) => setDraft({ cycle: +e.target.value + gMain + 10, main_share: gMain / (+e.target.value + gMain) })} onBlur={() => send({green_main_s:gMain,green_cross_s:gCross})} /></label>
       <p className="small muted">Жёлтый 3 с; все красные 2 с на фазу. z = Nфакт / P; LOS — ОДМ 218.2.020-2012, таблица 1.</p>
       <div className="row between small">
-        <span className="muted">Вебстер: цикл {plan.webster.cycle} с, главному {Math.round(plan.webster.main_share * 100)}%{plan.webster.saturated ? ' (перегрузка)' : ''}</span>
+        <span className="muted">Вебстер: цикл {plan.webster.cycle} с, главному {Math.round(plan.webster.main_share * 100)} %{plan.webster.saturated ? ' (перегрузка)' : ''}</span>
         <button className="btn small primary" onClick={() => send({ optimize: true })}>Подобрать</button>
       </div>
       <ResizableTable id="transit-1" className="cmp">

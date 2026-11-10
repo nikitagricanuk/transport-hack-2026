@@ -310,6 +310,12 @@ export function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
 
           <div className="card stack10">
             <div className="row between"><b>Полосы</b><span className="muted small">turn:lanes не подставляются</span></div>
+            {mode === 'no' && (
+              <button className="btn small" title="Как в OSM для разделённых дорог: две односторонние оси по центру своих направлений. Перекрёстки остаются общими; к любому направлению можно примыкать отдельно."
+                onClick={() => onOp({ op: 'split_carriageways', args: { way_id: way.id } }, 'Дорога разделена на две проезжие части')}>
+                Разделить на две проезжие части
+              </button>
+            )}
             <div className="grid2">
               <Stepper label="Встречные" value={mode === 'no' ? backward : 0} disabled={mode !== 'no'}
                 onChange={(v) => setLanes(forward, v, mode)} />
