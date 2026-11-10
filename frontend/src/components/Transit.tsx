@@ -121,7 +121,10 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
   if (!plan) return <p className="muted small">План светофора…</p>;
   const cycle = draft.cycle ?? plan.cycle;
   const share = draft.main_share ?? plan.main_share;
-  const green = cycle - 10;
+  // per phase: green + yellow 3 s (ГОСТ Р 52289-2019) + all-red 2 s; both phases add up to the cycle
+  const yellow = plan.phases[0]?.yellow_s ?? 3;
+  const allRed = plan.phases[0]?.all_red_s ?? 2;
+  const green = cycle - 2 * (yellow + allRed);
   const gMain = Math.round(green * share);
   const gCross = green - gMain;
   const commitDraft = () => { if (Object.keys(draft).length) send(draft); };
@@ -131,10 +134,16 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
       <div className="row between"><b>Фазы светофора</b><span className="muted small">{plan.custom ? 'задано вручную' : 'по умолчанию'}</span></div>
       <div className="phase-bar" aria-label={`Цикл ${cycle} с`}>
         <span className="ph main" style={{ flex: gMain }}>{gMain} с</span>
-        <span className="ph yellow" style={{ flex: 3 }} />
+        <span className="ph yellow" style={{ flex: yellow }} title={`Жёлтый ${yellow} с`} />
+        <span className="ph allred" style={{ flex: allRed }} title={`Все красные ${allRed} с`} />
         <span className="ph cross" style={{ flex: gCross }}>{gCross} с</span>
-        <span className="ph yellow" style={{ flex: 3 }} />
+        <span className="ph yellow" style={{ flex: yellow }} title={`Жёлтый ${yellow} с`} />
+        <span className="ph allred" style={{ flex: allRed }} title={`Все красные ${allRed} с`} />
       </div>
+      <p className="small muted">
+        {gMain} + {yellow} + {allRed} + {gCross} + {yellow} + {allRed} = {cycle} с. Это планировочная оценка:
+        SUMO строит программы светофоров сам, тайминг сохраняется в тегах uds:signal:*.
+      </p>
       <label className="field"><span>Цикл: {cycle} с</span>
         <input type="range" min={30} max={180} step={5} value={cycle} aria-label="Длительность цикла"
           onChange={(e) => setDraft({ ...draft, cycle: Number(e.target.value) })} onPointerUp={commitDraft} onKeyUp={commitDraft} />

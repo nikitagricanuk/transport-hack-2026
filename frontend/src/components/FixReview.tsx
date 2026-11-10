@@ -50,6 +50,13 @@ export function FixReview({ review, onApply, onCancel }: {
                 )}
                 {preview.empty && <li>Ничего не изменит</li>}
               </ul>
+              {preview.features.some((f) => f.properties.fringe) && (
+                <div className="fix-review-note small">
+                  <p>Фиктивное ребро на границе выгрузки: в реальности этой дороги нет. Оно соединяет
+                    проезжие части у края фрагмента, чтобы MatSim мог развернуть машины (иначе граф не сильно связан).
+                    Ребро будет видно и в видео SUMO и Webots. Можно отказаться — тогда останется предупреждение.</p>
+                </div>
+              )}
               {removes && (
                 <div className="fix-review-warn small">
                   <p>Удаляется {fmtM(preview.removed_road_m)} дороги. Сбой в данных может означать и лишнюю дорогу,

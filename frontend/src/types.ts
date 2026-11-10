@@ -103,7 +103,7 @@ export interface Fix {
 
 /** Dry run of a fix: what it would add, delete or change (the document is not touched). */
 export interface FixPreview {
-  features: Feature<LineString | Point, { kind: Kind; id: number; status: 'added' | 'deleted' | 'modified'; name: string; length_m?: number }>[];
+  features: Feature<LineString | Point, { kind: Kind; id: number; status: 'added' | 'deleted' | 'modified'; name: string; length_m?: number; fringe?: boolean }>[];
   counts: { added: number; deleted: number; modified: number };
   added_road_m: number;
   removed_road_m: number;
@@ -393,7 +393,7 @@ export interface SignalPlan {
   custom: boolean;
   approaches: { way_id: number; name: string; highway: string; bearing: number; group: 'main' | 'cross';
     volume: number | null; capacity: number | null; vc: number | null }[];
-  phases: { name: string; group: 'main' | 'cross'; green_s: number; yellow_s: number }[];
+  phases: { name: string; group: 'main' | 'cross'; green_s: number; yellow_s: number; all_red_s?: number }[];
   flow_ratio: { main: number; cross: number };
   webster: { cycle: number; main_share: number; saturated: boolean };
 }

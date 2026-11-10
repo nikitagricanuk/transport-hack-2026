@@ -146,6 +146,7 @@ _TURN_SWAP = {
     "merge_to_left": "merge_to_right", "merge_to_right": "merge_to_left",
 }
 _SIDE_WORD = re.compile(r"(?<![A-Za-z0-9])(left|right)(?![A-Za-z0-9])")
+_FB_TOKEN = re.compile(r":(forward|backward)(?=$|:)")
 _SIDE_VALUE_KEYS = ("sidewalk", "cycleway", "shoulder", "placement", "parking:lane", "busway")
 
 
@@ -191,9 +192,17 @@ def reversed_tags(tags: dict[str, str]) -> dict[str, str]:
     Values that are relative to the way direction are rewritten so the road
     itself does not move: turn maneuvers are mirrored, ``left``/``right`` sides
     swap, and ``incline`` flips.
+
+    On a two-way road nothing about traffic changes, only the drawing direction:
+    there ``:forward`` and ``:backward`` keys swap (values kept as they are), so
+    lanes:forward=2 + lanes:backward=1 stay on the same physical sides.
     """
+    two_way = direction(tags) == 0
     out: dict[str, str] = {}
     for key, value in tags.items():
+        if two_way and _FB_TOKEN.search(key):
+            out[_FB_TOKEN.sub(lambda m: ":backward" if m.group(0) == ":forward" else ":forward", key)] = value
+            continue
         nk = _swap_side_word(key)
         nv = value
         if "turn" in nk and "lane" in nk:

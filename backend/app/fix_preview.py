@@ -47,7 +47,9 @@ def _features(doc: OsmDocument, states: dict, status_of: dict, which: str) -> tu
         status = status_of[(kind, eid)]
         if el is None or (which == "before" and status != "deleted") or (which == "after" and status == "deleted"):
             continue
-        props: dict[str, Any] = {"kind": kind, "id": eid, "status": status, "name": el.tags.get("name", "")}
+        props: dict[str, Any] = {"kind": kind, "id": eid, "status": status, "name": el.tags.get("name", ""),
+                                 # a fictitious edge at the extract border, not a real road
+                                 "fringe": el.tags.get("uds:fringe") == "yes"}
         if isinstance(el, Way):
             coords = _way_coords(doc, el)
             if len(coords) < 2:

@@ -295,6 +295,7 @@ html.map-is-fullscreen, html.map-is-fullscreen body { overflow: hidden; }
 .phase-bar .main { background: #16a34a; }
 .phase-bar .cross { background: #2563eb; }
 .phase-bar .yellow { background: #ca8a04; }
+.phase-bar .allred { background: #b91c1c; }
 
 /* ---------------------------------------- modes, analytics, tasks, history, overlay */
 .mode-seg { grid-template-columns: repeat(2, auto); }
@@ -392,3 +393,5 @@ input[type="checkbox"]:disabled { cursor: default; }
 .splitter.vertical { width: 4px; cursor: col-resize; }
 .splitter.horizontal { height: 4px; cursor: row-resize; }
 .splitter:hover, .splitter:focus-visible, .splitter:active { background: var(--accent); outline: none; }
+.fix-review-note { padding: 8px; border-radius: 8px; background: #102033; border: 1px solid #1e3a5f; color: #bfdbfe; }
+.fix-review-note p { margin: 0; }
