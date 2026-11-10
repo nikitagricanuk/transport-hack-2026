@@ -1,9 +1,13 @@
+import { segmentGeometry } from '../utils/segments';
+import type { PickedPoint } from '../utils/networkAnalysis';
+import { loadColorChanges } from '../utils/loadColors';
+import type { FilterSpecification } from 'maplibre-gl';
+import type { Segment } from './SelectionEditor';
 import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
-import type { PickedPoint } from '../utils/networkAnalysis';
 import type { BaseMap, ImageOverlay } from './Extras';
 import { LANE_MINZOOM, buildLanes, findJunctions, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
@@ -45,9 +49,6 @@ export interface RouteOverlay {
 }
 
 interface Props {
-  analysis?: FeatureCollection;
-  pickPoint?: boolean;
-  onPickPoint?: (point: PickedPoint) => void;
   geo: Geo | null;
   /** map groups from bottom to top */
   drawOrder: DrawGroup[];
@@ -75,6 +76,14 @@ interface Props {
   loadVc: Map<number, number> | null;
   /** edits vs the loaded file, drawn as "before" (dashed) and "after" overlays while set */
   changes: ChangesResult | null;
+  segment?: Segment | null;
+  multiSelection?: NonNullable<Selection>[];
+  onToggleSelection?: (s: NonNullable<Selection>) => void;
+  onBoxSelection?: (items: NonNullable<Selection>[]) => void;
+  onSegment?: (s: Segment) => void;
+  analysis?: FeatureCollection;
+  pickPoint?: boolean;
+  onPickPoint?: (point:PickedPoint)=>void;
   onSelect: (s: Selection) => void;
   /** resolves false when the backend rejected the edit */
   onOp: (op: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }) => void | Promise<boolean>;
@@ -101,11 +110,11 @@ const laneWidth = (
 ];
 
 const filterIf = (map: maplibregl.Map, id: string, filter: maplibregl.FilterSpecification) => {
-  if (map.getLayer(id)) map.setFilter(id, filter);
+  if (map.getLayer(id) && JSON.stringify(map.getFilter(id)) !== JSON.stringify(filter)) map.setFilter(id, filter);
 };
 const showIf = (map: maplibregl.Map, ids: string[], on: boolean) => {
   const visibility = on ? 'visible' : 'none';
-  for (const id of ids) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visibility);
+  for (const id of ids) if (map.getLayer(id) && map.getLayoutProperty(id, 'visibility') !== visibility) map.setLayoutProperty(id, 'visibility', visibility);
 };
 
 function arrowImage(color = '#3F4652'): ImageData {
@@ -298,6 +307,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     map.addControl(new ResetViewControl(() => resetView()), 'bottom-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
     mapRef.current = map;
+    let resizeFrame=0;
+    const observer=new ResizeObserver(()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>map.resize());});
+    observer.observe(container.current!);
     if (import.meta.env.DEV || localStorage.getItem('uds-debug')) (window as unknown as { __udsMap?: maplibregl.Map }).__udsMap = map;
     const onFullscreenEscape = (e: KeyboardEvent) => {
       if (!mapIsFullscreen(map)) return;
@@ -309,11 +321,12 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     };
     window.addEventListener('keydown', onFullscreenEscape, true);
 
-    map.on('load', () => {
+    map.once('style.load', () => {
+      map.addImage('stop-square', { width: 16, height: 16, data: new Uint8Array(Array.from({ length: 16 * 16 }, () => [37, 99, 235, 255]).flat()) });
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'trees', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview', 'analysis']) {
+        'trees', 'analysis', 'segment-selection', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -375,7 +388,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addLayer({ id: 'lane-dashes', type: 'line', source: 'lane-marks', minzoom: LANE_MINZOOM,
         filter: ['==', ['get', 'kind'], 'lane'],
         paint: { 'line-color': '#F8FAFC', 'line-width': 1.4, 'line-dasharray': [4, 4] } });
-      map.addLayer({ id: 'lane-arrows', type: 'symbol', source: 'lane-arrows', minzoom: LANE_MINZOOM + 0.5,
+      map.addLayer({ id: 'lane-arrows', type: 'symbol', source: 'lane-arrows', minzoom: 16,
         layout: { 'symbol-placement': 'line', 'symbol-spacing': 70, 'icon-image': 'arrow-white', 'icon-size': 0.85,
                   'icon-rotation-alignment': 'map', 'icon-allow-overlap': true } });
       map.addLayer({ id: 'rail', type: 'line', source: 'ways', filter: ['==', ['get', 'layer'], 'rail'],
@@ -403,13 +416,42 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         filter: ['==', ['get', 'category'], 'junction'],
         paint: { 'circle-radius': 3.5, 'circle-color': '#FFFFFF', 'circle-stroke-color': '#59616D', 'circle-stroke-width': 1.3 } });
       map.addLayer({ id: 'pois', type: 'circle', source: 'nodes',
-        filter: ['in', ['get', 'category'], ['literal', ['signal', 'crossing', 'stop', 'tagged']]],
+        filter: ['in', ['get', 'category'], ['literal', ['signal', 'tram_signal', 'crossing', 'tagged']]],
         paint: {
           'circle-radius': ['match', ['get', 'category'], 'signal', 6, 'stop', 6, 4],
-          'circle-color': ['match', ['get', 'category'], 'signal', '#16A34A', 'crossing', '#F8FAFC', 'stop', '#0F766E', '#94A3B8'],
+          'circle-color': ['match', ['get', 'category'], 'signal', '#16A34A', 'tram_signal', '#9333ea', 'crossing', '#F8FAFC', 'stop', '#0F766E', '#94A3B8'],
           'circle-stroke-color': ['match', ['get', 'category'], 'crossing', '#111827', '#FFFFFF'],
           'circle-stroke-width': 1.5,
         } });
+      map.addLayer({ id: 'stop-symbol', type: 'symbol', source: 'nodes', filter: ['==', ['get', 'category'], 'stop'],
+        layout: { 'icon-image': 'stop-square', 'icon-size': .65, 'icon-allow-overlap': true } });
+      map.addLayer({ id: 'stop-label', type: 'symbol', source: 'nodes', minzoom: 16, filter: ['==', ['get', 'category'], 'stop'],
+        layout: { 'text-field': ['coalesce', ['get', 'name', ['get', 'tags']], ['get', 'ref', ['get', 'tags']], 'Остановка'],
+          'text-size': 11, 'text-offset': [0, 1.3] }, paint: { 'text-color': '#2563EB', 'text-halo-color': '#fff', 'text-halo-width': 1 } });
+      map.addLayer({ id: 'analysis-fill', type: 'fill', source: 'analysis',
+        filter: ['all', ['==', ['geometry-type'], 'Polygon'], ['!=', ['get', 'before'], true]],
+        paint: { 'fill-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'fill-opacity': 0.22 } });
+      const hatch = new Uint8Array(8 * 8 * 4);
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const i = (y * 8 + x) * 4;
+        hatch[i] = 100; hatch[i + 1] = 116; hatch[i + 2] = 139;
+        hatch[i + 3] = (x + y) % 8 < 2 ? 170 : 0;
+      }
+      map.addImage('analysis-hatch', { width: 8, height: 8, data: hatch });
+      map.addLayer({ id: 'analysis-uncovered', type: 'fill', source: 'analysis',
+        filter: ['all', ['==', ['get', 'set'], 'uncovered'], ['!=', ['get', 'before'], true]],
+        paint: { 'fill-pattern': 'analysis-hatch', 'fill-opacity': 0.6 } });
+      map.addLayer({ id: 'analysis-line', type: 'line', source: 'analysis',
+        filter: ['all', ['==', ['geometry-type'], 'LineString'], ['!=', ['get', 'before'], true]],
+        paint: { 'line-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'line-width': 5 } });
+      map.addLayer({ id: 'analysis-before', type: 'line', source: 'analysis', filter: ['==', ['get', 'before'], true],
+        paint: { 'line-color': '#334155', 'line-width': 2, 'line-dasharray': [3, 2] } });
+      map.addLayer({ id: 'analysis-pts', type: 'circle', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 7, 'circle-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
+      map.addLayer({ id: 'analysis-labels', type: 'symbol', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
+        layout: { 'text-field': ['coalesce', ['get', 'label'], ''], 'text-size': 14, 'text-offset': [0, -1.2], 'text-font': ['Noto Sans Regular'] },
+        paint: { 'text-color': '#111827', 'text-halo-color': '#fff', 'text-halo-width': 2 } });
+      map.addLayer({id:'segment-selection',type:'line',source:'segment-selection',paint:{'line-width':10,'line-color':'#2563eb','line-opacity':.65}});
       map.addLayer({ id: 'node-selected', type: 'circle', source: 'nodes', filter: ['==', ['get', 'id'], 0],
         paint: { 'circle-radius': 8, 'circle-color': 'rgba(37,99,235,0.25)', 'circle-stroke-color': '#2563EB', 'circle-stroke-width': 2.5 } });
 
@@ -460,29 +502,6 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': ['get', 'colour'], 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 4, 18, 9], 'line-opacity': 0.75 } });
       map.addLayer({ id: 'route-stops', type: 'circle', source: 'route-stops',
         paint: { 'circle-radius': 6, 'circle-color': '#FFFFFF', 'circle-stroke-color': ['get', 'colour'], 'circle-stroke-width': 3 } });
-      map.addLayer({ id: 'analysis-fill', type: 'fill', source: 'analysis',
-        filter: ['all', ['==', ['geometry-type'], 'Polygon'], ['!=', ['get', 'before'], true]],
-        paint: { 'fill-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'fill-opacity': 0.22 } });
-      const hatch = new Uint8Array(8 * 8 * 4);
-      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-        const i = (y * 8 + x) * 4;
-        hatch[i] = 100; hatch[i + 1] = 116; hatch[i + 2] = 139;
-        hatch[i + 3] = (x + y) % 8 < 2 ? 170 : 0;
-      }
-      map.addImage('analysis-hatch', { width: 8, height: 8, data: hatch });
-      map.addLayer({ id: 'analysis-uncovered', type: 'fill', source: 'analysis',
-        filter: ['all', ['==', ['get', 'set'], 'uncovered'], ['!=', ['get', 'before'], true]],
-        paint: { 'fill-pattern': 'analysis-hatch', 'fill-opacity': 0.6 } });
-      map.addLayer({ id: 'analysis-line', type: 'line', source: 'analysis',
-        filter: ['all', ['==', ['geometry-type'], 'LineString'], ['!=', ['get', 'before'], true]],
-        paint: { 'line-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'line-width': 5 } });
-      map.addLayer({ id: 'analysis-before', type: 'line', source: 'analysis', filter: ['==', ['get', 'before'], true],
-        paint: { 'line-color': '#334155', 'line-width': 2, 'line-dasharray': [3, 2] } });
-      map.addLayer({ id: 'analysis-pts', type: 'circle', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
-        paint: { 'circle-radius': 7, 'circle-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
-      map.addLayer({ id: 'analysis-labels', type: 'symbol', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
-        layout: { 'text-field': ['coalesce', ['get', 'label'], ''], 'text-size': 14, 'text-offset': [0, -1.2], 'text-font': ['Noto Sans Regular'] },
-        paint: { 'text-color': '#111827', 'text-halo-color': '#fff', 'text-halo-width': 2 } });
       map.addLayer({ id: 'issues', type: 'circle', source: 'issues',
         paint: {
           'circle-radius': 9,
@@ -510,6 +529,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     });
 
     return () => {
+      observer.disconnect();cancelAnimationFrame(resizeFrame);
       window.removeEventListener('keydown', onFullscreenEscape, true);
       document.documentElement.classList.remove(FULLSCREEN_ROOT);
       map.getContainer().parentElement?.classList.remove(FULLSCREEN_CLASS);
@@ -560,17 +580,17 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     }
   }, [ready, props.analytics]);
 
-  // congestion colouring through feature-state: no re-upload of the road source
+  // Only roads whose v/c changed receive feature-state updates.
+  const paintedLoad = useRef(new Map<string | number,number>());
   useEffect(() => {
-    const map = mapRef.current;
-    if (!ready || !map || !props.geo) return;
-    map.removeFeatureState({ source: 'ways' });
-    if (!props.loadVc) return;
-    for (const f of props.geo.ways.features) {
-      const vc = props.loadVc.get(f.properties.id);
-      if (vc !== undefined && f.id !== undefined) map.setFeatureState({ source: 'ways', id: f.id }, { vc });
-    }
-  }, [ready, props.loadVc, props.geo]);
+    const map=mapRef.current;if(!ready || !map || !props.geo)return;
+    const next=new Map<string|number,number>();
+    if(props.loadVc)for(const f of props.geo.ways.features){const vc=props.loadVc.get(f.properties.id);if(vc!==undefined&&f.id!==undefined)next.set(f.id,vc);}
+    const changes=loadColorChanges(paintedLoad.current,next);
+    for(const id of changes.remove)map.removeFeatureState({source:'ways',id},'vc');
+    for(const {id,vc} of changes.set)map.setFeatureState({source:'ways',id},{vc});
+    paintedLoad.current=next;
+  },[ready,props.loadVc,props.geo]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -850,17 +870,20 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const L = props.layers;
     showIf(map, ['road-casing', 'road-fill', 'road-link', 'oneway', 'road-label', 'junctions',
       'lane-surface', 'lane-marks', 'lane-dashes', 'lane-arrows'], L.roads);
+    showIf(map, ['junctions', 'verts'], L.nodes);
+    showIf(map, ['stop-symbol', 'stop-label'], L.stops);
     showIf(map, PATH_LAYER_IDS, L.paths);
     showIf(map, ['rail'], L.rail);
     showIf(map, ['zones-fill', 'zones-line', 'tree-shadows', 'tree-canopies', 'buildings-fill', 'buildings-line', 'building-numbers'], L.buildings);
     showIf(map, ['issues'], L.issues);
-    const cats = [L.signals && 'signal', L.crossings && 'crossing', L.stops && 'stop', 'tagged'].filter(Boolean);
+    const cats = [L.signals && 'signal', L.crossings && 'crossing', L.tramSignals && 'tram_signal', L.nodes && 'tagged'].filter(Boolean);
     filterIf(map, 'pois', ['in', ['get', 'category'], ['literal', cats]]);
     // the invisible hit layer must follow the toggles too: a hidden road, path or track
     // cannot be clicked, hovered or dragged
     const hit = [L.roads && 'road', L.paths && 'path', L.rail && 'rail'].filter(Boolean);
-    filterIf(map, 'ways-hit', ['in', ['get', 'layer'], ['literal', hit]]);
-  }, [ready, props.layers]);
+    const hidden=(props.geo?.ways.features??[]).filter(f=>L.roadsSub?.[f.properties.highway]===false).map(f=>f.properties.id);
+    filterIf(map, 'ways-hit', ['all',['in', ['get', 'layer'], ['literal', hit]],['!', ['in',['get','id'],['literal',hidden]]]]);
+  }, [ready, props.layers, props.geo]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -891,33 +914,59 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   };
 
   useEffect(() => {
-    const source = mapRef.current?.getSource('analysis') as GeoJSONSource | undefined;
-    if (ready && source) source.setData(props.analysis ?? EMPTY);
+    const map = mapRef.current;
+    if (ready && map) (map.getSource('analysis') as GeoJSONSource).setData(props.analysis ?? { type: 'FeatureCollection', features: [] });
   }, [ready, props.analysis]);
+
+  const subgroupBase = useRef(new Map<string, FilterSpecification | undefined>());
+  useEffect(() => {
+    const map=mapRef.current;if(!ready || !map)return;
+    const hidden=Object.entries(props.layers.roadsSub??{}).filter(([,v])=>!v).map(([k])=>k);
+    const ids=(props.geo?.ways.features??[]).filter(f=>hidden.includes(f.properties.highway)).map(f=>f.properties.id);
+    for(const layer of ['road-casing','road-fill','road-link','road-label','oneway',...PATH_LAYER_IDS,'lane-surface','lane-marks','lane-dashes','lane-arrows']){
+      if(!map.getLayer(layer))continue;
+      if(!subgroupBase.current.has(layer))subgroupBase.current.set(layer,map.getFilter(layer) || undefined);
+      const base=subgroupBase.current.get(layer);
+      map.setFilter(layer, ['all', ...(base?[base]:[]), ['!', ['in',['get','id'],['literal',ids]]]] as FilterSpecification);
+    }
+  },[ready,props.layers.roadsSub,props.geo]);
+
+  useEffect(()=>{
+    const map=mapRef.current;if(!ready||!map)return;
+    const segment=props.segment,way=props.geo?.ways.features.find(f=>f.properties.id===segment?.way_id);
+    const clipped=segment&&way?segmentGeometry(way.geometry.coordinates,segment.start,segment.end):null;
+    (map.getSource('segment-selection') as GeoJSONSource).setData(clipped?{type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:clipped.coordinates}}]}:EMPTY);
+  },[ready,props.segment,props.geo]);
 
   // --------------------------------------------------------- interaction
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map) return;
 
+    map.boxZoom.disable();
+    let boxStart: maplibregl.Point | null = null;
+    let boxElement: HTMLDivElement | null = null;
+    let segmentStart: {way_id:number;lat:number;lon:number} | null = null;
     const pick = (e: MapMouseEvent) => {
       const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
         [e.point.x - HIT_PX, e.point.y - HIT_PX], [e.point.x + HIT_PX, e.point.y + HIT_PX]];
       const feats = map.queryRenderedFeatures(bbox, {
-        layers: ['join-handles', 'verts', 'pois', 'junctions', 'ways-hit', 'buildings-fill', 'zones-fill'] });
+        layers: ['join-handles', 'verts', 'pois', 'stop-symbol', 'junctions', 'ways-hit', 'buildings-fill', 'zones-fill'] });
       const byLayer = (ids: string[]) => feats.find((f: MapGeoJSONFeature) => ids.includes(f.layer.id));
       const vert = byLayer(['verts']);
-      const node = vert ?? byLayer(['pois', 'junctions']);
+      const node = vert ?? byLayer(['pois', 'stop-symbol', 'junctions']);
       // the topmost area under the cursor wins, so a house over a lawn picks the house;
       // among buildings a click takes the whole building, Ctrl+click its part («корпус», building:part)
       const areas = feats.filter((f: MapGeoJSONFeature) => f.layer.id === 'buildings-fill' || f.layer.id === 'zones-fill');
       const isPart = (f: MapGeoJSONFeature) => !!propsRef.current.wayById(Number(f.properties.id))?.tags['building:part'];
-      const wantPart = e.originalEvent.ctrlKey || e.originalEvent.metaKey;
+      const selected=propsRef.current.selection;
+      const wantPart = (e.originalEvent.ctrlKey || e.originalEvent.metaKey) && selected?.kind==='way' && areas.some(f=>Number(f.properties.id)===selected.id && !isPart(f));
       const area = areas.find((f) => (f.layer.id === 'buildings-fill' ? isPart(f) === wantPart : false))
         ?? areas[0];
       const way = byLayer(['ways-hit']) ?? area;
       const join = byLayer(['join-handles']);
       return {
+        partPick: Boolean(wantPart && area),
         nodeId: node ? Number(node.properties.id) : undefined,
         wayId: way ? Number(way.properties.id) : undefined,
         joinId: join ? Number(join.properties.id) : undefined,
@@ -932,15 +981,27 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       propsRef.current.onOp({ op: 'add_way', args: {
         points: pts.map((p) => (p.id !== undefined ? { id: p.id } : p.way_id !== undefined
           ? { lat: p.lat, lon: p.lon, way_id: p.way_id } : { lat: p.lat, lon: p.lon })),
-        tags: { highway: 'residential' }, ...(closed ? { closed: true } : {}) } }, { select: 'result' });
+        tags: { highway: 'residential', lanes: '2', 'lanes:forward': '1', 'lanes:backward': '1', oneway: 'no' }, ...(closed ? { closed: true } : {}) } }, { select: 'result' });
     };
 
     const onClick = (e: MapMouseEvent) => {
       if (drag.current?.moved) return;
       const p = propsRef.current;
-      const { nodeId, wayId, joinId } = pick(e);
+      const { nodeId, wayId, joinId, partPick } = pick(e);
+      if(p.pickPoint){p.onPickPoint?.({lat:e.lngLat.lat,lon:e.lngLat.lng,nodeId,wayId,isBuilding:wayId!==undefined && p.wayById(wayId)?.layer==='building'});return;}
+      if (p.tool === 'select' && e.originalEvent.altKey && wayId !== undefined) {
+        const point = {lat:e.lngLat.lat,lon:e.lngLat.lng};
+        if (segmentStart?.way_id === wayId) { p.onSegment?.({way_id:wayId,start:segmentStart,end:point}); segmentStart=null; }
+        else {segmentStart={way_id:wayId,...point};p.onHint('Alt+клик по второму концу участка');}
+        return;
+      }
+      if (p.tool === 'select' && (e.originalEvent.ctrlKey || e.originalEvent.metaKey)) {
+        if(partPick && wayId!==undefined){p.onSelect({kind:'way',id:wayId});return;}
+        const item: Selection = nodeId !== undefined ? {kind:'node',id:nodeId} : wayId !== undefined ? {kind:'way',id:wayId} : null;
+        if(item) p.onToggleSelection?.(item);
+        return;
+      }
       const { lng, lat } = e.lngLat;
-      if (p.pickPoint) { p.onPickPoint?.({ lat, lon: lng, nodeId, wayId, isBuilding: wayId !== undefined && p.wayById(wayId)?.layer === 'building' }); return; }
       switch (p.tool) {
         case 'select': {
           if (joinId !== undefined) {
@@ -1043,7 +1104,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     const onDbl = (e: MapMouseEvent) => {
       const p = propsRef.current;
-      if (p.pickPoint) return;
+      if(p.pickPoint)return;
       if (p.tool === 'way') {
         e.preventDefault();
         finishDraft();
@@ -1062,6 +1123,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     const onMove = (e: MapMouseEvent) => {
       propsRef.current.onCursor([e.lngLat.lng, e.lngLat.lat], map.getZoom());
+      if (boxStart && boxElement) {
+        Object.assign(boxElement.style, {left:`${Math.min(boxStart.x,e.point.x)}px`,top:`${Math.min(boxStart.y,e.point.y)}px`,width:`${Math.abs(boxStart.x-e.point.x)}px`,height:`${Math.abs(boxStart.y-e.point.y)}px`});
+        return;
+      }
       const d = drag.current;
       if (d) {
         // A click on the orange split point must not count as a drag.
@@ -1078,7 +1143,14 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     const onDown = (e: MapMouseEvent) => {
       const p = propsRef.current;
-      if (p.pickPoint || p.tool !== 'select' || e.originalEvent.button !== 0) return;
+      if (p.tool !== 'select' || e.originalEvent.button !== 0 || p.pickPoint) return;
+      if (e.originalEvent.shiftKey) {
+        e.preventDefault();map.dragPan.disable();boxStart=e.point;
+        boxElement=document.createElement('div');
+        Object.assign(boxElement.style,{position:'absolute',border:'1px solid #2563eb',background:'#2563eb22',pointerEvents:'none'});
+        map.getContainer().appendChild(boxElement);return;
+      }
+      if(e.originalEvent.ctrlKey || e.originalEvent.metaKey || e.originalEvent.altKey) return;
       const { nodeId, wayId } = pick(e);
       const shapes = [
         ...(p.geo?.ways.features ?? []).map((f) => ({ nodes: f.properties.nodes, coords: f.geometry.coordinates })),
@@ -1089,6 +1161,15 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         coords: coords.map((c) => [...c]),
         idx: nodes.flatMap((n, i) => (moving(n) ? [i] : [])),
       });
+      const group=p.multiSelection??[];
+      if(group.length>1 && group.some(r=>r.kind==='node'?r.id===nodeId:r.id===wayId)) {
+        const ids=new Set(group.flatMap(r=>r.kind==='node'?[r.id]:(p.wayById(r.id)?.nodes??[])));
+        e.preventDefault();map.dragPan.disable();
+        drag.current={mode:'way',wayId,moved:false,startX:e.point.x,startY:e.point.y,
+          lon:e.lngLat.lng,lat:e.lngLat.lat,originLon:e.lngLat.lng,originLat:e.lngLat.lat,
+          ways:shapes.filter(f=>f.nodes.some(n=>ids.has(n))).map(f=>copy(f.nodes,f.coords,n=>ids.has(n))),frame:0};
+        return;
+      }
       // a selected building moves as a whole until a double click turns on its corners
       const selWay = p.selection?.kind === 'way' ? p.wayById(p.selection.id) : undefined;
       const cornersLocked = selWay?.layer === 'building' && vertexEdit.current !== selWay.id;
@@ -1122,7 +1203,19 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       };
     };
 
-    const onUp = () => {
+    const onUp = (event: MapMouseEvent) => {
+      if (boxStart) {
+        const feats=map.queryRenderedFeatures([boxStart,event.point],{layers:['pois','stop-symbol','junctions','verts','ways-hit','buildings-fill']});
+        const items=new Map<string,NonNullable<Selection>>();
+        for(const f of feats){const kind=f.layer.id==='ways-hit'||f.layer.id==='buildings-fill'?'way':'node';const id=Number(f.properties.id);items.set(`${kind}/${id}`,{kind,id});}
+        const minX=Math.min(boxStart.x,event.point.x),maxX=Math.max(boxStart.x,event.point.x),minY=Math.min(boxStart.y,event.point.y),maxY=Math.max(boxStart.y,event.point.y);
+        if(propsRef.current.layers.nodes)for(const f of propsRef.current.geo?.ways.features??[])f.geometry.coordinates.forEach((c,i)=>{
+          const p=map.project(c as [number,number]);if(p.x>=minX&&p.x<=maxX&&p.y>=minY&&p.y<=maxY){const id=f.properties.nodes[i];items.set(`node/${id}`,{kind:'node',id});}
+        });
+        propsRef.current.onBoxSelection?.([...items.values()]);
+        boxStart=null;boxElement?.remove();boxElement=null;map.dragPan.enable();
+        return;
+      }
       const d = drag.current;
       if (!d) return;
       map.dragPan.enable();
@@ -1132,7 +1225,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
           ? { op: 'move_way', args: { id: d.wayId, dlat: d.lat - d.originLat, dlon: d.lon - d.originLon } }
           : { op: 'move_node', args: { id: d.nodeId, lat: d.lat, lon: d.lon } };
         // a successful move replaces the preview via the map update; a rejected one must drop it
-        Promise.resolve(propsRef.current.onOp(op, { select: 'keep' }))
+        const refs = propsRef.current.multiSelection ?? [];
+        const groupOp = refs.length > 1 ? {op:'move_selection',args:{refs,dlat:d.lat-d.originLat,dlon:d.lon-d.originLon}} : op;
+        Promise.resolve(propsRef.current.onOp(groupOp, { select: 'keep' }))
           .then((ok) => { if (ok === false) clearDrag(); });
         setTimeout(() => { drag.current = null; }, 0);
       } else {

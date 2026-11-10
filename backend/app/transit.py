@@ -19,7 +19,7 @@ from .osm_model import OsmDocument, Relation
 MODES = {"bus": "Автобус", "trolleybus": "Троллейбус", "tram": "Трамвай", "minibus": "Маршрутка", "share_taxi": "Маршрутка"}
 DEFAULT_FREQ = {"bus": 6.0, "trolleybus": 6.0, "tram": 6.0, "minibus": 10.0, "share_taxi": 10.0}  # vehicles/h
 PCU = {"bus": 2.5, "trolleybus": 2.5, "tram": 0.0, "minibus": 1.5, "share_taxi": 1.5}  # trams do not use lanes
-CATCHMENT_M = 400.0      # walking distance to a stop
+CATCHMENT_M = 400.0      # legacy radial building estimate; not the network accessibility norm
 M2_PER_PERSON = 30.0     # living floor area per resident
 DEFAULT_LEVELS = {"apartments": 9, "residential": 5, "house": 1, "detached": 1, "dormitory": 5}
 RESIDENTIAL = set(DEFAULT_LEVELS) | {"yes"}

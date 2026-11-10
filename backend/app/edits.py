@@ -8,6 +8,7 @@ operation without writing an inverse by hand.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -901,6 +902,15 @@ def op_place_signal(doc, tx, node_id: int | None = None, way_id: int | None = No
     A signal on a crossing turns it into a signalised crossing. ``move_from``
     moves an existing signal tag from a misplaced node to the nearest valid spot.
     """
+    tram = doc.ways.get(int(way_id)) if way_id is not None else None
+    if tram is None and node_id is not None:
+        linked = list(doc.ways_of_node(int(node_id)))
+        if linked and all(w.tags.get('railway') == 'tram' for w in linked):
+            tram = linked[0]
+    if tram is not None and tram.tags.get('railway') == 'tram':
+        target = int(node_id) if node_id is not None else _insert_on_way(doc, tx, tram.id, float(lat), float(lon), None)
+        op_set_tags(doc, tx, kind='node', id=target, tags={'railway':'signal', 'railway:signal:direction':'forward', 'uds:signal:tram':'yes'})
+        return {'id': target}
     proj = _proj(doc)
     target: int | None = None
     if node_id is not None and signal_spot(doc, int(node_id)):
@@ -1348,6 +1358,57 @@ def op_replace_restriction_way(doc, tx, relation_id: int, role: str, old_id: int
     return {"id": rel.id}
 
 
+def op_move_selection(doc, tx, refs: list[dict], dlat: float, dlon: float):
+    """Move shared vertices exactly once in one undo transaction."""
+    ids = set()
+    for ref in refs:
+        if ref['kind'] == 'node':
+            ids.add(int(ref['id']))
+        elif ref['kind'] == 'way':
+            ids.update(_way(doc, int(ref['id'])).nodes)
+        else:
+            raise OpError('выберите узлы или рёбра')
+    for nid in ids:
+        n = _node(doc, nid)
+        if not math.isfinite(float(dlat)) or not math.isfinite(float(dlon)):
+            raise OpError('координаты должны быть конечными')
+        tx.touch('node',nid)
+        n.set_position(n.lat+float(dlat),n.lon+float(dlon))
+    _join_crossings(doc,tx,_highway_ids_touching(doc,ids))
+    return {'nodes': len(ids)}
+
+
+def op_edit_segment(doc, tx, way_id: int, start: dict, end: dict, tags: dict | None = None, attributes: list[dict] | None = None):
+    """Materialise two projected endpoints, split with relation rewriting, tag middle."""
+    way = _way(doc, int(way_id))
+    if way.is_closed:
+        raise OpError('выберите незамкнутое ребро')
+    a = int(start['id']) if 'id' in start else _insert_on_way(doc, tx, way.id, float(start['lat']), float(start['lon']), None)
+    b = int(end['id']) if 'id' in end else _insert_on_way(doc, tx, way.id, float(end['lat']), float(end['lon']), None)
+    if a not in way.nodes or b not in way.nodes or a == b:
+        raise OpError('выберите два различных конца участка на ребре')
+    i, j = sorted([way.nodes.index(a), way.nodes.index(b)])
+    a, b = way.nodes[i], way.nodes[j]
+    middle = way.id
+    if i > 0:
+        middle = op_split_way(doc, tx, way.id, a)['new_id']
+    if b != doc.ways[middle].nodes[-1]:
+        op_split_way(doc, tx, middle, b)
+    if tags:
+        op_set_tags(doc, tx, kind='way', id=middle, tags=tags)
+    for attribute in attributes or []:
+        args = dict(attribute.get('args', {}))
+        args.pop('way_id',None)
+        args.pop('id',None)
+        if attribute.get('op') == 'set_lanes':
+            op_set_lanes(doc,tx,way_id=middle,**args)
+        elif attribute.get('op') == 'smooth_z':
+            op_smooth_z(doc,tx,way_id=middle)
+        else:
+            raise OpError('для участка поддерживаются теги, полосы и плавный Z')
+    return {'id': middle}
+
+
 def _direction_tags(tags: dict[str, str], side: str) -> dict[str, str]:
     """Tags of one carriageway: ``*:forward`` (or ``*:backward``) become plain keys,
     the other direction's keys are dropped, the road becomes one-way."""
@@ -1591,6 +1652,8 @@ def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
 
 
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
+    "move_selection": (op_move_selection, "Группа сдвинута"),
+    "edit_segment": (op_edit_segment, "Атрибуты участка изменены"),
     "split_carriageways": (op_split_carriageways, "Дорога разделена на две проезжие части"),
     "replace_restriction_way": (op_replace_restriction_way, "Исправлено ребро запрета поворота"),
     "set_restriction_via": (op_set_restriction_via, "Исправлен узел запрета поворота"),

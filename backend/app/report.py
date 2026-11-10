@@ -10,7 +10,7 @@ from .analysis import ANALYTICS_ASSUMPTIONS, LOS_SOURCE_URL
 SEV_RU = {"critical": "Критично", "warning": "Предупреждение", "info": "Замечание"}
 CAT_RU = {
     "connectivity": "Связность", "direction": "Направления", "junction": "Перекрёстки",
-    "lanes": "Полосы", "geometry": "Геометрия и Z", "data": "Данные", "pedestrian": "Пешеходы",
+    "pedestrian": "Пешеходы", "lanes": "Полосы", "geometry": "Геометрия и Z", "data": "Данные",
 }
 STATUS_RU = {"added": "добавлен", "modified": "изменён", "deleted": "удалён", "changed": "изменён", "removed": "удалён"}
 TOTALS_RU = {

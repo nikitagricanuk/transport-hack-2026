@@ -61,6 +61,18 @@ def default_limit(highway: str) -> int:
     base = highway.removesuffix("_link")
     return LIVING_KMH if base in ("living_street", "service") else URBAN_KMH
 
+# Scenario correspondence, not a normative conversion from OSM to engineering class.
+# Classification vocabulary: ГОСТ Р 52398-2005; urban streets: СП 42.13330.2016, table 11.1.
+OSM_CATEGORY = {'motorway':'IА','trunk':'IБ','primary':'II','secondary':'III','tertiary':'IV',
+                'unclassified':'V','residential':'V','living_street':'V','service':'V','road':'V',
+                'footway':'V','path':'V','pedestrian':'V','steps':'V','cycleway':'V','track':'V'}
+ROAD_CATEGORIES = ('IА','IБ','IВ','II','III','IV','V')
+
+
+def road_category(tags):
+    override = tags.get('uds:category')
+    return override if override in ROAD_CATEGORIES else OSM_CATEGORY.get(tags.get('highway','').removesuffix('_link'),'V')
+
 
 # Lane width, m — СП 42.13330.2016, разд. 11 (ширина полосы движения): магистральные дороги
 # 3,75; магистральные улицы общегородского и районного значения 3,5; улицы местного

@@ -63,3 +63,9 @@ test('lane lines stop at the edge of a junction instead of running through it', 
   assert.ok(Math.abs(gap - 20) < 0.5);
   assert.equal(cutAround(line, []).length, 1);
 });
+
+test('display smoothing preserves the road class lane width',()=>{
+  const geometry=buildLanes([{id:1,coords:[[104,52],[104.001,52]],forward:1,backward:1,laneW:3}]);
+  const polygon=geometry.surface.features[0].geometry.coordinates[0];
+  assert.ok(Math.abs(Math.abs(polygon[0][1]-polygon[3][1])*M_PER_DEG_LAT-6)<.01);
+});

@@ -13,19 +13,19 @@ export const ROAD_PERMISSIONS: { key: keyof RoadPermissions; label: string }[] =
 ];
 
 export const HIGHWAY_CLASSES: { value: string; label: string }[] = [
-  { value: 'motorway', label: 'motorway — автомагистраль' },
-  { value: 'trunk', label: 'trunk — скоростная' },
-  { value: 'primary', label: 'primary — магистральная' },
-  { value: 'secondary', label: 'secondary — районная' },
-  { value: 'tertiary', label: 'tertiary — местная' },
-  { value: 'residential', label: 'residential — жилая улица' },
-  { value: 'unclassified', label: 'unclassified' },
-  { value: 'living_street', label: 'living_street — жилая зона' },
-  { value: 'service', label: 'service — проезд' },
-  { value: 'primary_link', label: 'primary_link — съезд' },
-  { value: 'secondary_link', label: 'secondary_link — съезд' },
-  { value: 'pedestrian', label: 'pedestrian — пешеходная' },
-  { value: 'footway', label: 'footway — тротуар' },
+  { value: 'motorway', label: 'Автомагистраль (motorway)' },
+  { value: 'trunk', label: 'Скоростная автомобильная дорога (trunk)' },
+  { value: 'primary', label: 'Магистральная улица общегородского значения (primary)' },
+  { value: 'secondary', label: 'Магистральная улица районного значения (secondary)' },
+  { value: 'tertiary', label: 'Улица местного значения (tertiary)' },
+  { value: 'residential', label: 'Жилая улица (residential)' },
+  { value: 'unclassified', label: 'Прочая автомобильная дорога (unclassified)' },
+  { value: 'living_street', label: 'Жилая зона (living_street)' },
+  { value: 'service', label: 'Служебный проезд (service)' },
+  { value: 'primary_link', label: 'Съезд магистральной улицы (primary_link)' },
+  { value: 'secondary_link', label: 'Съезд районной улицы (secondary_link)' },
+  { value: 'pedestrian', label: 'Пешеходная зона (pedestrian)' },
+  { value: 'footway', label: 'Тротуар (footway)' },
 ];
 
 /** OSM `surface=*` values. The label is Russian; the stored value stays the OSM token. */

@@ -37,42 +37,97 @@ def road_graph(doc: OsmDocument, closed: set[int] | frozenset[int] = frozenset()
 
 
 # ------------------------------------------------------------- closures
-def detours(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int]) -> dict[int, dict[str, Any]]:
-    """For each closed road: the ways of the fastest detour and the volume moved onto it."""
+def detours(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int], choices=None) -> dict[int, dict[str, Any]]:
+    """Up to three diverse, restriction-aware alternatives, bounded to 30 paths."""
+    from .routing import build_graph, snap
+    from .network_analysis import issue, diagnose
+    from itertools import islice
+    import time
     if not closed:
         return {}
-    g = road_graph(doc, closed)
-    by_id = {r["id"]: r for r in rows}
-    out: dict[int, dict[str, Any]] = {}
+    rg = build_graph(doc, 'car', closed=closed)
+    # State graph: arriving on a different way can permit a different next turn.
+    g = nx.DiGraph()
+    for u in rg.g:
+        incoming = {e['way'] for _, _, e in rg.g.in_edges(u, data=True)} | {None}
+        for inc in incoming:
+            for _, v, e in rg.g.out_edges(u, data=True):
+                rule=rg.restrictions.get((inc,u))
+                if rule and (e['way'] in rule['no'] or (rule['only'] is not None and e['way'] not in rule['only'])):
+                    continue
+                g.add_edge((u,inc),(v,e['way']),**e)
+    by_id = {r['id']:r for r in rows}
+    out = {}
     for wid in closed:
-        w = doc.ways.get(wid)
-        row = by_id.get(wid)
-        if w is None or row is None:
+        w, row = doc.ways.get(wid), by_id.get(wid)
+        if not w or not row:
             continue
-        a, b = w.nodes[0], w.nodes[-1]
-        legs = [(a, b), (b, a)] if direction(w.tags) == 0 else [(a, b) if direction(w.tags) > 0 else (b, a)]
-        per_leg = row["volume"] / len(legs)
-        ways: list[int] = []
-        times: list[float] = []
-        for s, t in legs:
+        a,b = w.nodes[0],w.nodes[-1]
+        legs = [(a,b),(b,a)] if direction(w.tags) == 0 else [(a,b) if direction(w.tags)>0 else (b,a)]
+        leg_options = []
+        for start,end in legs:
+            trial = g.copy()
+            source, target = (start,None), ('target',wid)
+            for node in list(trial):
+                if node[0] == end:
+                    trial.add_edge(node,target,t=0,l=0,way=None)
+            options = []
+            deadline = time.monotonic()+1
             try:
-                path = nx.shortest_path(g, s, t, weight="t")
-            except (nx.NetworkXNoPath, nx.NodeNotFound):
-                continue  # this direction has no way round: its traffic is lost to the network
-            ways.extend(g[u][v]["way"] for u, v in zip(path, path[1:]))
-            times.append(sum(g[u][v]["t"] for u, v in zip(path, path[1:])))
-        out[wid] = {"ways": sorted(set(ways)), "volume": per_leg * len(times) / max(len(times), 1),
-                    "moved": round(per_leg * len(times)), "found": bool(times), "partial": 0 < len(times) < len(legs),
-                    "detour_s": round(sum(times) / len(times) - row["t0_s"], 1) if times else 0.0}
+                for path in islice(nx.shortest_simple_paths(trial,source,target,weight='t'),30):
+                    physical = [n[0] for n in path if n != target]
+                    if len(physical)!=len(set(physical)):
+                        continue
+                    edges = [trial[u][v] for u,v in zip(path,path[1:]) if trial[u][v]['way'] is not None]
+                    signature = {(u[0],v[0]) for u,v in zip(path,path[1:]) if v != target}
+                    if all(len(signature.symmetric_difference(p['_edges'])) / max(1,len(signature | p['_edges'])) >= .3 for p in options):
+                        coords = [list(reversed(rg.proj.to_latlon(*rg.g.nodes[n[0]]['xy']))) for n in path if n != target]
+                        options.append(dict(ways=sorted({e['way'] for e in edges}),time_s=sum(e['t'] for e in edges),
+                                            length_m=sum(e['l'] for e in edges),coordinates=coords,_edges=signature))
+                    if len(options)==3 or time.monotonic()>deadline:
+                        break
+            except (nx.NetworkXNoPath,nx.NodeNotFound):
+                pass
+            leg_options.append(options)
+        alternatives = []
+        for index in range(max((len(o) for o in leg_options),default=0)):
+            selected = [o[min(index,len(o)-1)] for o in leg_options if o]
+            alternatives.append(dict(ways=sorted({wid for o in selected for wid in o['ways']}),
+                                     time_s=sum(o['time_s'] for o in selected)/len(selected),
+                                     length_m=sum(o['length_m'] for o in selected)/len(selected),
+                                     lines=[o['coordinates'] for o in selected]))
+        selected_index = min((choices or {}).get(wid,0), max(0,len(alternatives)-1))
+        selected = alternatives[selected_index] if alternatives else {'ways':[],'time_s':0}
+        count = sum(bool(o) for o in leg_options)
+        diagnostics = []
+        if not count:
+            first,last = doc.nodes.get(a),doc.nodes.get(b)
+            sa = snap(rg,first.lat,first.lon,60) if first else None
+            sb = snap(rg,last.lat,last.lon,60) if last else None
+            if sa and sb:
+                diagnostics=diagnose(doc,rg,sa,sb)
+            if not diagnostics:
+                diagnostics=[issue('Объезда нет в пределах карты','Проверьте разрывы, направления и запреты; за границей выгрузки путь неизвестен.',refs=[{'kind':'way','id':wid}])]
+            for card in diagnostics:
+                card['id']=f'closure-{wid}-'+card['id']
+        out[wid] = dict(ways=selected['ways'],volume=row['volume']/len(legs),moved=round(row['volume']*count/len(legs)),
+                        found=bool(count),partial=0<count<len(legs),detour_s=selected['time_s']-row['t0_s'] if count else 0,
+                        alternatives=alternatives, selected_alternative=selected_index,
+                        issues=diagnostics)
     return out
 
 
-def apply_closures(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int]) -> dict[int, dict[str, Any]]:
+def apply_closures(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int], choices=None, cached=None) -> dict[int, dict[str, Any]]:
     """Mutate the load rows: closed roads carry nothing, detours take their traffic."""
     from .analysis import los
 
-    info = detours(doc, rows, closed)
+    import copy
+    info = copy.deepcopy(cached) if cached is not None else detours(doc, rows, closed, choices)
     by_id = {r["id"]: r for r in rows}
+    for wid,d in info.items():
+        legs = 2 if direction(doc.ways[wid].tags) == 0 else 1
+        d['volume'] = by_id[wid]['volume'] / legs
+        d['moved'] = round(d['volume'] * (1 if d['partial'] else legs) if d['found'] else 0)
     for wid, d in info.items():
         for detour_way in d["ways"]:
             r = by_id.get(detour_way)

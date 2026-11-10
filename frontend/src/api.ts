@@ -161,8 +161,8 @@ export const api = {
   fixAllPlan: (docId: string) => request<unknown>(`/api/documents/${docId}/fix-all`),
   fixPreview: (docId: string, op: Op & { probe?: unknown }) =>
     request<FixPreview>(`/api/documents/${docId}/fix-preview`, json(op)),
-  batch: (docId: string, ops: Op[], label?: string) =>
-    request<OpResponse>(`/api/documents/${docId}/batch`, json({ ops, label })),
+  batch: (docId: string, ops: Op[], label?: string, reason?: string) =>
+    request<OpResponse>(`/api/documents/${docId}/batch`, json({ ops, label, reason })),
   undo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/undo`, { method: 'POST' }),
   redo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/redo`, { method: 'POST' }),
   validate: (docId: string) => request<ValidationResult>(`/api/documents/${docId}/validate`),
@@ -180,7 +180,7 @@ export const api = {
   discardDraft: (docId: string) =>
     request<{ ok: boolean }>(`/api/draft?doc_id=${encodeURIComponent(docId)}`, { method: 'DELETE' }),
   load: (docId: string) => request<LoadState>(`/api/documents/${docId}/load`),
-  setLoad: (docId: string, body: { way_id?: number; volume?: number | null; multiplier?: number; reset_all?: boolean }) =>
+  setLoad: (docId: string, body: { way_id?: number; volume?: number | null; multiplier?: number; reset_all?: boolean; time_of_day?:string;weather?:string;truck_share?:number;bus_share?:number }) =>
     request<LoadState>(`/api/documents/${docId}/load`, json(body)),
   addSnapshot: (docId: string, name: string) =>
     request<LoadState>(`/api/documents/${docId}/load/snapshots`, json({ name })),
@@ -193,8 +193,8 @@ export const api = {
   reportUrl: (docId: string, kind: 'xlsx' | 'docx' | 'pdf') => `/api/documents/${docId}/report.${kind}`,
   objectReportUrl: (docId: string, kind: string, id: number, fmt: 'xlsx' | 'pdf') =>
     `/api/documents/${docId}/objects/${kind}/${id}/report.${fmt}`,
-  setClosure: (docId: string, wayId: number, closed: boolean) =>
-    request<LoadState>(`/api/documents/${docId}/scenario/closures`, json({ way_id: wayId, closed })),
+  setClosure: (docId: string, wayId: number, closed: boolean, alternative = 0) =>
+    request<LoadState>(`/api/documents/${docId}/scenario/closures`, json({ way_id: wayId, closed, alternative })),
   od: (docId: string, grid = 3) => request<OdMatrix>(`/api/documents/${docId}/od?grid=${grid}`),
   tasks: (docId: string) => request<{ tasks: Task[] }>(`/api/documents/${docId}/tasks`),
   createTask: (docId: string, body: { title: string; description: string; criteria: TaskCriterion[] }) =>
@@ -208,7 +208,7 @@ export const api = {
   setRouteFrequency: (docId: string, routeId: number, vehiclesPerHour: number | null) =>
     request<RouteDetail>(`/api/documents/${docId}/transit/routes/${routeId}`, json({ vehicles_per_hour: vehiclesPerHour })),
   signal: (docId: string, nodeId: number) => request<SignalPlan>(`/api/documents/${docId}/signals/${nodeId}`),
-  setSignal: (docId: string, nodeId: number, body: { cycle?: number; main_share?: number; optimize?: boolean; reset?: boolean }) =>
+  setSignal: (docId: string, nodeId: number, body: { green_main_s?: number; green_cross_s?: number; cycle?: number; main_share?: number; optimize?: boolean; reset?: boolean }) =>
     request<SignalPlan>(`/api/documents/${docId}/signals/${nodeId}`, json(body)),
   exportUrl: (docId: string, filename: string) =>
     `/api/documents/${docId}/export?filename=${encodeURIComponent(filename)}`,
