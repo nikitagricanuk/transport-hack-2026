@@ -1,3 +1,8 @@
+import { createMutationQueue } from './utils/mutationQueue';
+import EditorMenus from './components/EditorMenus';
+import { PanelToggle } from './components/PanelClose';
+import SelectionEditor, { type Segment } from './components/SelectionEditor';
+import { toggleSelection } from './utils/selection';
 import type { FeatureCollection } from 'geojson';
 import type { PickedPoint, RouteQuery } from './utils/networkAnalysis';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -34,6 +39,11 @@ const NO_ISSUES: Issue[] = [];
 
 export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
+  const [analysisOverlay, setAnalysisOverlay] = useState<FeatureCollection>({type:'FeatureCollection',features:[]});
+  const [analysisPick,setAnalysisPick] = useState(false);
+  const [analysisPicked,setAnalysisPicked] = useState<PickedPoint|null>(null);
+  const [multi, setMulti] = useState<NonNullable<Selection>[]>([]);
+  const [segment, setSegment] = useState<Segment | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -64,15 +74,13 @@ export default function App() {
   // houses above lawns by default; the layers panel reorders the groups
   const [drawOrder, setDrawOrder] = useState<DrawGroup[]>(['zones', 'buildings', 'paths', 'roads', 'rail']);
   // two ways of working: editing the graph, or analysing flows and scenarios
-  const [analysisOverlay, setAnalysisOverlay] = useState<FeatureCollection>({ type: 'FeatureCollection', features: [] });
-  const [analysisPick, setAnalysisPick] = useState(false);
-  const [analysisPicked, setAnalysisPicked] = useState<PickedPoint | null>(null);
   const [mode, setMode] = useState<'edit' | 'analytics'>('edit');
   const [base, setBase] = useState<BaseMap>('osm');
   const [overlay, setOverlay] = useState<ImageOverlay | null>(null);
   const [threeD, setThreeD] = useState(false);
   const [highlight, setHighlight] = useState<{ kind: string; id: number }[]>([]);
   // a suggested fix under review: drawn on the map, applied only on the user's click
+  const mapHighlight = useMemo(() => [...highlight,...multi], [highlight,multi]);
   const [fixReview, setFixReview] = useState<FixReviewState | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
   const [fixAllOpen, setFixAllOpen] = useState(false);
@@ -256,18 +264,28 @@ export default function App() {
     }, 300);
   }, [doc, wantChanges]);
 
-  const loadAction = useCallback(async (p: Promise<LoadState>) => {
+  const loadMutations=useRef(createMutationQueue<LoadState>());
+  const loadRequest=useRef(0);
+  const loadAction = useCallback(async (request:()=>Promise<LoadState>) => {
+    const id=docIdRef.current, sequence=++loadRequest.current;
     try {
-      setLoad(await p);
-    } catch (e) {
+      const state=await loadMutations.current.run(request);
+      if(docIdRef.current===id && sequence===loadRequest.current)setLoad(state);
+    } catch(e) {
+      if(docIdRef.current!==id)return;
       setError((e as Error).message);
+      // Restore authoritative state when an optimistic edit is rejected.
+      if(id && sequence===loadRequest.current) {
+        try {const state=await api.load(id);if(docIdRef.current===id && sequence===loadRequest.current)setLoad(state);}catch{/* Keep the original error visible. */}
+      }
     }
   }, []);
   const onClosure = useCallback(async (wayId: number, closed: boolean) => {
     const id = docIdRef.current;
     if (!id) return;
     try {
-      const state = await api.setClosure(id, wayId, closed);
+      const state = await loadMutations.current.run(()=>api.setClosure(id, wayId, closed));
+      if(docIdRef.current!==id)return;
       setLoad(state);
       const c = state.closures?.find((x) => x.id === wayId);
       setNotice(!closed ? 'Перекрытие снято'
@@ -302,15 +320,34 @@ export default function App() {
     const id = docIdRef.current;
     if (id) api.load(id).then(setLoad).catch(() => undefined);
   }, []);
-  const onMultiplier = useCallback((m: number) => { if (docId) loadAction(api.setLoad(docId, { multiplier: m })); }, [docId, loadAction]);
-  const onSnapshot = useCallback((name: string) => { if (docId) loadAction(api.addSnapshot(docId, name)); }, [docId, loadAction]);
-  const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
+  const loadTimer=useRef<ReturnType<typeof setTimeout>>();
+  useEffect(()=>()=>clearTimeout(loadTimer.current),[docId]);
+  const onMultiplier = useCallback((m: number) => { clearTimeout(loadTimer.current);loadTimer.current=setTimeout(()=>{if(docId)loadAction(()=>api.setLoad(docId,{multiplier:m}));},150); }, [docId, loadAction]);
+  const onSnapshot = useCallback((name: string) => { if (docId) loadAction(()=>api.addSnapshot(docId, name)); }, [docId, loadAction]);
+  const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(()=>api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
   const onResetLoad = useCallback(() => {
-    if (docId) loadAction(api.setLoad(docId, { reset_all: true }));
+    if (docId) loadAction(()=>api.setLoad(docId, { reset_all: true }));
     setComparison(null);
   }, [docId, loadAction]);
+  const volumeTimers=useRef(new Map<number,ReturnType<typeof setTimeout>>());
+  useEffect(()=>()=>{for(const timer of volumeTimers.current.values())clearTimeout(timer);volumeTimers.current.clear();},[docId]);
   const onSetLoad = useCallback((wayId: number, volume: number | null) => {
-    if (docId) loadAction(api.setLoad(docId, { way_id: wayId, volume }));
+    if(!docId)return;
+    if(volume!==null)setLoad(prev=>{
+      if(!prev)return prev;
+      const cfg=prev.settings??{};
+      const demand=({morning:1,day:.65,evening:1.1,night:.15} as Record<string,number>)[cfg.time_of_day??'morning'];
+      const pcu=1+(cfg.truck_share??0)+1.5*(cfg.bus_share??0);
+      return {...prev,rows:prev.rows.map(row=>{
+        if(row.id!==wayId || row.closed)return row;
+        const effective=Math.round(volume*prev.multiplier+(row.transit_pcu??0))*demand*pcu;
+        const vc=row.capacity?effective/row.capacity:0;
+        const los = vc<.2?'A':vc<.45?'B':vc<.7?'C':vc<.9?'D':vc<=1?'E':'F';
+        return {...row,volume:effective,base_volume:volume,custom:true,vc,los,t_s:row.t0_s*(1+.15*vc**4)};
+      })};
+    });
+    clearTimeout(volumeTimers.current.get(wayId));
+    volumeTimers.current.set(wayId,setTimeout(()=>{volumeTimers.current.delete(wayId);loadAction(()=>api.setLoad(docId,{way_id:wayId,volume}));},150));
   }, [docId, loadAction]);
   const onCompare = useCallback(async (a: string, b: string) => {
     if (!docId) return;
@@ -513,7 +550,7 @@ export default function App() {
       let res: OpResponse;
       const list = Array.isArray(ops) ? ops : [ops];
       if (list.length === 1) res = await api.op(docId, list[0], opts?.label, opts?.reason);
-      else res = await api.batch(docId, list, opts?.label);
+      else res = await api.batch(docId, list, opts?.label, opts?.reason);
       ingest(res);
       const warnings = [
         ...(res.result?.warnings ?? []),
@@ -523,7 +560,7 @@ export default function App() {
       if (opts?.select === 'result') {
         const id = res.result?.id ?? res.results?.[res.results.length - 1]?.id;
         const op = list[list.length - 1].op;
-        if (id !== undefined) setSelection({ kind: op === 'add_way' ? 'way' : 'node', id });
+        if (id !== undefined) setSelection({ kind: op === 'add_way' || op === 'edit_segment' ? 'way' : 'node', id });
         else if (list[0].op === 'set_tags' && list[0].args.kind === 'node') setSelection({ kind: 'node', id: Number(list[0].args.id) });
       }
       return true;
@@ -540,7 +577,7 @@ export default function App() {
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
   const onFix = useCallback((i: Issue, fix: Fix, probe?: RouteQuery) => {
     if (!docId) return;
-    setMode('edit'); modeRef.current = 'edit'; setAnalysisPick(false);
+    setMode('edit');modeRef.current='edit';setAnalysisPick(false);
     setFixReview({ issue: i, fix, preview: null, error: null });
     api.fixPreview(docId, { op: fix.op, args: fix.args, probe })
       .then((preview) => {
@@ -566,10 +603,12 @@ export default function App() {
     const r = fixReview;
     if (!r) return;
     setFixReview(null);
+    setMode('edit');
     runOps({ op: r.fix.op, args: r.fix.args }, {
       label: r.fix.label + ': ' + r.issue.title,
       reason: r.issue.description,
-    });
+      select:r.fix.op==='edit_segment'?'result':'keep',
+    }).then(ok=>{if(ok && r.fix.op==='edit_segment'){setSegment(null);setMulti([]);}});
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
   // a review belongs to the document it was computed on
@@ -659,7 +698,7 @@ export default function App() {
       if (e.key === 'Escape') {
         e.preventDefault();
         if (cancelUnsaved()) return;
-        if (selection) { setSelection(null); return; }
+        if (selection || multi.length || segment || analysisPick) { setSelection(null);setMulti([]);setSegment(null);setAnalysisPick(false);return; }
         if (tool !== 'select') { setTool('select'); return; }
         undoWithNotice();
         return;
@@ -685,7 +724,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey, false);
     return () => window.removeEventListener('keydown', onKey, false);
-  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview, organizer, sumo, exportCheck, report, tasksOpen, fixAllOpen, doc]);
+  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview, organizer, sumo, exportCheck, report, tasksOpen, fixAllOpen, doc, multi, segment, analysisPick]);
 
   useEffect(() => { setHint(null); }, [tool]);
 
@@ -787,7 +826,8 @@ export default function App() {
   return (
     <div className="app" style={win.style}>
       {versionNotice}
-      <MenuBar layout={win.layout} onToggle={win.toggle} onReset={win.reset} />
+      <PanelToggle.Provider value={win.toggle}>
+      <MenuBar extra={<EditorMenus onReport={openReport} onDownload={(kind) => { downloadFile(api.reportUrl(doc.doc_id, kind), `report.${kind}`).catch((e:Error) => setError(e.message)); }} />} layout={win.layout} onToggle={win.toggle} onReset={win.reset} />
       <header className="top">
         <div className="brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -851,7 +891,7 @@ export default function App() {
           <input value={team} onChange={(e) => setTeam(e.target.value.replace(/[^\w\-]/g, ''))} aria-label="Название команды" />
           <span className="muted mono">.osm</span>
         </label>
-        <button className="btn" onClick={openReport} title="Отчёт с графиками, выгрузка в Word и Excel">Отчёт</button>
+
         <button className="btn primary" onClick={() => { setExportCheck(true); scheduleValidate(doc.doc_id); }}>Экспорт .osm</button>
       </header>
 
@@ -869,13 +909,17 @@ export default function App() {
         )}
         <main className="center">
           <div className="map-wrap">
-            <MapView analysis={analysisOverlay} pickPoint={analysisPick && mode === 'analytics'} onPickPoint={setAnalysisPicked} ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
+            <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
-              threeD={threeD} highlight={highlight} onView={onView} fixPreview={fixReview?.preview ?? null}
-              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc} analytics={mode === 'analytics'}
+              analysis={analysisOverlay} pickPoint={analysisPick && mode === 'analytics'} onPickPoint={setAnalysisPicked}
+              segment={segment} multiSelection={multi} onToggleSelection={(s) => setMulti((m) => toggleSelection(m.length ? m : selection ? [selection] : [], s))}
+              onBoxSelection={setMulti} onSegment={setSegment}
+              threeD={threeD} highlight={mapHighlight} onView={onView} fixPreview={fixReview?.preview ?? null}
+              baseOpacity={baseOpacity} issues={mapIssues} onSelect={(s) => { setSelection(s); setMulti([]); setSegment(null); }} loadVc={loadVc} analytics={mode === 'analytics'}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
-            <div className="map-hint">{analysisOverlay.features.length > 0 ? analysisOverlay.features.some(f => f.properties?.mock) ? 'ТЕСТОВЫЕ интервалы ОТ — синтетические данные; скорости и коридор — допущения' : 'Анализ: скорости и коридор — допущения; интервалы ОТ — OSM / ручной ввод / по умолчанию' : hint ?? TOOL_HINTS[tool]}</div>
+            {analysisOverlay.features.some(f=>f.properties?.mock) && <div className="analysis-legend">Интервалы без OSM interval — условные (mock); скорость ОТ и ожидание — допущения</div>}
+            <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
             {fixReview && (
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
                 onApply={applyReviewedFix} onCancel={cancelFixReview} />
@@ -910,10 +954,14 @@ export default function App() {
           <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
             label="Ширина панели свойств" />
         )}
-        {doc && <AnalyticsPanel key={doc.doc_id} active={win.layout.visible.right && mode === 'analytics' && !selection} analysis={{ docId: doc.doc_id, rev: doc.rev, picked: analysisPicked, onPick: setAnalysisPick, onOverlay: setAnalysisOverlay, onFix, onShowRoad }}
+        <AnalyticsPanel key={doc.doc_id} active={win.layout.visible.right && mode === 'analytics' && !selection}
+          analysis={{docId:doc.doc_id,rev:doc.rev,picked:analysisPicked,onPick:setAnalysisPick,onOverlay:setAnalysisOverlay,onFix,onShowRoad}}
           docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
-            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />}
-        {win.layout.visible.right && (mode !== 'analytics' || selection) && (
+          onFix={onFix} onScenarioChanged={refreshLoad} onDetour={async (id,index) => {
+              try {const next=await loadMutations.current.run(()=>api.setClosure(doc.doc_id,id,true,index));if(docIdRef.current!==doc.doc_id)return;setLoad(next);const options=next.closures?.find(c=>c.id===id)?.alternatives ?? [];setAnalysisOverlay({type:'FeatureCollection',features:options.flatMap((a,i)=>a.lines.map(coordinates=>({type:'Feature' as const,geometry:{type:'LineString' as const,coordinates},properties:{before:i!==index}})))});} catch(e){setError((e as Error).message);}
+            }} onReopen={(id) => onClosure(id,false)} onOpenTasks={() => setTasksOpen(true)} />
+        {win.layout.visible.right && (mode !== 'analytics' || selection) && (mode === 'edit' && (multi.length > 1 || segment) ?
+          <SelectionEditor multi={multi} segment={segment} geo={doc.geo} onOp={onInspectorOp} onFix={onFix} onClear={() => {setMulti([]);setSegment(null);}} /> : (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
           onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}
@@ -921,7 +969,7 @@ export default function App() {
           closed={selection?.kind === 'way' && (load?.closures ?? []).some((c) => c.id === selection.id)}
           onClosure={onClosure} onObjectReport={objectReport} onAutofill={autofillBuildings}
           readOnly={mode === 'analytics'} />
-        )}
+        ))}
       </div>
       {fixAllOpen && (
         <FixAllDialog docId={doc.doc_id} onClose={() => setFixAllOpen(false)}
@@ -977,6 +1025,7 @@ export default function App() {
           </div>
         </div>
       )}
+      </PanelToggle.Provider>
     </div>
   );
 }

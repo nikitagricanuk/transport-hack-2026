@@ -1,3 +1,5 @@
+import { levelOfService } from '../utils/los';
+import ResizableTable from './ResizableTable';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import type { RouteDetail, SignalPlan, StopInfo } from '../types';
@@ -49,7 +51,7 @@ export function StopPanel({ docId, nodeId, rev, openRoute, onOpenRoute, onChange
       <div className="kpis">
         <div><b>{info.routes.length}</b><span>маршрутов</span></div>
         <div><b>{fmt(info.vehicles_per_hour)}</b><span>авт./ч на остановке</span></div>
-        <div><b>{fmt(info.residents_400m)}</b><span>жителей в 400 м — оценка, допущение (30 м²/чел.)</span></div>
+        <div><b>{fmt(info.residents_400m)}</b><span>оценка жителей в радиусе 400 м по площади зданий (не ИД5)</span></div>
       </div>
       {info.routes.length === 0 && <span className="muted small">В файле нет маршрутов (relation route) через эту остановку.</span>}
       <div className="route-chips" role="list" aria-label="Маршруты">
@@ -119,7 +121,7 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
     return () => { alive = false; };
   }, [docId, nodeId, rev]);
 
-  const send = async (body: { cycle?: number; main_share?: number; optimize?: boolean; reset?: boolean }) => {
+  const send = async (body: { green_main_s?: number; green_cross_s?: number; cycle?: number; main_share?: number; optimize?: boolean; reset?: boolean }) => {
     setDraft({});
     try {
       setPlan(await api.setSignal(docId, nodeId, body));
@@ -139,7 +141,6 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
   const green = cycle - 2 * (yellow + allRed);
   const gMain = Math.round(green * share);
   const gCross = green - gMain;
-  const commitDraft = () => { if (Object.keys(draft).length) send(draft); };
   const byGroup = (g: 'main' | 'cross') => plan.approaches.filter((a) => a.group === g);
   return (
     <div className="card stack10">
@@ -156,32 +157,28 @@ export function SignalPanel({ docId, nodeId, rev, onChanged }: {
         {gMain} + {yellow} + {allRed} + {gCross} + {yellow} + {allRed} = {cycle} с. Это планировочная оценка:
         SUMO строит программы светофоров сам, тайминг сохраняется в тегах uds:signal:*.
       </p>
-      <label className="field"><span>Цикл: {cycle} с</span>
-        <input type="range" min={30} max={180} step={5} value={cycle} aria-label="Длительность цикла"
-          onChange={(e) => setDraft({ ...draft, cycle: Number(e.target.value) })} onPointerUp={commitDraft} onKeyUp={commitDraft} />
-      </label>
-      <label className="field"><span>Зелёный главному направлению: {Math.round(share * 100)} %</span>
-        <input type="range" min={0.2} max={0.8} step={0.05} value={share} aria-label="Доля зелёного"
-          onChange={(e) => setDraft({ ...draft, main_share: Number(e.target.value) })} onPointerUp={commitDraft} onKeyUp={commitDraft} />
-      </label>
+      <label className="field">Зелёный главного направления, с
+        <input type="number" min={1} max={170} value={gMain} onChange={(e) => setDraft({ cycle: +e.target.value + gCross + 10, main_share: +e.target.value / (+e.target.value + gCross) })} onBlur={() => send({green_main_s:gMain,green_cross_s:gCross})} /></label>
+      <label className="field">Зелёный пересекающего направления, с
+        <input type="number" min={1} max={170} value={gCross} onChange={(e) => setDraft({ cycle: +e.target.value + gMain + 10, main_share: gMain / (+e.target.value + gMain) })} onBlur={() => send({green_main_s:gMain,green_cross_s:gCross})} /></label>
+      <p className="small muted">Жёлтый 3 с; все красные 2 с на фазу. z = Nфакт / P; LOS — ОДМ 218.2.020-2012, таблица 1.</p>
       <div className="row between small">
         <span className="muted">Вебстер: цикл {plan.webster.cycle} с, главному {Math.round(plan.webster.main_share * 100)} %{plan.webster.saturated ? ' (перегрузка)' : ''}</span>
         <button className="btn small primary" onClick={() => send({ optimize: true })}>Подобрать</button>
       </div>
-      <table className="cmp">
-        <thead><tr><th>Подход</th><th>Фаза</th><th>v/c</th></tr></thead>
+      <ResizableTable id="transit-1" className="cmp">
+        <thead><tr><th>Подход регулируемой улицы</th><th>z = v/c</th></tr></thead>
         <tbody>
           {(['main', 'cross'] as const).flatMap((g) => byGroup(g).map((a, i) => (
             <tr key={`${g}${a.way_id}${i}`}>
               <td className="ellipsis">{a.name || a.highway} <span className="muted small">{a.bearing}°</span></td>
-              <td>{g === 'main' ? 'главная' : 'пересек.'}</td>
-              <td className="mono">{a.vc !== null ? fmt(a.vc, 2) : '—'}</td>
+              <td className="mono">{a.vc !== null ? `${fmt(a.vc, 2)} (${levelOfService(a.vc)})` : '—'}</td>
             </tr>
           )))}
         </tbody>
-      </table>
+      </ResizableTable>
       {plan.custom && <button className="link small" onClick={() => send({ reset: true })}>сбросить к равному делению</button>}
-      <span className="muted small">Фазы влияют на расчёт нагрузки (доля зелёного × пропускная способность подходов). В .osm их записать нельзя: SUMO строит фазы сам.</span>
+      <span className="muted small">Фазы влияют на расчёт нагрузки (доля зелёного × пропускная способность подходов). План сохраняется в uds:signal:*; SUMO строит фазы сам.</span>
     </div>
   );
 }

@@ -21,13 +21,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, report, routing, network_analysis
-from .analysis_requests import RouteRequest, IsochroneRequest, CatchmentRequest, PtRequest
-from collections import OrderedDict
+from . import __version__, report
 from .collab import HUB, Peer, clean_presence
 from . import fix_all, fix_preview
 from . import signals as signal_plans
-from . import scenario, transit
+from . import routing, network_analysis, scenario, transit
+from .analysis_requests import RouteRequest, IsochroneRequest, CatchmentRequest, PtRequest
+from collections import OrderedDict
 from urllib.parse import unquote
 from .adapters import compare_adapters
 from .analysis import (
@@ -72,9 +72,17 @@ class Session:
     # vehicles/h per transit route (overrides of the OSM interval) and signal timing per node
     transit_freq: dict[int, float] = field(default_factory=dict)
     signal_timing: dict[int, dict[str, Any]] = field(default_factory=dict)
+    analysis_settings: dict = field(default_factory=dict)
+    closure_choices: dict[int, int] = field(default_factory=dict)
     closures: set[int] = field(default_factory=set)        # roads closed by an accident or works
     tasks: list[dict[str, Any]] = field(default_factory=list)  # user-made Packet Tracer style tasks
     original_validation: dict[str, Any] | None = None
+    validation_cache: tuple | None = None
+    load_cache: tuple | None = None
+    detour_cache: tuple | None = None
+    segments_cache: tuple | None = None
+    chain_cache: tuple | None = None
+    load_base_cache: tuple | None = None
 
 
 SESSIONS: dict[str, Session] = {}
@@ -103,11 +111,16 @@ class OpRequest(BaseModel):
 
 
 class BatchRequest(BaseModel):
+    reason: str | None = None
     ops: list[OpRequest]
     label: str | None = None
 
 
 class LoadRequest(BaseModel):
+    time_of_day: Literal['morning','day','evening','night'] | None = None
+    weather: Literal['dry','rain','snow'] | None = None
+    truck_share: float | None = Field(default=None, ge=0, le=1)
+    bus_share: float | None = Field(default=None, ge=0, le=1)
     way_id: int | None = None
     volume: float | None = Field(default=None, ge=0, le=20000)  # veh/h; null resets the way to its default
     multiplier: float | None = Field(default=None, gt=0, le=5)
@@ -264,7 +277,7 @@ def _save_analysis(s: Session) -> None:
     data = {"loads": {str(k): v for k, v in s.loads.items()}, "multiplier": s.multiplier, "snapshots": s.snapshots,
             "transit_freq": {str(k): v for k, v in s.transit_freq.items()},
             "signal_timing": {str(k): v for k, v in s.signal_timing.items()},
-            "closures": sorted(s.closures), "tasks": s.tasks}
+            "closures": sorted(s.closures), "closure_choices": s.closure_choices, "analysis_settings": s.analysis_settings, "tasks": s.tasks}
     try:
         DRAFT_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -283,6 +296,8 @@ def _load_analysis(s: Session) -> None:
         s.snapshots = list(data.get("snapshots", []))
         s.transit_freq = {int(k): float(v) for k, v in data.get("transit_freq", {}).items()}
         s.signal_timing = {int(k): dict(v) for k, v in data.get("signal_timing", {}).items()}
+        s.analysis_settings = data.get("analysis_settings", {})
+        s.closure_choices = {int(k):int(v) for k,v in data.get("closure_choices", {}).items()}
         s.closures = {int(x) for x in data.get("closures", [])}
         s.tasks = list(data.get("tasks", []))
     except (OSError, ValueError, TypeError, AttributeError):
@@ -536,7 +551,9 @@ def _analysis_context(s, req=None):
         return SimpleNamespace(doc=doc, graph=_routing_graph(s,req) if req else None, revision=s.revision,
                                closed=frozenset(s.closures) if req and req.use_closures else frozenset(),
                                loads=dict(s.loads), multiplier=s.multiplier, transit_freq=dict(s.transit_freq),
-                               signal_timing={k:dict(v) for k,v in s.signal_timing.items()})
+                               signal_timing={k:dict(v) for k,v in s.signal_timing.items()},
+                               analysis_settings=dict(s.analysis_settings),closure_choices=dict(s.closure_choices),
+                               validation_issues=s.validation_cache[1]["issues"] if s.validation_cache and s.validation_cache[0]==s.revision else [])
 
 
 def _before_graph(ctx, doc, req):
@@ -562,7 +579,7 @@ def pt_isochrone(doc_id: str, req: PtRequest) -> Response:
 @app.post("/api/documents/{doc_id}/analysis/route")
 def analysis_route(doc_id: str, req: RouteRequest) -> Response:
     ctx = _analysis_context(_session(doc_id),req)
-    out = network_analysis.route(ctx.doc,req,ctx.graph)
+    out = network_analysis.route(ctx.doc,req,ctx.graph,related_issues=ctx.validation_issues)
     network_analysis.compare(ctx.doc,req,out,lambda doc:network_analysis.route(doc,req,_before_graph(ctx,doc,req)))
     return _json({**out,"revision":ctx.revision})
 
@@ -586,6 +603,9 @@ def analysis_isochrone(doc_id: str, req: IsochroneRequest) -> Response:
             rows = road_rows(doc,ctx.loads,ctx.multiplier,
                              transit_pcu=transit.bus_pcu_by_way(doc,ctx.transit_freq),
                              capacity_factor=signal_plans.capacity_factors(doc,ctx.signal_timing))
+            from .analysis import scenario_rows
+            scenario_rows(rows,doc,ctx.analysis_settings)
+            scenario.apply_closures(doc,rows,set(ctx.closed),ctx.closure_choices)
             by_id = {row["id"]:row for row in rows}
             for _,_,e in rg.g.edges(data=True):
                 row = by_id.get(e["way"])
@@ -638,12 +658,12 @@ def run_batch(doc_id: str, req: BatchRequest, x_client_id: str | None = Header(d
     with s.lock:
         try:
             results = apply_ops(s.doc, s.history, [(o.op, o.args) for o in req.ops], req.label,
-                                author=_author(x_user_name))
+                                author=_author(x_user_name), reason=req.reason)
         except OpError as e:
             raise HTTPException(422, str(e)) from e
         tx = s.history.last_tx
         entry = {"t": "ops", "ops": [[o.op, o.args] for o in req.ops], "label": req.label,
-                 "author": tx.author if tx else None, "at": tx.at if tx else None}
+                 "author": tx.author if tx else None, "at": tx.at if tx else None, "reason": req.reason}
         return _json({"results": results, **_changed(s, s.history.last_tx, entry, x_client_id)})
 
 
@@ -698,7 +718,9 @@ def delete_draft(doc_id: str | None = None) -> dict[str, bool]:
 def run_validate(doc_id: str) -> Response:
     s = _session(doc_id)
     with s.lock:
-        return _json(validate(s.doc))
+        if not s.validation_cache or s.validation_cache[0]!=s.revision:
+            s.validation_cache=(s.revision,validate(s.doc))
+        return _json(s.validation_cache[1])
 
 
 @app.get("/api/documents/{doc_id}/fix-all")
@@ -738,7 +760,7 @@ def edit_log(doc_id: str) -> Response:
         if r["count"] > 6:
             refs += f" и ещё {r['count'] - 6}"
         out.append(f"| {n} | {when} | {_md_cell(r['author'] or 'без имени')} | {_md_cell(r['label'])} | "
-                   f"{_md_cell(refs)} | {_md_cell(r['reason'] or '')} |")
+                   f"{_md_cell(refs)} | {_md_cell(r['reason'] or 'ручная правка')} |")
     return Response(content="\n".join(out) + "\n", media_type="text/markdown; charset=utf-8",
                     headers={"Content-Disposition": 'attachment; filename="fix-log.md"'})
 
@@ -777,8 +799,15 @@ def check_organizer(doc_id: str) -> dict[str, Any]:
 # ------------------------------------------------------------ load model
 def _load_state(s: Session) -> dict[str, Any]:
     rows, det = _rows_detours(s)
+    from .analysis import load_segments, segment_chains
+    if not s.chain_cache or s.chain_cache[0] != s.revision:
+        s.chain_cache = (s.revision,segment_chains(s.doc))
+    if not s.segments_cache or s.segments_cache[0] != s.load_cache[0]:
+        s.segments_cache = (s.load_cache[0],load_segments(s.doc,rows,s.chain_cache[1]))
     names = {r["id"]: r["name"] for r in rows}
     return {
+        "settings": s.analysis_settings,
+        "segments": s.segments_cache[1],
         "multiplier": s.multiplier,
         "rows": rows,
         "summary": load_summary(rows),
@@ -807,6 +836,11 @@ def get_load(doc_id: str) -> Response:
 def set_load(doc_id: str, req: LoadRequest, x_client_id: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
+        cfg = {**s.analysis_settings, **{k:v for k,v in req.model_dump().items() if k in {'time_of_day','weather','truck_share','bus_share'} and v is not None}}
+        if cfg.get('truck_share',0) + cfg.get('bus_share',0) > 1:
+            raise HTTPException(400, 'Сумма долей не более 100%')
+        s.analysis_settings = cfg
+
         if req.reset_all:
             s.loads.clear()
             s.multiplier = 1.0
@@ -859,13 +893,35 @@ def _author(header: str | None) -> str | None:
 
 
 def _rows_detours(s: Session) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
-    """Load model with transit vehicles, signal green shares and closures with detours."""
-    timing = {nid: cfg for nid, cfg in s.signal_timing.items() if nid in s.doc.nodes}
-    rows = road_rows(s.doc, s.loads, s.multiplier,
-                     transit_pcu=transit.bus_pcu_by_way(s.doc, s.transit_freq),
-                     capacity_factor=signal_plans.capacity_factors(s.doc, timing))
+    from .analysis import scenario_rows
+    key = (s.revision, tuple(sorted(s.loads.items())), s.multiplier,
+           repr(s.transit_freq), repr(s.signal_timing), frozenset(s.closures),
+           repr(s.closure_choices), repr(s.analysis_settings))
+    if s.load_cache and s.load_cache[0] == key:
+        return s.load_cache[1]
+    base_key = (s.revision,repr(s.transit_freq),repr(s.signal_timing))
+    if not s.load_base_cache or s.load_base_cache[0] != base_key:
+        timing = {nid:cfg for nid,cfg in s.signal_timing.items() if nid in s.doc.nodes}
+        pcu = transit.bus_pcu_by_way(s.doc,s.transit_freq)
+        base = road_rows(s.doc,{},1,transit_pcu=pcu,
+                         capacity_factor=signal_plans.capacity_factors(s.doc,timing))
+        s.load_base_cache = (base_key,base,pcu)
+    rows = []
+    for original in s.load_base_cache[1]:
+        r = dict(original)
+        custom = r['id'] in s.loads
+        base = s.loads.get(r['id'],r['base_volume'])
+        r.update(volume=round(base*s.multiplier+s.load_base_cache[2].get(r['id'],0)),
+                 base_volume=round(base),custom=custom,needs_intensity=r['new'] and not custom)
+        rows.append(r)
+    scenario_rows(rows, s.doc, s.analysis_settings)
     closed = {w for w in s.closures if w in s.doc.ways}
-    return rows, scenario.apply_closures(s.doc, rows, closed)
+    detour_key = (s.revision,frozenset(closed),tuple(sorted(s.closure_choices.items())))
+    if not s.detour_cache or s.detour_cache[0] != detour_key:
+        s.detour_cache = (detour_key,scenario.detours(s.doc,rows,closed,s.closure_choices))
+    result = rows, scenario.apply_closures(s.doc, rows, closed, s.closure_choices, s.detour_cache[1])
+    s.load_cache = (key, result)
+    return result
 
 
 def _rows(s: Session) -> list[dict[str, Any]]:
@@ -922,6 +978,8 @@ def transit_stop(doc_id: str, node_id: int) -> Response:
 
 # ---------------------------------------------------------- signal timing
 class SignalRequest(BaseModel):
+    green_main_s: int | None = Field(default=None, ge=1, le=170)
+    green_cross_s: int | None = Field(default=None, ge=1, le=170)
     cycle: int | None = Field(default=None, ge=30, le=180)
     main_share: float | None = Field(default=None, ge=0.2, le=0.8)
     optimize: bool = False
@@ -959,6 +1017,12 @@ def set_signal(doc_id: str, node_id: int, req: SignalRequest, x_client_id: str |
                 cfg["cycle"] = req.cycle
             if req.main_share is not None:
                 cfg["main_share"] = round(req.main_share, 2)
+            if req.green_main_s is not None or req.green_cross_s is not None:
+                gm = req.green_main_s if req.green_main_s is not None else plan['phases'][0]['green_s']
+                gc = req.green_cross_s if req.green_cross_s is not None else plan['phases'][1]['green_s']
+                if gm + gc + signal_plans.LOST_TIME_S > 180:
+                    raise HTTPException(400, 'Цикл не более 180 с')
+                cfg.update(cycle=gm + gc + signal_plans.LOST_TIME_S, main_share=gm / (gm + gc))
             s.signal_timing[node_id] = cfg
         _save_analysis(s)
         HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
@@ -1104,6 +1168,7 @@ def object_report(doc_id: str, kind: Literal["node", "way", "relation"], eid: in
 
 # ---------------------------------------------------- closures (accidents)
 class ClosureRequest(BaseModel):
+    alternative: int = Field(default=0, ge=0, le=2)
     way_id: int
     closed: bool = True
 
@@ -1114,6 +1179,7 @@ def set_closure(doc_id: str, req: ClosureRequest, x_client_id: str | None = Head
     with s.lock:
         if req.way_id not in s.doc.ways:
             raise HTTPException(404, "ребро не найдено")
+        s.closure_choices[req.way_id] = req.alternative
         (s.closures.add if req.closed else s.closures.discard)(req.way_id)
         _save_analysis(s)
         HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
@@ -1220,7 +1286,6 @@ async def collaborate(ws: WebSocket, doc_id: str, client: str = "", name: str = 
     finally:
         task.cancel()
         HUB.leave(doc_id, peer.id)
-
 
 # --------------------------------------------------------- static frontend
 if STATIC_DIR.is_dir():

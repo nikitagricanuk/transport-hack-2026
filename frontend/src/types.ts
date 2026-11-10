@@ -30,10 +30,11 @@ export interface WayProps {
 }
 
 export interface NodeProps {
+  stop_routes?: number[];
   id: number;
   kind: 'node';
   junction: boolean;
-  category: 'signal' | 'crossing' | 'stop' | 'tagged' | 'junction';
+  category: 'signal' | 'tram_signal' | 'crossing' | 'stop' | 'tagged' | 'junction';
   tags: Tags;
 }
 
@@ -104,7 +105,7 @@ export interface Fix {
 
 /** Dry run of a fix: what it would add, delete or change (the document is not touched). */
 export interface FixPreview {
-  probe?: { found: boolean; stats?: { time_s: number; length_m: number } | null } | null;
+  probe?: { found:boolean;stats?:{time_s:number;length_m:number}|null }|null;
   features: Feature<LineString | Point, { kind: Kind; id: number; status: 'added' | 'deleted' | 'modified'; name: string; length_m?: number; fringe?: boolean }>[];
   counts: { added: number; deleted: number; modified: number };
   added_road_m: number;
@@ -170,6 +171,8 @@ export interface SumoResult {
   report?: { groups: CheckGroup[]; counts: { critical: number; warning: number; info: number } };
 }
 
+export type MultiSelection = { kind: 'way' | 'node'; id: number }[];
+
 export type Selection = { kind: 'way' | 'node'; id: number } | null;
 
 export type Tool = 'select' | 'node' | 'way' | 'split' | 'merge' | 'signal' | 'crossing' | 'reverse';
@@ -180,6 +183,9 @@ export interface Op {
 }
 
 export interface LayerVisibility {
+  roadsSub?: Record<string,boolean>;
+  nodes: boolean;
+  tramSignals: boolean;
   roads: boolean;
   paths: boolean;
   rail: boolean;
@@ -237,6 +243,8 @@ export interface SnapshotMeta {
 }
 
 export interface LoadState {
+  settings?: {time_of_day?:string;weather?:string;truck_share?:number;bus_share?:number};
+  segments?: {id:number;ways:number[];name:string;vc:number;los:Los;length_m:number;category:string}[];
   multiplier: number;
   rows: LoadRow[];
   summary: LoadSummary;
@@ -245,6 +253,9 @@ export interface LoadState {
 }
 
 export interface Closure {
+  alternatives?: {ways:number[];time_s:number;length_m:number;lines:number[][][]}[];
+  selected_alternative?: number;
+  issues?: Issue[];
   id: number;
   name: string;
   ways: number[];

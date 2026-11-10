@@ -39,7 +39,7 @@ export function FixReview({ review, onApply, onCancel }: {
         : !preview ? <p className="muted small">Считаю, что изменится…</p>
           : (
             <>
-              {preview.probe && <p className="small">После исправления: {preview.probe.found ? `путь найден, ${((preview.probe.stats?.time_s ?? 0) / 60).toFixed(1)} мин` : 'путь всё ещё не найден'}</p>}
+              {preview.probe && <p>После исправления: {preview.probe.found ? `путь найден, ${((preview.probe.stats?.time_s ?? 0)/60).toFixed(1)} мин` : 'путь всё ещё не найден'}</p>}
               <ul className="fix-review-list small">
                 {preview.counts.added > 0 && (
                   <li><span className="swatch added" />Добавит: {preview.counts.added} объект(ов)

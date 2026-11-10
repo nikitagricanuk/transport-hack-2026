@@ -177,9 +177,11 @@ class _Validator:
         self.check_elevation()
         self.check_signals_and_stops()
         self.check_connections()
+        self.check_pedestrian()
+
+    def check_pedestrian(self) -> None:
         from .pedestrian import check
-        for item in check(self.doc):
-            self.issues.append(Issue(**item))
+        self.issues.extend(Issue(**item) for item in check(self.doc))
 
     def check_data(self) -> None:
         for w in self.doc.ways.values():
