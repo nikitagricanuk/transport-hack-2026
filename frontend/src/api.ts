@@ -112,8 +112,8 @@ export const api = {
     fd.append('file', file);
     return request<DocState>('/api/documents', { method: 'POST', body: fd });
   },
-  op: (docId: string, op: Op, label?: string) =>
-    request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label })),
+  op: (docId: string, op: Op, label?: string, reason?: string) =>
+    request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label, reason })),
   fixPreview: (docId: string, op: Op) =>
     request<FixPreview>(`/api/documents/${docId}/fix-preview`, json(op)),
   batch: (docId: string, ops: Op[], label?: string) =>
