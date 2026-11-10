@@ -58,6 +58,41 @@ export function buildTrees(geo: Geo): FeatureCollection<Polygon> {
   return { type: 'FeatureCollection', features };
 }
 
+/** Closest street tangent and signed direction from the model to the carriageway. */
+function streetFrame(geo: Geo, lon: number, lat: number) {
+  const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 110540;
+  let angle = 0, nearest = 60, side = 0;
+  for (const road of geo.ways.features) {
+    if (road.properties.layer !== 'road') continue;
+    const coords = road.geometry.coordinates;
+    for (let i = 1; i < coords.length; i++) {
+      const ax = (coords[i-1][0]-lon)*kx, ay = (coords[i-1][1]-lat)*ky;
+      const dx = (coords[i][0]-coords[i-1][0])*kx, dy = (coords[i][1]-coords[i-1][1])*ky;
+      const length = dx*dx+dy*dy;
+      if (!length) continue;
+      const t = Math.max(0, Math.min(1, -(ax*dx+ay*dy)/length));
+      const x = ax+t*dx, y = ay+t*dy, distance = Math.hypot(x,y);
+      if (distance < nearest) {
+        nearest = distance;
+        angle = Math.atan2(dy,dx);
+        side = -Math.sin(angle)*x + Math.cos(angle)*y;
+      }
+    }
+  }
+  return { angle, side };
+}
+
+function modelBox(lon: number, lat: number, angle: number, nodeId: number, scale = 1) {
+  const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 110540;
+  return (x: number, y: number, w: number, d: number, base: number, height: number, color: string) => {
+    const ring = [[x-w/2,y-d/2],[x+w/2,y-d/2],[x+w/2,y+d/2],[x-w/2,y+d/2],[x-w/2,y-d/2]]
+      .map(([px,py]) => [lon+scale*(px*Math.cos(angle)-py*Math.sin(angle))/kx,
+        lat+scale*(px*Math.sin(angle)+py*Math.cos(angle))/ky]);
+    return { type: 'Feature' as const, geometry: { type: 'Polygon' as const, coordinates: [ring] },
+      properties: { base: base*scale, height: height*scale, color, nodeId } };
+  };
+}
+
 /** Small schematic shelters, aligned with the nearest street. No models on stop_positions. */
 export function buildBusStops(geo: Geo): FeatureCollection<Polygon> {
   const features: FeatureCollection<Polygon>['features'] = [];
@@ -71,25 +106,12 @@ export function buildBusStops(geo: Geo): FeatureCollection<Polygon> {
     const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 110540;
     if (placed.some(p => Math.hypot((p[0] - lon) * kx, (p[1] - lat) * ky) < 8)) continue;
     placed.push([lon, lat]);
-    let angle = 0, nearest = 60;
-    for (const road of geo.ways.features) {
-      if (road.properties.layer !== 'road') continue;
-      const coords = road.geometry.coordinates;
-      for (let i = 1; i < coords.length; i++) {
-        const a = [(coords[i-1][0]-lon)*kx, (coords[i-1][1]-lat)*ky];
-        const b = [(coords[i][0]-lon)*kx, (coords[i][1]-lat)*ky];
-        const dx = b[0]-a[0], dy = b[1]-a[1], length = dx*dx+dy*dy;
-        if (!length) continue;
-        const t = Math.max(0, Math.min(1, -(a[0]*dx+a[1]*dy)/length));
-        const distance = Math.hypot(a[0]+t*dx, a[1]+t*dy);
-        if (distance < nearest) { nearest = distance; angle = Math.atan2(dy, dx); }
-      }
-    }
-    const box = (x: number, y: number, w: number, d: number, base: number, height: number, color: string) => {
-      const ring = [[x-w/2,y-d/2],[x+w/2,y-d/2],[x+w/2,y+d/2],[x-w/2,y+d/2],[x-w/2,y-d/2]]
-        .map(([px,py]) => [lon+(px*Math.cos(angle)-py*Math.sin(angle))/kx, lat+(px*Math.sin(angle)+py*Math.cos(angle))/ky]);
-      features.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] }, properties: { base, height, color, nodeId: node.properties.id } });
-    };
+    const street = streetFrame(geo, lon, lat);
+    // The bench back is +Y; the open front (-Y) must face the street.
+    // Flip by the actual street side, independently of OSM way direction.
+    const angle = street.angle + (street.side > 0 ? Math.PI : 0);
+    const makeBox = modelBox(lon, lat, angle, node.properties.id, 1.3);
+    const box = (...args: Parameters<typeof makeBox>) => { features.push(makeBox(...args)); };
     // A recognisable stop pole remains even where shelter=no is explicitly mapped.
     box(2.8, 0, 0.12, 0.12, 0, 3.2, '#637787');
     box(2.8, 0, 0.65, 0.16, 2.5, 3.2, '#267AA6');
@@ -104,3 +126,26 @@ export function buildBusStops(geo: Geo): FeatureCollection<Polygon> {
 
 /** Decorative volumes stay out of the neighbourhood overview. */
 export const SCENERY_MINZOOM = 17;
+
+/** Static schematic traffic lights, not a representation of live signal phases. */
+export function buildTrafficLights(geo: Geo): FeatureCollection<Polygon> {
+  const features: FeatureCollection<Polygon>['features'] = [];
+  for (const node of geo.nodes.features) {
+    const tags = node.properties.tags;
+    if (node.properties.category !== 'signal' && tags.highway !== 'traffic_signals'
+      && tags.crossing !== 'traffic_signals') continue;
+    if (node.properties.category === 'tram_signal') continue;
+    const [lon, lat] = node.geometry.coordinates;
+    const street = streetFrame(geo, lon, lat);
+    // Face approaching traffic along the nearest street. Honour mapped direction.
+    const angle = street.angle - Math.PI/2 + (tags['traffic_signals:direction'] === 'backward' ? Math.PI : 0);
+    const box = modelBox(lon, lat, angle, node.properties.id);
+    features.push(box(0, 0, 0.18, 0.18, 0, 4.4, '#6C7881'));
+    features.push(box(0, -0.08, 0.66, 0.42, 3.1, 4.65, '#26313A'));
+    // Shallow coloured lenses on the front face, with dark housing behind.
+    for (const [base, color] of [[4.21, '#C66A63'], [3.76, '#C7AB61'], [3.31, '#63977B']] as const) {
+      features.push(box(0, -0.31, 0.37, 0.08, base, base+0.3, color));
+    }
+  }
+  return { type: 'FeatureCollection', features };
+}

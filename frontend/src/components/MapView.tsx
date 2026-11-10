@@ -13,7 +13,7 @@ import { LANE_MINZOOM, buildLanes, findJunctions, laneSplit, laneWidthFor, type 
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
-import { buildTrees, buildBusStops, SCENERY_MINZOOM } from '../utils/scenery';
+import { buildTrees, buildBusStops, buildTrafficLights, SCENERY_MINZOOM } from '../utils/scenery';
 import { defaultCamera } from '../utils/view';
 
 export interface MapHandle {
@@ -326,7 +326,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'trees', 'bus-stop-models', 'analysis', 'segment-selection', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
+        'trees', 'bus-stop-models', 'traffic-light-models', 'analysis', 'segment-selection', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -341,6 +341,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
           'fill-extrusion-base': ['get', 'base'], 'fill-extrusion-height': ['get', 'height'],
           'fill-extrusion-opacity': 1, 'fill-extrusion-vertical-gradient': true } });
       map.addLayer({ id: 'bus-stop-shelters', type: 'fill-extrusion', source: 'bus-stop-models', minzoom: SCENERY_MINZOOM,
+        paint: { 'fill-extrusion-color': ['get', 'color'],
+          'fill-extrusion-base': ['get', 'base'], 'fill-extrusion-height': ['get', 'height'],
+          'fill-extrusion-opacity': 1, 'fill-extrusion-vertical-gradient': true } });
+      map.addLayer({ id: 'traffic-light-models', type: 'fill-extrusion', source: 'traffic-light-models', minzoom: SCENERY_MINZOOM,
         paint: { 'fill-extrusion-color': ['get', 'color'],
           'fill-extrusion-base': ['get', 'base'], 'fill-extrusion-height': ['get', 'height'],
           'fill-extrusion-opacity': 1, 'fill-extrusion-vertical-gradient': true } });
@@ -561,6 +565,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     }
     (map.getSource('trees') as GeoJSONSource).setData(buildTrees(geo));
     (map.getSource('bus-stop-models') as GeoJSONSource).setData(buildBusStops(geo));
+    (map.getSource('traffic-light-models') as GeoJSONSource).setData(buildTrafficLights(geo));
     rendered.current = geo;
     clearDrag();
     drawPeerSelections();
@@ -888,6 +893,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     showIf(map, ['issues'], L.issues);
     const cats = [L.signals && 'signal', L.crossings && 'crossing', L.tramSignals && 'tram_signal', L.nodes && 'tagged'].filter(Boolean);
     showIf(map, ['bus-stop-shelters'], L.stops);
+    showIf(map, ['traffic-light-models'], L.signals);
     filterIf(map, 'pois', ['in', ['get', 'category'], ['literal', cats]]);
     // the invisible hit layer must follow the toggles too: a hidden road, path or track
     // cannot be clicked, hovered or dragged
