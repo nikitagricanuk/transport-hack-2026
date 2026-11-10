@@ -15,4 +15,5 @@ backend/tests
 deploy
 data
 !data/example.osm
+!data/irkutsk_city.osm
 docker-compose*.yml

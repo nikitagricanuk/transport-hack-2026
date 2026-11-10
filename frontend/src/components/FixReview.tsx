@@ -1,5 +1,7 @@
 import { useState } from 'react';
+import { useEnterKey } from '../utils/useEnterKey';
 import type { Fix, FixPreview, Issue } from '../types';
+import { fmt } from '../utils/geom';
 
 /** What the user is reviewing: an issue, one of its suggested fixes and its dry run. */
 export interface FixReviewState {
@@ -9,7 +11,7 @@ export interface FixReviewState {
   error: string | null;
 }
 
-const fmtM = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(2)} км` : `${Math.round(m)} м`);
+const fmtM = (m: number) => (m >= 1000 ? `${fmt(m / 1000, 2)} км` : `${Math.round(m)} м`);
 
 /**
  * Review card shown before a suggested fix is applied. The fix is drawn on the
@@ -26,6 +28,7 @@ export function FixReview({ review, onApply, onCancel }: {
   const removes = (preview?.removed_road_m ?? 0) > 0;
   const [checked, setChecked] = useState(false);
   const canApply = !!preview && !error && !preview.empty && (!removes || checked);
+  useEnterKey(canApply, onApply);  // Enter applies, Esc (in App) cancels
   return (
     <div className="fix-review" role="dialog" aria-label="Проверка исправления">
       <div className="fix-review-head">
@@ -36,6 +39,7 @@ export function FixReview({ review, onApply, onCancel }: {
         : !preview ? <p className="muted small">Считаю, что изменится…</p>
           : (
             <>
+              {preview.probe && <p>После исправления: {preview.probe.found ? `путь найден, ${((preview.probe.stats?.time_s ?? 0)/60).toFixed(1)} мин` : 'путь всё ещё не найден'}</p>}
               <ul className="fix-review-list small">
                 {preview.counts.added > 0 && (
                   <li><span className="swatch added" />Добавит: {preview.counts.added} объект(ов)
@@ -50,6 +54,10 @@ export function FixReview({ review, onApply, onCancel }: {
                 )}
                 {preview.empty && <li>Ничего не изменит</li>}
               </ul>
+              {fix.op === 'replace_restriction_way' && (
+                <p className="fix-review-note small">На карте выделено предлагаемое ребро.
+                  Сверьте направление и знаки на перекрёстке перед применением.</p>
+              )}
               {preview.features.some((f) => f.properties.fringe) && (
                 <div className="fix-review-note small">
                   <p>Фиктивное ребро на границе выгрузки: в реальности этой дороги нет. Оно соединяет

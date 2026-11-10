@@ -1,5 +1,7 @@
+import ResizableTable from './ResizableTable';
 import { levelOfService } from '../utils/los';
 import { memo, useState } from 'react';
+import { useEnterKey } from '../utils/useEnterKey';
 import type { ChangesResult, Comparison, LoadRow, LoadState, Los, ReportData, ValidationResult } from '../types';
 import { fmt } from '../utils/geom';
 
@@ -170,7 +172,7 @@ function ComparisonView({ c, onShowRoad }: { c: Comparison; onShowRoad: (id: num
   return (
     <section className="load-col wide">
       <b>«{c.a.name}» → «{c.b.name}»</b>
-      <table className="cmp">
+      <ResizableTable id="analysis-1" className="cmp">
         <thead><tr><th>Показатель</th><th>Было</th><th>Стало</th><th>Δ</th></tr></thead>
         <tbody>
           {Object.entries(TOTALS_RU).map(([k, [label, digits, lower]]) => c.totals[k] && (
@@ -182,7 +184,7 @@ function ComparisonView({ c, onShowRoad }: { c: Comparison; onShowRoad: (id: num
             </tr>
           ))}
         </tbody>
-      </table>
+      </ResizableTable>
       <span className="small muted">Изменённые рёбра: {c.changed.length}. Загрузка v/c было → стало:</span>
       <Bars max={Math.max(1.2, ...c.changed.slice(0, 8).map((x) => Math.max(x.vc_before ?? 0, x.vc_after ?? 0)))}
         items={c.changed.slice(0, 8).map((x) => ({
@@ -208,6 +210,15 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
   const vc = row.capacity ? val / row.capacity : 0;
   const los = v === null ? row.los : levelOfService(vc);
   const commit = () => { if (v !== null) { onSet(Math.round(v)); setV(null); } };
+  // exact count typed by hand (a traffic survey), not only the slider
+  const [typed, setTyped] = useState<string | null>(null);
+  const typedValue = typed === null ? null : Number(typed.replace(',', '.').replace(/\s/g, ''));
+  const typedOk = typedValue !== null && Number.isFinite(typedValue) && typedValue >= 0 && typedValue <= 20000;
+  const commitTyped = () => {
+    if (typed === null) return;
+    if (typedOk) onSet(Math.round(typedValue!));
+    setTyped(null);
+  };
   return (
     <div className={`card stack10 ${row.needs_intensity ? 'warn-card' : ''}`}>
       {row.needs_intensity && <b className="small">Новая дорога: задайте интенсивность — без неё модель берёт оценку по классу</b>}
@@ -216,11 +227,19 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
         <b>Интенсивность</b>
         <span className="los-dot" style={{ background: LOS_COLOR[los] }} title={LOS_TEXT[los]}>{los}</span>
       </div>
-      <input type="range" min={0} max={max} step={10} value={val} aria-label="Интенсивность, авт/ч"
+      <input type="range" min={0} max={max} step={10} value={val} aria-label="Интенсивность, авт./ч"
         onChange={(e) => setV(Number(e.target.value))} onPointerUp={commit} onKeyUp={commit} />
+      <label className="row gap8 small">
+        <span>Данные учёта, авт./ч</span>
+        <input type="number" inputMode="numeric" min={0} max={20000} step={1} className="num-input"
+          aria-label="Интенсивность по данным учёта, авт./ч" placeholder={String(Math.round(val))}
+          value={typed ?? ''} onChange={(e) => setTyped(e.target.value)} onBlur={commitTyped}
+          onKeyDown={(e) => { if (e.key === 'Enter') commitTyped(); if (e.key === 'Escape') setTyped(null); }} />
+        {typed !== null && !typedOk && <span className="bad">от 0 до 20 000</span>}
+      </label>
       <div className="row between small">
-        <span className="mono">{fmt(val)} авт/ч {row.custom ? '' : '(нет данных учёта)'}</span>
-        <span className="mono muted">пропускная {fmt(row.capacity)} · v/c {fmt(vc, 2)}</span>
+        <span className="mono">{fmt(val)} авт./ч {row.custom ? '(введено вручную)' : '(нет данных учёта)'}</span>
+        <span className="mono muted">пропускная способность {fmt(row.capacity)} авт./ч · v/c {fmt(vc, 2)}</span>
       </div>
       <div className="row between small muted">
         <span>t: {fmt(row.t0_s, 0)} с свободно → {fmt(row.t_s, 0)} с</span>
@@ -252,7 +271,7 @@ export const ChangesPanel = memo(function ChangesPanel({ data, onShow, overlay, 
           <b>Исходный файл → сейчас</b>
           <label className="row gap8 small"><input type="checkbox" checked={overlay} onChange={(e) => onOverlay(e.target.checked)} />показать на карте</label>
         </div>
-        <table className="cmp">
+        <ResizableTable id="analysis-2" className="cmp">
           <thead><tr><th /><th>Было</th><th>Стало</th><th>Δ</th></tr></thead>
           <tbody>
             {rows.map(([label, b, a]) => (
@@ -260,7 +279,7 @@ export const ChangesPanel = memo(function ChangesPanel({ data, onShow, overlay, 
                 <td className="mono"><Delta before={b} after={a} digits={0} lowerBetter /></td></tr>
             ))}
           </tbody>
-        </table>
+        </ResizableTable>
         <div className="row gap8 small">
           {(['matsim', 'sumo', 'webots'] as const).map((l) => (
             <span key={l} className={`level ${data.after.levels[l]}`}>
@@ -310,6 +329,7 @@ export function ExportCheck({ validation, onFixList, onExport, onClose, filename
 }) {
   const s = validation?.summary;
   const blocked = !s || s.counts.critical > 0 || s.components > 1;
+  useEnterKey(!blocked, onExport);  // Enter saves a file that passed the check
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal" role="dialog" aria-label="Проверка перед сохранением" onClick={(e) => e.stopPropagation()}>

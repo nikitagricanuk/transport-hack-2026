@@ -12,7 +12,7 @@ import math
 from typing import Any
 
 from .edits import History, Transaction, apply_op
-from .osm_model import KINDS, Node, OsmDocument, Way
+from .osm_model import KINDS, Node, OsmDocument, Relation, Way
 from .roads import is_drivable
 
 
@@ -79,7 +79,35 @@ def _restore_order(doc: OsmDocument, tx: Transaction, orders: dict[str, list[int
             store.update(items)
 
 
-def preview(doc: OsmDocument, op: str, args: dict) -> dict[str, Any]:
+def _restriction_features(doc: OsmDocument, tx: Transaction) -> list[dict]:
+    """Highlight the replacement member without counting it as a new road or node."""
+    features = []
+    for key, new in tx.after.items():
+        old = tx.before[key]
+        if not isinstance(old, Relation) or not isinstance(new, Relation):
+            continue
+        if not new.tags.get("type", "").startswith("restriction"):
+            continue
+        for member in new.members:
+            if member in old.members:
+                continue
+            element = doc.get(member.type, member.ref)
+            if isinstance(element, Node):
+                geometry = {"type": "Point", "coordinates": [element.lon, element.lat]}
+            elif isinstance(element, Way):
+                coordinates = _way_coords(doc, element)
+                if len(coordinates) < 2:
+                    continue
+                geometry = {"type": "LineString", "coordinates": coordinates}
+            else:
+                continue
+            features.append({"type": "Feature", "geometry": geometry,
+                             "properties": {"kind": member.type, "id": member.ref, "status": "modified",
+                                            "role": member.role}})
+    return features
+
+
+def preview(doc: OsmDocument, op: str, args: dict, probe=None) -> dict[str, Any]:
     """Apply `op` on a throwaway history, describe the change, then undo it.
 
     Raises OpError like the real operation, so the panel can show why a fix
@@ -107,6 +135,8 @@ def preview(doc: OsmDocument, op: str, args: dict) -> dict[str, Any]:
     try:
         # geometry of what exists after the fix, read before rolling it back
         after_feats, added_m = _features(doc, tx.after, status_of, "after")
+        after_feats.extend(_restriction_features(doc, tx))
+        probe_result = probe(doc) if probe else None
     finally:
         tx.undo()
         doc._next_new_id = next_id
@@ -116,6 +146,7 @@ def preview(doc: OsmDocument, op: str, args: dict) -> dict[str, Any]:
     for st in status_of.values():
         counts[st] += 1
     return {
+        "probe": probe_result,
         "features": before_feats + after_feats,
         "counts": counts,
         "added_road_m": round(added_m, 1),

@@ -150,7 +150,7 @@ def timing_tags(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> dict[i
     """
     out: dict[int, dict[str, str | None]] = {}
     for n in doc.nodes.values():
-        stale = [k for k in n.tags if k.startswith(TAG_PREFIX)]
+        stale = [k for k in n.tags if k.startswith(TAG_PREFIX) and k not in {TAG_PREFIX + "arrow", TAG_PREFIX + "tram"}]
         if stale:
             out[n.id] = dict.fromkeys(stale)
     for node_id, cfg in settings.items():
@@ -181,8 +181,12 @@ def timing_from_tags(doc: OsmDocument) -> dict[int, dict[str, Any]]:
         try:
             cycle = int(n.tags[TAG_PREFIX + "cycle"])
             share = float(n.tags.get(TAG_PREFIX + "main_share", "0.5"))
+            gm = float(n.tags.get(TAG_PREFIX + 'green_main', 'nan'))
+            gc = float(n.tags.get(TAG_PREFIX + 'green_cross', 'nan'))
+            if gm > 0 and gc > 0 and abs(gm + gc + LOST_TIME_S - cycle) < .001:
+                share = gm / (gm + gc)
         except ValueError:
             continue
-        if 30 <= cycle <= 180 and MIN_SHARE <= share <= MAX_SHARE:
+        if 12 <= cycle <= 180 and 0 < share < 1:
             out[n.id] = {"cycle": cycle, "main_share": share}
     return out

@@ -71,14 +71,27 @@ def way_feature(doc: OsmDocument, w: Way) -> tuple[str, dict] | None:
                     "geometry": {"type": "LineString", "coordinates": coords}, "properties": props}
 
 
-def node_feature(n: Node, junction_count: int) -> dict | None:
+def _node_context(doc):
+    stops, tram, other = {}, set(), set()
+    for rel in doc.relations.values():
+        if rel.tags.get('type') == 'route':
+            for m in rel.members:
+                if m.type == 'node' and m.role.startswith(('stop','platform')):
+                    stops.setdefault(m.ref,[]).append(rel.id)
+    for w in doc.ways.values():
+        (tram if w.tags.get('railway') == 'tram' else other).update(w.nodes)
+    return stops, tram-other
+
+
+def node_feature(n: Node, junction_count: int, stop_routes=None, tram_only=False) -> dict | None:
     if not n.tags and junction_count < 2:
         return None  # plain shape vertices are sent with ways; keep payload small
     return {
         "type": "Feature", "id": _fid("node", n.id),
         "geometry": {"type": "Point", "coordinates": [n.lon, n.lat]},
         "properties": {"id": n.id, "kind": "node", "junction": junction_count >= 2,
-                       "category": _node_category(n.tags), "tags": n.tags,
+                       "category": "tram_signal" if tram_only and n.tags.get("highway") == "traffic_signals" else _node_category(n.tags), "tags": n.tags,
+                       "stop_routes": (stop_routes or {}).get(n.id, []),
                        "planned": n.tags.get("uds:planned") == "yes"},
     }
 
@@ -90,7 +103,8 @@ def to_geojson(doc: OsmDocument) -> dict[str, Any]:
         if f:
             out[f[0]].append(f[1])
     jc = _junction_counts(doc)
-    node_feats = [f for n in doc.nodes.values() if (f := node_feature(n, jc.get(n.id, 0)))]
+    stop_routes, tram_only = _node_context(doc)
+    node_feats = [f for n in doc.nodes.values() if (f := node_feature(n, jc.get(n.id, 0), stop_routes, n.id in tram_only))]
     return {
         "ways": {"type": "FeatureCollection", "features": out["ways"]},
         "areas": {"type": "FeatureCollection", "features": out["areas"]},
@@ -121,6 +135,10 @@ def geo_patch(doc: OsmDocument, before: dict, after: dict) -> dict[str, Any]:
                 # junction status of the old and new vertices may have changed
                 node_ids.update(old_nodes)
                 node_ids.update(new_nodes)
+        elif kind == 'relation':
+            for rel in (old,new):
+                if rel:
+                    node_ids.update(m.ref for m in rel.members if m.type == 'node')
         elif kind == "node":
             node_ids.add(eid)
             moved.add(eid)
@@ -135,9 +153,10 @@ def geo_patch(doc: OsmDocument, before: dict, after: dict) -> dict[str, Any]:
         if f:
             feats[f[0]].append(f[1])
     jc = _junction_counts(doc) if node_ids else {}
+    stop_routes, tram_only = _node_context(doc) if node_ids else ({},set())
     for nid in node_ids:
         n = doc.nodes.get(nid)
-        f = node_feature(n, jc.get(nid, 0)) if n else None
+        f = node_feature(n, jc.get(nid, 0), stop_routes, nid in tram_only) if n else None
         if f:
             feats["nodes"].append(f)
     return {"ways": sorted(way_ids), "nodes": sorted(node_ids), "features": feats}
@@ -166,6 +185,8 @@ def _lanes(tags: dict[str, str]) -> int:
 
 def _node_category(tags: dict[str, str]) -> str:
     hw = tags.get("highway")
+    if tags.get("uds:signal:tram") == "yes" or (tags.get("railway") == "signal" and any(k.startswith("railway:signal:") for k in tags)):
+        return "tram_signal"
     if hw == "traffic_signals":
         return "signal"
     if hw == "crossing" or tags.get("railway") == "crossing":
