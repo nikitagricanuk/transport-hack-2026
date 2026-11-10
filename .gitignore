@@ -225,9 +225,10 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 
-# Local OSM working files. example.osm from the task is part of the repo.
+# Local OSM working files. The two documented samples are bundled.
 data/*.osm
 !data/example.osm
+!data/irkutsk_city.osm
 data/drafts/
 *.log
 !data/README.md
