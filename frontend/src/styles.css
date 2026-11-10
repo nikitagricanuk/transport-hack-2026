@@ -395,3 +395,10 @@ input[type="checkbox"]:disabled { cursor: default; }
 .splitter:hover, .splitter:focus-visible, .splitter:active { background: var(--accent); outline: none; }
 .fix-review-note { padding: 8px; border-radius: 8px; background: #102033; border: 1px solid #1e3a5f; color: #bfdbfe; }
 .fix-review-note p { margin: 0; }
+
+.analysis-tools [role="tablist"] { flex-wrap: wrap; }
+.analysis-tools input[type="number"] { max-width: 90px; }
+.analysis-tools table { width: 100%; border-collapse: collapse; }
+.analysis-tools td, .analysis-tools th { padding: 5px 3px; text-align: left; }
+.analysis-tools td { border-top: 1px solid #334155; }
+.analysis-tools > .row { flex-wrap: wrap; }

@@ -7,3 +7,5 @@ openpyxl==3.1.5
 python-docx==1.1.2
 matplotlib==3.9.4
 reportlab==4.2.5
+
+shapely==2.0.6
