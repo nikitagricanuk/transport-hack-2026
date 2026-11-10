@@ -87,7 +87,23 @@ export async function downloadFile(url: string, filename: string, expectOsm = fa
   return blob.size;
 }
 
+export interface AdapterEstimate {
+  speed_kmh: number;
+  lanes: [number, number];
+  capacity: [number, number] | null;
+}
+
+export interface AdapterComparison {
+  matsim: AdapterEstimate | null;
+  sumo: AdapterEstimate | null;
+  differs: boolean;
+  sources: Record<'matsim' | 'sumo', string>;
+}
+
 export const api = {
+  adapters: (docId: string, wayId: number, signal: AbortSignal) =>
+    request<{ adapters: AdapterComparison }>(`/api/documents/${docId}/elements/way/${wayId}`, { signal })
+      .then(({ adapters }) => adapters),
   health: () => request<{ ok: boolean; version: string; netconvert: boolean }>('/api/health'),
   samples: () => request<{ name: string; size: number }[]>('/api/samples'),
   openSample: (name: string) => request<DocState>(`/api/samples/${encodeURIComponent(name)}/open`, { method: 'POST' }),
