@@ -90,7 +90,7 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
           build-args: |
-            WITH_SUMO=0
+            WITH_SUMO=1
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false

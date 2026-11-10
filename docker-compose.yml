@@ -5,7 +5,7 @@ services:
     build:
       context: .
       args:
-        WITH_SUMO: ${WITH_SUMO:-0}
+        WITH_SUMO: ${WITH_SUMO:-1}
     image: transport-hack:local
     ports:
       - "127.0.0.1:8000:8000"

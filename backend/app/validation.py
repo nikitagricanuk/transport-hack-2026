@@ -18,6 +18,9 @@ Category = Literal["connectivity", "direction", "junction", "lanes", "geometry",
 GAP_M = 8.0          # dangling end closer than this to another road = broken junction
 CLOSE_JUNCTION_M = 2.0
 BOUNDARY_M = 40.0    # dead ends near the extract border are expected
+FRINGE_PAIR_M = 90.0  # opposite carriageway ends this close at the border get a turnaround
+FRAGMENT_LINK_M = 30.0  # an isolated fragment this close to the network gets a connector
+OUTSIDE = "outside"   # virtual node: the rest of the city beyond the extract
 STOP_FAR_M = 25.0
 MAX_GRADE = 0.12    # steeper than 12 % between two nodes is a Z jump
 CONNECT_FIX_M = 30.0  # offer "connect to a nearby road" only inside this radius
@@ -86,6 +89,8 @@ class _Validator:
         self.doc = doc
         b = doc.bounds() or (0, 0, 0, 0)
         self.bounds = b
+        # Only a real extract (<bounds> in the file) has roads that continue outside it.
+        self.extract = any(el.tag == "bounds" for el in doc.head)
         self.proj = LocalProjection((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
         self.issues: list[Issue] = []
         self.road_ways = [w for w in doc.ways.values() if is_drivable(w.tags) and len(w.nodes) >= 2]
@@ -122,7 +127,11 @@ class _Validator:
         p = self.proj.to_xy(n.lat, n.lon)
         corners = [self.proj.to_xy(minlat, minlon), self.proj.to_xy(maxlat, maxlon)]
         (x0, y0), (x1, y1) = corners
-        return min(abs(p[0] - x0), abs(p[0] - x1), abs(p[1] - y0), abs(p[1] - y1)) < BOUNDARY_M
+        # Overpass returns whole ways, so their ends stick out of <bounds> by tens or
+        # hundreds of metres. Everything outside the box is the fringe too.
+        if not (x0 <= p[0] <= x1 and y0 <= p[1] <= y1):
+            return True
+        return min(p[0] - x0, x1 - p[0], p[1] - y0, y1 - p[1]) < BOUNDARY_M
 
     def name(self, wid: int) -> str:
         w = self.doc.ways.get(wid)
@@ -210,6 +219,11 @@ class _Validator:
                 if connect:
                     fixes.append(connect)
                 fixes.append({"label": "Удалить", "op": "delete", "args": {"kind": "way", "id": ways[0]}})
+            else:
+                link = self._fragment_link_fix(comp, ways)
+                if link:
+                    fixes.append(link)
+                fixes.append({"label": "Удалить фрагмент", "op": "delete_ways", "args": {"ids": ways}})
             self.add(category="connectivity", severity="critical",
                      title="Изолированное ребро" if single else "Изолированный фрагмент сети",
                      description=(f"{self.name(ways[0])} не связано с основной сетью" if single
@@ -217,6 +231,29 @@ class _Validator:
                                  + " — MatSim не построит маршрут, SUMO отбросит фрагмент.",
                      refs=[{"kind": "way", "id": w} for w in ways[:20]], location=self.loc(first),
                      levels=["matsim", "sumo"], fixes=fixes)
+
+    def _fragment_link_fix(self, comp: set[int], ways: list[int]) -> dict[str, Any] | None:
+        """A short connector from the fragment to the nearest road of the main network."""
+        seg_idx = self._segment_index()
+        best = None
+        for nid in comp:
+            p = self.xy(nid)
+            if p is None:
+                continue
+            for (wid, a, b) in seg_idx.query(p[0], p[1], FRAGMENT_LINK_M):
+                if wid in ways or a not in self.main_nodes:
+                    continue
+                q, _t, d = project_on_segment(p, self.xy(a), self.xy(b))  # type: ignore[arg-type]
+                if d <= FRAGMENT_LINK_M and (best is None or d < best[0]):
+                    best = (d, nid, wid, q)
+        if best is None:
+            return None
+        d, nid, wid, q = best
+        lat, lon = self.proj.to_latlon(*q)
+        hw = self.doc.ways[ways[0]].tags.get("highway", "service")
+        return {"label": f"Присоединить ({d:.0f} м)", "op": "add_way",
+                "args": {"points": [{"id": nid}, {"lat": lat, "lon": lon, "way_id": wid}],
+                         "tags": {"highway": hw if hw in ("service", "residential", "unclassified") else "service"}}}
 
     def _segment_index(self) -> GridIndex:
         idx = GridIndex(cell=25.0)
@@ -252,6 +289,10 @@ class _Validator:
                     continue
                 _, _, d = project_on_segment(p, pa, pb)
                 if d > GAP_M:
+                    continue
+                # A short spur already joined to that road at its other end is not a gap.
+                far = w.nodes[-1] if nid == w.nodes[0] else w.nodes[0]
+                if far in other.nodes and (q := self.xy(far)) is not None and dist(p, q) <= 2 * GAP_M:
                     continue
                 if nearest is None or d < nearest[0]:
                     nearest = (d, owid)
@@ -322,17 +363,28 @@ class _Validator:
                     dg.add_edge(b, a)
         if dg.number_of_nodes() == 0:
             return
+        # A road that runs off the extract continues in the city: its loose end is
+        # joined to a virtual "outside" node both ways, so leaving the fragment is not a trap.
+        fringe = [n for n in dg.nodes if (dg.in_degree(n) == 0 or dg.out_degree(n) == 0) and self.near_boundary(n)]
+        for n in fringe if self.extract else []:
+            dg.add_edge(n, OUTSIDE)
+            dg.add_edge(OUTSIDE, n)
         sccs = [set(c) for c in nx.strongly_connected_components(dg)]
-        sccs.sort(key=len, reverse=True)
-        self.strong_component_count = len(sccs)
-        self.outside_strong = sum(len(c) for c in sccs[1:])
-        if len(sccs) == 1:
+        sccs.sort(key=lambda c: (OUTSIDE in c and len(c) > 1, len(c)), reverse=True)
+        sccs = [c for c in sccs if c != {OUTSIDE}] + [c for c in sccs if c == {OUTSIDE}]
+        real = [c - {OUTSIDE} for c in sccs if c - {OUTSIDE}]
+        self.strong_component_count = len(real)
+        self.outside_strong = sum(len(c) for c in real[1:])
+        if len(real) == 1:
             return
         cond = nx.condensation(dg, sccs)
+        sccs = [c - {OUTSIDE} for c in sccs]
         reachable = nx.descendants(cond, 0)
         reaches_main = nx.ancestors(cond, 0)
         groups: dict[str, list[set[int]]] = {"trap": [], "unreachable": [], "island": []}
         for i, comp in enumerate(sccs[1:], start=1):
+            if not comp:
+                continue
             # Separate undirected pieces are already reported as isolated fragments.
             if self.main_nodes and not (comp & self.main_nodes):
                 continue
@@ -399,6 +451,7 @@ class _Validator:
                     dg.add_edge(b, a, way=w.id)
         if dg.number_of_nodes() == 0:
             return
+        turnarounds = self._fringe_turnarounds(dg)
         for nid in dg.nodes:
             ind, outd = dg.in_degree(nid), dg.out_degree(nid)
             if (ind == 0) == (outd == 0):
@@ -419,7 +472,37 @@ class _Validator:
                                   "не построится (MatSim)."),
                      refs=[{"kind": "node", "id": nid}] + [{"kind": "way", "id": w} for w in wids],
                      location=self.loc(nid), levels=["matsim", "sumo"],
-                     fixes=self._oneway_fixes(nid, wid))
+                     fixes=([turnarounds[nid]] if nid in turnarounds else []) + self._oneway_fixes(nid, wid))
+
+    def _fringe_turnarounds(self, dg: nx.DiGraph) -> dict[int, dict[str, Any]]:
+        """Pair the loose ends of a divided road at the edge of the extract.
+
+        One carriageway leaves the area (no exit), the opposite one enters it (no
+        entry), a few dozen metres apart. A short one-way link from the first to
+        the second keeps both carriageways in MatSim's strongly connected network
+        without changing the real roads; it is tagged uds:fringe=yes.
+        """
+        if not self.extract:
+            return {}
+        sinks = [n for n in dg.nodes if dg.out_degree(n) == 0 and dg.in_degree(n) > 0 and self.near_boundary(n)]
+        sources = [n for n in dg.nodes if dg.in_degree(n) == 0 and dg.out_degree(n) > 0 and self.near_boundary(n)]
+        out: dict[int, dict[str, Any]] = {}
+        used: set[int] = set()
+        pairs = sorted((dist(self.xy(a), self.xy(b)), a, b) for a in sinks for b in sources  # type: ignore[arg-type]
+                       if self.xy(a) and self.xy(b))
+        for d, a, b in pairs:
+            if d > FRINGE_PAIR_M or a in used or b in used:
+                continue
+            used |= {a, b}
+            wa = self.doc.ways[self.road_node_ways[a][0]]
+            fix = {"label": f"Граничный разворот ({d:.0f} м)", "op": "add_way",
+                   "args": {"points": [{"id": a}, {"id": b}],
+                            "tags": {"highway": wa.tags.get("highway", "road"), "oneway": "yes", "lanes": "1",
+                                     "uds:fringe": "yes",
+                                     "note": "Граничный разворот: связывает проезжие части у края выгрузки для симуляции"}}}
+            out[a] = fix
+            out[b] = fix
+        return out
 
     def check_lanes(self) -> None:
         for w in self.road_ways:

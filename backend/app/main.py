@@ -42,6 +42,7 @@ from .sumo_check import find_netconvert, run_netconvert
 from .validation import validate
 
 DATA_DIR = Path(os.environ.get("UDS_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
+SAMPLES_DIR = Path(os.environ.get("UDS_SAMPLES_DIR", DATA_DIR))
 DRAFT_DIR = DATA_DIR / "drafts"
 STATIC_DIR = Path(os.environ.get("UDS_STATIC_DIR", Path(__file__).resolve().parents[2] / "frontend" / "dist"))
 MAX_UPLOAD = 200 * 1024 * 1024
@@ -430,17 +431,25 @@ def health() -> dict[str, Any]:
     return {"ok": True, "version": __version__, "netconvert": find_netconvert() is not None}
 
 
+def _sample_files() -> dict[str, Path]:
+    """Files on the start screen: bundled samples, then anything put into data/."""
+    out: dict[str, Path] = {}
+    for d in (SAMPLES_DIR, DATA_DIR):
+        if d.exists():
+            for p in sorted(d.glob("*.osm")):
+                out[p.name] = p
+    return out
+
+
 @app.get("/api/samples")
 def samples() -> list[dict[str, Any]]:
-    if not DATA_DIR.exists():
-        return []
-    return [{"name": p.name, "size": p.stat().st_size} for p in sorted(DATA_DIR.glob("*.osm"))]
+    return [{"name": name, "size": p.stat().st_size} for name, p in _sample_files().items()]
 
 
 @app.post("/api/samples/{name}/open")
 def open_sample(name: str) -> Response:
-    path = (DATA_DIR / Path(name).name).resolve()
-    if not path.is_file() or path.parent != DATA_DIR.resolve():
+    path = _sample_files().get(Path(name).name)
+    if path is None or not path.is_file():
         raise HTTPException(404, "файл не найден в data/")
     return _json(_open(path.read_bytes(), path.name))
 

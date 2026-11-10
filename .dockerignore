@@ -14,4 +14,6 @@ frontend/dist
 backend/tests
 deploy
 data
+!data/example.osm
+!data/irkutsk_fragment_fixed.osm
 docker-compose*.yml
