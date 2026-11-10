@@ -33,6 +33,7 @@ class Transaction:
     after: dict[Key, Element | None] = field(default_factory=dict)
     author: str | None = None   # who made the edit (collaborator name)
     at: float = 0.0             # unix time of the edit
+    reason: str | None = None
 
     def summary(self) -> dict[str, Any]:
         """Journal entry for the history panel: what, who, when and which elements."""
@@ -43,7 +44,8 @@ class Transaction:
             ref = new or old
             refs.append({"kind": kind, "id": eid, "status": status,
                          "name": ref.tags.get("name", "") if ref is not None else ""})
-        return {"label": self.label, "author": self.author, "at": self.at, "refs": refs[:30], "count": len(refs)}
+        return {"label": self.label, "author": self.author, "at": self.at, "refs": refs[:30], "count": len(refs),
+                "reason": self.reason}
 
     def touch(self, kind: Kind, eid: int) -> None:
         key = (kind, eid)
@@ -1306,14 +1308,48 @@ def op_set_restriction_via(doc, tx, relation_id: int, node_id: int):
     for role in ("from", "to"):
         member = next((m for m in rel.members if m.role == role and m.type == "way"), None)
         w = doc.ways.get(member.ref) if member else None
-        if w is None or nid not in (w.nodes[0], w.nodes[-1]):
+        if w is None or len(w.nodes) < 2 or nid not in (w.nodes[0], w.nodes[-1]):
             raise OpError(f"узел {nid} не на конце ребра {role}")
     tx.touch("relation", rel.id)
     rel.members = [m for m in rel.members if m.role != "via"] + [Member("node", nid, "via")]
     return {"id": rel.id}
 
 
+def restriction_way_matches(way: Way | None, role: str, via: int) -> bool:
+    if way is None or len(way.nodes) < 2 or not is_drivable(way.tags):
+        return False
+    first, last = way.nodes[0], way.nodes[-1]
+    start, end = (first, last) if role == "to" else (last, first)
+    flow = direction(way.tags)
+    return (start == via and flow >= 0) or (end == via and flow <= 0)
+
+
+def op_replace_restriction_way(doc, tx, relation_id: int, role: str, old_id: int | None, way_id: int, via: int):
+    """Replace one from/to way, rechecking the reviewed junction on apply."""
+    rel = doc.relations.get(relation_id)
+    if role not in ("from", "to") or rel is None or not rel.tags.get("type", "").startswith("restriction"):
+        raise OpError("отношение запрета поворота не найдено")
+    other_role = "to" if role == "from" else "from"
+    members = [m for m in rel.members if m.role == role]
+    others = [m for m in rel.members if m.role == other_role and m.type == "way"]
+    vias = [m for m in rel.members if m.role == "via"]
+    expected = [] if old_id is None else [Member("way", old_id, role)]
+    if members != expected or len(others) != 1 or vias != [Member("node", via, "via")] or via not in doc.nodes:
+        raise OpError("участники запрета изменились — проверьте запрет заново")
+    if (way_id == others[0].ref or not restriction_way_matches(doc.ways.get(way_id), role, via)
+            or not restriction_way_matches(doc.ways.get(others[0].ref), other_role, via)):
+        raise OpError("рёбра не образуют поворот через узел via")
+    tx.touch("relation", rel.id)
+    replacement = Member("way", way_id, role)
+    if members:
+        rel.members[rel.members.index(members[0])] = replacement
+    else:
+        rel.members.append(replacement)
+    return {"id": rel.id}
+
+
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
+    "replace_restriction_way": (op_replace_restriction_way, "Исправлено ребро запрета поворота"),
     "set_restriction_via": (op_set_restriction_via, "Исправлен узел запрета поворота"),
     "smooth_z": (op_smooth_z, "Плавный Z-переход"),
     "attach_to_road": (op_attach_to_road, "Узел привязан к дороге"),
@@ -1336,14 +1372,15 @@ OPS: dict[str, tuple[Callable[..., dict], str]] = {
 
 
 def apply_ops(doc: OsmDocument, history: History, ops: list[tuple[str, dict]], label: str | None = None,
-              author: str | None = None, at: float | None = None) -> list[dict]:
+              author: str | None = None, at: float | None = None, reason: str | None = None) -> list[dict]:
     """Apply several operations as ONE undo step (e.g. a road template)."""
     if not ops:
         return []
     for op, _ in ops:
         if op not in OPS:
             raise OpError(f"неизвестная операция: {op}")
-    tx = Transaction(doc, label or OPS[ops[0][0]][1], author=author, at=at if at is not None else time.time())
+    tx = Transaction(doc, label or OPS[ops[0][0]][1], author=author, at=at if at is not None else time.time(),
+                     reason=reason)
     results: list[dict] = []
     try:
         for op, args in ops:
@@ -1365,5 +1402,5 @@ def apply_ops(doc: OsmDocument, history: History, ops: list[tuple[str, dict]], l
 
 
 def apply_op(doc: OsmDocument, history: History, op: str, args: dict, label: str | None = None,
-             author: str | None = None, at: float | None = None) -> dict:
-    return apply_ops(doc, history, [(op, args)], label, author, at)[0]
+             author: str | None = None, at: float | None = None, reason: str | None = None) -> dict:
+    return apply_ops(doc, history, [(op, args)], label, author, at, reason)[0]

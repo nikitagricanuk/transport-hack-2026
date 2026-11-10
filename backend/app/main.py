@@ -96,6 +96,7 @@ class OpRequest(BaseModel):
     op: str
     args: dict[str, Any] = Field(default_factory=dict)
     label: str | None = None
+    reason: str | None = None
 
 
 class BatchRequest(BaseModel):
@@ -326,7 +327,7 @@ def _replay_journal(s: Session) -> None:
             kind = entry.get("t")
             if kind == "ops":
                 apply_ops(s.doc, s.history, [(o[0], o[1]) for o in entry["ops"]], entry.get("label"),
-                          entry.get("author"), entry.get("at"))
+                          entry.get("author"), entry.get("at"), entry.get("reason"))
             elif kind == "undo":
                 s.history.undo()
             elif kind == "redo":
@@ -508,12 +509,13 @@ def run_op(doc_id: str, req: OpRequest, x_client_id: str | None = Header(default
     s = _session(doc_id)
     with s.lock:
         try:
-            result = apply_op(s.doc, s.history, req.op, req.args, req.label, author=_author(x_user_name))
+            result = apply_op(s.doc, s.history, req.op, req.args, req.label, author=_author(x_user_name),
+                              reason=req.reason)
         except OpError as e:
             raise HTTPException(422, str(e)) from e
         tx = s.history.last_tx
         entry = {"t": "ops", "ops": [[req.op, req.args]], "label": req.label,
-                 "author": tx.author if tx else None, "at": tx.at if tx else None}
+                 "author": tx.author if tx else None, "at": tx.at if tx else None, "reason": req.reason}
         return _json({"result": result, **_changed(s, s.history.last_tx, entry, x_client_id)})
 
 
@@ -611,7 +613,7 @@ def edit_log(doc_id: str) -> Response:
     """Every applied edit as a Markdown table: the base for docs/fix-log.md.
 
     One row per undo step, oldest first, with time, author and the touched
-    elements; the «Почему» column is left for the reviewer to fill in.
+    elements and the reason supplied when applying a reviewed fix.
     """
     s = _session(doc_id)
     with s.lock:
@@ -627,7 +629,7 @@ def edit_log(doc_id: str) -> Response:
         if r["count"] > 6:
             refs += f" и ещё {r['count'] - 6}"
         out.append(f"| {n} | {when} | {_md_cell(r['author'] or 'без имени')} | {_md_cell(r['label'])} | "
-                   f"{_md_cell(refs)} |  |")
+                   f"{_md_cell(refs)} | {_md_cell(r['reason'] or '')} |")
     return Response(content="\n".join(out) + "\n", media_type="text/markdown; charset=utf-8",
                     headers={"Content-Disposition": 'attachment; filename="fix-log.md"'})
 

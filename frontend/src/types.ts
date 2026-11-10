@@ -73,6 +73,7 @@ export interface HistoryInfo {
 }
 
 export interface HistoryEntry {
+  reason?: string | null;
   label: string;
   author: string | null;
   at: number;
@@ -96,6 +97,7 @@ export interface DocState {
 export type Severity = 'critical' | 'warning' | 'info';
 
 export interface Fix {
+  reason?: string;
   label: string;
   op: string;
   args: Record<string, unknown>;

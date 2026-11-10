@@ -1,5 +1,8 @@
 """Checks backed by Russian norms: speed limits (ПДД 10.2), turn restrictions, grades (СП 42)."""
 
+from fastapi.testclient import TestClient
+
+from app import main
 from app.analysis import _speed
 from app.edits import History, apply_op
 from app.norms import max_grade, speed_kmh
@@ -51,6 +54,43 @@ def test_restriction_with_a_wrong_via_can_be_pointed_at_the_shared_node(doc):
     apply_op(doc, History(), fix["op"], fix["args"])
     assert [m.ref for m in doc.relations[601].members if m.role == "via"] == [4]
     assert not _issues(doc, "Запрет поворота не применится")
+
+
+def test_reviewed_sample_repairs_preview_and_log():
+    client = TestClient(main.app)
+    state = client.post("/api/samples/example.osm/open").raise_for_status().json()
+    doc_id = state["doc_id"]
+    base = f"/api/documents/{doc_id}"
+
+    def validate_sample():
+        return client.get(f"{base}/validate").raise_for_status().json()
+
+    initial = validate_sample()
+    restriction = next(i for i in initial["issues"] if i["refs"][0] == {"kind": "relation", "id": 6452614})
+    repair, fallback = restriction["fixes"]
+    assert repair["op"] == "replace_restriction_way" and fallback["op"] == "delete"
+    before = client.get(f"{base}/export").raise_for_status().content
+    preview = client.post(f"{base}/fix-preview", json=repair).raise_for_status().json()
+    assert preview["counts"] == {"added": 0, "deleted": 0, "modified": 1}
+    assert preview["features"][0]["properties"]["id"] == repair["args"]["way_id"]
+    assert client.get(f"{base}/export").raise_for_status().content == before
+    assert validate_sample() == initial
+    assert restriction["description"] not in client.get(f"{base}/edit-log").text
+
+    applied = client.post(f"{base}/ops", json=repair).raise_for_status().json()
+    assert applied["history"]["details"][-1]["reason"] == restriction["description"]
+    assert not any(i["title"] == restriction["title"] and i["refs"][0] == restriction["refs"][0]
+                   for i in validate_sample()["issues"])
+
+    speed = next(i for i in initial["issues"] if i["title"] == "Нет ограничения скорости"
+                 and i["refs"][0]["id"] == 35071296)
+    client.post(f"{base}/ops", json=speed["fixes"][0]).raise_for_status()
+    main.SESSIONS.pop(doc_id)
+    restored = client.get(f"{base}").raise_for_status().json()
+    assert restored["history"]["details"][-1]["reason"] == speed["description"]
+    log = client.get(f"{base}/edit-log").raise_for_status().text
+    assert restriction["description"] in log
+    assert speed["description"] in log and "ПДД РФ, п. 10.2" in log
 
 
 def test_grade_limits_follow_sp42_and_smooth_z_meets_them_for_two_levels(doc):

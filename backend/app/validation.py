@@ -8,9 +8,9 @@ from typing import Any, Literal
 import networkx as nx
 
 from .geo import GridIndex, LocalProjection, dist, project_on_segment
-from .osm_model import OsmDocument
+from .osm_model import Member, OsmDocument
 from .roads import ONEWAY_VALID, can_connect, default_turns, direction, is_access_way, is_drivable, parse_int
-from .edits import ATTACH_MAX_M, signal_spot, way_level
+from .edits import ATTACH_MAX_M, restriction_way_matches, signal_spot, way_level
 from .norms import (GRADE_SOURCE, LIVING_KMH, SPEED_SHORTHAND, SPEED_SOURCE, URBAN_KMH, default_limit,
                     max_grade, speed_kmh)
 
@@ -147,8 +147,8 @@ class _Validator:
         if fixes is None:
             fix = kw.get("fix")
             fixes = [fix] if fix else []
-        else:
-            kw["fix"] = fixes[0] if fixes else None
+        fixes = [{**fix, "reason": kw["description"]} for fix in fixes]
+        kw["fix"] = fixes[0] if fixes else None
         kw["fixes"] = fixes
         kw.setdefault("id", f"{kw['category']}-{len(self.issues)}")
         way_ids = kw.pop("affected_ways", None)
@@ -644,6 +644,46 @@ class _Validator:
                                      f"({SPEED_SOURCE}). Сверьте со знаками на месте.",
                          refs=ref, location=loc, levels=["matsim", "sumo"], fixes=[fix(URBAN_KMH)])
 
+    def restriction_fix(self, relation_id: int, froms: list[Member], tos: list[Member],
+                        vias: list[Member]) -> dict | None:
+        if len(froms) > 1 or len(tos) > 1 or len(vias) > 1:
+            return None
+        if any(m.type != "way" for m in froms + tos) or (vias and vias[0].type != "node"):
+            return None
+        fw = self.doc.ways.get(froms[0].ref) if froms else None
+        tw = self.doc.ways.get(tos[0].ref) if tos else None
+        via = vias[0].ref if vias else None
+        point = self.xy(via) if via is not None else None
+        if fw and tw and len(fw.nodes) >= 2:
+            shared = [n for n in dict.fromkeys((fw.nodes[0], fw.nodes[-1])) if n in self.doc.nodes
+                      and restriction_way_matches(fw, "from", n) and restriction_way_matches(tw, "to", n)]
+            if shared and via not in shared and (point is not None or len(shared) == 1):
+                node = min(shared, key=lambda n: dist(point, self.xy(n))) if point is not None else shared[0]
+                return {"label": f"Исправить via → узел {node}", "op": "set_restriction_via",
+                        "args": {"relation_id": relation_id, "node_id": node}}
+        if via is None or point is None:
+            return None
+        from_matches = restriction_way_matches(fw, "from", via)
+        to_matches = restriction_way_matches(tw, "to", via)
+        if from_matches == to_matches:
+            return None
+        role, broken, original, other = ("to", tos, tw, fw) if from_matches else ("from", froms, fw, tw)
+        candidates = []
+        for wid in self.road_node_ways.get(via, []):
+            way = self.doc.ways[wid]
+            if wid == other.id or not restriction_way_matches(way, role, via):
+                continue
+            if original is not None and way_level(original.tags) != way_level(way.tags):
+                continue
+            candidates.append(way)
+        if len(candidates) != 1:
+            # A missing reference carries no geometry to distinguish several roads at the same junction.
+            return None
+        wid = candidates[0].id
+        return {"label": f"Исправить {role} → ребро {wid}", "op": "replace_restriction_way",
+                "args": {"relation_id": relation_id, "role": role, "old_id": broken[0].ref if broken else None,
+                         "way_id": wid, "via": via}}
+
     def check_restrictions(self) -> None:
         """Turn restrictions SUMO can apply: one from, one to, a via they both end at.
 
@@ -669,25 +709,21 @@ class _Validator:
                 problems.append("from или to — не проезжая дорога")
             if not vias:
                 problems.append("нет узла via")
-            via_fix = None
             if not problems and len(vias) == 1 and vias[0].type == "node":
                 fw, tw = self.doc.ways.get(froms[0].ref), self.doc.ways.get(tos[0].ref)
                 via = vias[0].ref
-                if fw is not None and tw is not None:
+                if fw is not None and tw is not None and fw.nodes and tw.nodes:
                     ends_f, ends_t = {fw.nodes[0], fw.nodes[-1]}, {tw.nodes[0], tw.nodes[-1]}
                     if via not in ends_f or via not in ends_t:
                         problems.append("узел via не на концах обоих рёбер — SUMO не поймёт, где поворот")
-                        shared = sorted(ends_f & ends_t)
-                        if len(shared) == 1:
-                            via_fix = {"label": f"Исправить via → узел {shared[0]}", "op": "set_restriction_via",
-                                       "args": {"relation_id": rel.id, "node_id": shared[0]}}
             if not problems:
                 continue
             kind = rel.tags.get("restriction") or rel.tags.get("type")
             node = next((m.ref for m in vias if m.type == "node" and m.ref in self.doc.nodes), None)
             way = next((w for w in ways if w is not None), None)
             loc = self.loc(node) if node else (self.loc(way.nodes[len(way.nodes) // 2]) if way else None)
-            fixes = [via_fix] if via_fix else []
+            repair = self.restriction_fix(rel.id, froms, tos, vias)
+            fixes = [repair] if repair else []
             fixes.append({"label": "Удалить отношение", "op": "delete", "args": {"kind": "relation", "id": rel.id}})
             self.add(category="junction", severity="warning", title="Запрет поворота не применится",
                      description=f"Отношение {rel.id} ({kind}): {'; '.join(problems)}. "

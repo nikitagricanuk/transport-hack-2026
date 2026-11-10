@@ -50,6 +50,10 @@ export function FixReview({ review, onApply, onCancel }: {
                 )}
                 {preview.empty && <li>Ничего не изменит</li>}
               </ul>
+              {fix.op === 'replace_restriction_way' && (
+                <p className="fix-review-note small">На карте выделено предлагаемое ребро.
+                  Сверьте направление и знаки на перекрёстке перед применением.</p>
+              )}
               {preview.features.some((f) => f.properties.fringe) && (
                 <div className="fix-review-note small">
                   <p>Фиктивное ребро на границе выгрузки: в реальности этой дороги нет. Оно соединяет
