@@ -151,6 +151,14 @@ class _Validator:
             kw["fix"] = fixes[0] if fixes else None
         kw["fixes"] = fixes
         kw.setdefault("id", f"{kw['category']}-{len(self.issues)}")
+        way_ids = kw.pop("affected_ways", None)
+        if way_ids is None:
+            way_ids = [ref["id"] for ref in kw.get("refs", []) if ref["kind"] == "way"]
+        levels = kw.get("levels", [])
+        if "matsim" in levels and way_ids and all(
+            wid in self.doc.ways and self.doc.ways[wid].tags.get("highway") == "service" for wid in way_ids
+        ):
+            kw["levels"] = [level for level in levels if level != "matsim"]
         self.issues.append(Issue(**kw))
 
     # ------------------------------------------------------------------ run
@@ -232,9 +240,9 @@ class _Validator:
             self.add(category="connectivity", severity="critical",
                      title="Изолированное ребро" if single else "Изолированный фрагмент сети",
                      description=(f"{self.name(ways[0])} не связано с основной сетью" if single
-                                  else f"{len(ways)} рёбер не связаны с основной сетью")
-                                 + " — MatSim не построит маршрут, SUMO отбросит фрагмент.",
-                     refs=[{"kind": "way", "id": w} for w in ways[:20]], location=self.loc(first),
+                                  else f"{len(ways)} рёбер не связаны с основной сетью"),
+                     refs=[{"kind": "way", "id": w} for w in ways[:20]],
+                     location=self.loc(first), affected_ways=ways,
                      levels=["matsim", "sumo"], fixes=fixes)
 
     def _fragment_link_fix(self, comp: set[int], ways: list[int]) -> dict[str, Any] | None:
@@ -319,6 +327,7 @@ class _Validator:
                      description=f"{self.name(w.id)} заканчивается в {d:.1f} м от {self.name(owid)} "
                                  "без общего узла.",
                      refs=[{"kind": "node", "id": nid}, {"kind": "way", "id": owid}], location=self.loc(nid),
+                     affected_ways=[w.id, owid],
                      levels=["matsim", "sumo"], fixes=fixes)
 
     def check_close_junctions(self) -> None:
@@ -438,10 +447,9 @@ class _Validator:
         noun = "узлов" if len(nodes) != 1 else "узел"
         fixes = self._trap_fixes(nodes) if kind == "trap" else None
         self.add(category="connectivity", severity=severity, title=title,
-                 description=f"{len(nodes)} {noun}: {why}. MatSim не построит обратный маршрут, "
-                             "в SUMO машины останутся в этом кармане.",
+                 description=f"{len(nodes)} {noun}: {why}.",
                  refs=[{"kind": "node", "id": ordered[0]}] + [{"kind": "way", "id": w} for w in sorted(ways)[:12]],
-                 location=locs[0] if locs else None, locations=locs[:800] or None,
+                 location=locs[0] if locs else None, locations=locs[:800] or None, affected_ways=ways,
                  levels=["matsim", "sumo"], fixes=fixes)
 
     def check_directions(self) -> None:

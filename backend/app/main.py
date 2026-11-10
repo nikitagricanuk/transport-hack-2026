@@ -27,6 +27,7 @@ from . import fix_preview
 from . import signals as signal_plans
 from . import scenario, transit
 from urllib.parse import unquote
+from .adapters import compare_adapters
 from .analysis import (
     changes as list_changes,
     compare_snapshots,
@@ -494,6 +495,7 @@ def get_element(doc_id: str, kind: Literal["node", "way", "relation"], eid: int)
         out: dict[str, Any] = {"kind": kind, "id": eid, "tags": dict(el.tags), "attrs": dict(el.attrs)}
         if kind == "way":
             out["vertices"] = vertices(s.doc, eid)
+            out["adapters"] = compare_adapters(el.tags)
         elif kind == "node":
             out["lat"], out["lon"] = el.lat, el.lon  # type: ignore[union-attr]
             out["ways"] = [w.id for w in s.doc.ways_of_node(eid)]

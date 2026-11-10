@@ -1,6 +1,7 @@
 import { memo, useState } from 'react';
 import type { LoadRow, NodeProps, Op, RouteDetail, Tags, WayProps } from '../types';
 import { SignalPanel, StopPanel } from './Transit';
+import AdapterPanel from './AdapterPanel';
 import TagEditor from './TagEditor';
 import { RoadLoad } from './Analysis';
 import { areaM2, fmt, lengthM } from '../utils/geom';
@@ -46,7 +47,9 @@ export default memo(function Inspector({
   way, node, geometry, loadRow, onSetLoad, nodeOnRoad, canSeparate, sharedJunctions, docId, rev = 0, openRoute = null,
   onOpenRoute, onScenarioChanged, onOp, closed = false, onClosure, onObjectReport, onAutofill, readOnly = false,
 }: Props) {
-  const [tab, setTab] = useState<'attr' | 'tags'>('attr');
+  const [selectedTab, setTab] = useState<'attr' | 'tags' | 'adapters'>('attr');
+  const showAdapters = way?.layer === 'road' && Boolean(docId);
+  const tab = selectedTab === 'adapters' && !showAdapters ? 'attr' : selectedTab;
   if (!way && !node) {
     return (
       <aside className="inspector empty" aria-label="Свойства объекта">
@@ -76,6 +79,9 @@ export default memo(function Inspector({
       <div className="tabs" role="tablist">
         <button role="tab" aria-selected={tab === 'attr'} onClick={() => setTab('attr')}>Атрибуты</button>
         <button role="tab" aria-selected={tab === 'tags'} onClick={() => setTab('tags')}>Теги OSM · {Object.keys(tags).length}</button>
+        {showAdapters && <button role="tab" aria-selected={tab === 'adapters'} onClick={() => setTab('adapters')}>
+          Как увидят адаптеры
+        </button>}
       </div>
       <div className={`insp-body ${readOnly ? 'read-only' : ''}`}>
         {readOnly && <p className="small muted">Режим аналитики: объект только для просмотра. Править — в режиме «Редактирование».</p>}
@@ -96,6 +102,7 @@ export default memo(function Inspector({
             <span className="small muted">Поток уходит на кратчайший объезд; в .osm перекрытие не записывается.</span>
           </div>
         )}
+        {tab === 'adapters' && docId && way && <AdapterPanel key={`${docId}:${way.id}:${rev}`} docId={docId} wayId={way.id} />}
         {tab === 'tags' && <TagEditor tags={tags} onChange={(p) => setTags(p)} />}
         {tab === 'attr' && way && (way.layer === 'building' || way.layer === 'area')
           && <AreaAttributes way={way} tags={tags} setTags={setTags} area={geometry ? areaM2(geometry) : 0} onAutofill={onAutofill} />}
