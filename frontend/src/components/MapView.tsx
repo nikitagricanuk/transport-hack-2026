@@ -7,7 +7,7 @@ import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } fr
 import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
-import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, SimVehicle, Tool, WayProps } from '../types';
 import type { BaseMap, ImageOverlay } from './Extras';
 import { LANE_MINZOOM, buildLanes, findJunctions, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
@@ -17,6 +17,7 @@ import { buildTrees, buildBusStops, buildTrafficLights, SCENERY_MINZOOM } from '
 import { defaultCamera } from '../utils/view';
 
 export interface MapHandle {
+  updateVehicles: (vehicles: SimVehicle[]) => void;
   /** collaborators' cursors and selections; called often, does not re-render React */
   updatePeers: (peers: Peer[]) => void;
   /** move the camera, e.g. to follow a collaborator */
@@ -135,9 +136,43 @@ function arrowImage(color = '#3F4652'): ImageData {
   return ctx.getImageData(0, 0, s, s);
 }
 
+function vehicleImage(): ImageData {
+  const canvas = document.createElement('canvas');
+  canvas.width = 28;
+  canvas.height = 44;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#111827';
+  for (const x of [2, 22]) for (const y of [9, 29]) ctx.fillRect(x, y, 4, 8);
+  ctx.beginPath();
+  ctx.roundRect(4, 2, 20, 40, 6);
+  ctx.fillStyle = '#0EA5E9';
+  ctx.fill();
+  ctx.strokeStyle = '#0F172A';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#0C4A6E';
+  ctx.fillRect(7, 11, 14, 6);
+  ctx.fillRect(7, 29, 14, 4);
+  ctx.fillStyle = '#F8FAFC';
+  ctx.fillRect(7, 5, 4, 3);
+  ctx.fillRect(17, 5, 4, 3);
+  ctx.fillStyle = '#FB7185';
+  ctx.fillRect(7, 36, 4, 3);
+  ctx.fillRect(17, 36, 4, 3);
+  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+}
+
+const vehicleFeatures = (vehicles: SimVehicle[]): FeatureCollection<Point> => ({
+  type: 'FeatureCollection',
+  features: vehicles.map(([id, lon, lat, angle]) => ({
+    type: 'Feature', id, geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { angle },
+  })),
+});
+
 const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const vehiclesRef = useRef<SimVehicle[]>([]);
   const [ready, setReady] = useState(false);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -241,6 +276,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   };
 
   useImperativeHandle(ref, () => ({
+    updateVehicles: (vehicles) => {
+      vehiclesRef.current = vehicles;
+      (mapRef.current?.getSource('sim-vehicles') as GeoJSONSource | undefined)?.setData(vehicleFeatures(vehicles));
+    },
     updatePeers,
     jumpTo: (center, zoom) => mapRef.current?.easeTo({ center, zoom, duration: 300 }),
     getBounds: () => {
@@ -530,6 +569,13 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': '#2563EB', 'line-width': 3, 'line-dasharray': [2, 1] } });
       map.addLayer({ id: 'draft-pts', type: 'circle', source: 'draft', filter: ['==', ['geometry-type'], 'Point'],
         paint: { 'circle-radius': 5, 'circle-color': '#2563EB', 'circle-stroke-color': '#FFFFFF', 'circle-stroke-width': 2 } });
+      map.addImage('sim-car', vehicleImage(), { pixelRatio: 2 });
+      map.addSource('sim-vehicles', { type: 'geojson', data: vehicleFeatures(vehiclesRef.current) });
+      map.addLayer({ id: 'sim-vehicles', type: 'symbol', source: 'sim-vehicles', layout: {
+        'icon-image': 'sim-car', 'icon-rotate': ['get', 'angle'], 'icon-rotation-alignment': 'map',
+        'icon-pitch-alignment': 'map', 'icon-allow-overlap': true, 'icon-ignore-placement': true,
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.42, 16, 0.7, 20, 1],
+      } });
       setReady(true);
     });
 

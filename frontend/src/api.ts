@@ -3,7 +3,7 @@ import type { AnalysisResult } from './utils/networkAnalysis';
 import type {
   ChangesResult, Comparison, DocState, FixPreview, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
   SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
-  ValidationResult,
+  SimulationRecording, ValidationResult,
 } from './types';
 
 /** One id per browser tab: the server does not echo this tab's own edits back over the socket. */
@@ -167,6 +167,10 @@ export const api = {
   redo: (docId: string) => request<OpResponse>(`/api/documents/${docId}/redo`, { method: 'POST' }),
   validate: (docId: string) => request<ValidationResult>(`/api/documents/${docId}/validate`),
   sumo: (docId: string) => request<SumoResult>(`/api/documents/${docId}/check/sumo`, { method: 'POST' }),
+  simulation: (docId: string, engine: 'sumo' | 'matsim' | 'webots', params: URLSearchParams, body: FormData,
+    signal: AbortSignal) => request<SimulationRecording>(`/api/documents/${docId}/simulation/${engine}?${params}`, {
+      method: 'POST', body: engine === 'sumo' ? undefined : body, signal,
+    }),
   organizer: (docId: string) =>
     request<OrganizerResult>(`/api/documents/${docId}/check/organizer`, { method: 'POST' }),
   restore: async (docId: string) => {
