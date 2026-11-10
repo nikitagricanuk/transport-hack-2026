@@ -77,17 +77,17 @@ def test_reviewed_sample_repairs_preview_and_log():
     assert validate_sample() == initial
     assert restriction["description"] not in client.get(f"{base}/edit-log").text
 
-    applied = client.post(f"{base}/ops", json=repair).raise_for_status().json()
-    assert applied["history"]["details"][-1]["reason"] == restriction["description"]
+    applied = client.post(f"{base}/ops", json={**repair, "reason": restriction["description"]}).raise_for_status().json()
+    assert applied["history"]["details"][0]["reason"] == restriction["description"]
     assert not any(i["title"] == restriction["title"] and i["refs"][0] == restriction["refs"][0]
                    for i in validate_sample()["issues"])
 
     speed = next(i for i in initial["issues"] if i["title"] == "Нет ограничения скорости"
                  and i["refs"][0]["id"] == 35071296)
-    client.post(f"{base}/ops", json=speed["fixes"][0]).raise_for_status()
+    client.post(f"{base}/ops", json={**speed["fixes"][0], "reason": speed["description"]}).raise_for_status()
     main.SESSIONS.pop(doc_id)
     restored = client.get(f"{base}").raise_for_status().json()
-    assert restored["history"]["details"][-1]["reason"] == speed["description"]
+    assert restored["history"]["details"][0]["reason"] == speed["description"]
     log = client.get(f"{base}/edit-log").raise_for_status().text
     assert restriction["description"] in log
     assert speed["description"] in log and "ПДД РФ, п. 10.2" in log

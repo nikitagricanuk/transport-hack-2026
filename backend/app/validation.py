@@ -147,8 +147,8 @@ class _Validator:
         if fixes is None:
             fix = kw.get("fix")
             fixes = [fix] if fix else []
-        fixes = [{**fix, "reason": kw["description"]} for fix in fixes]
-        kw["fix"] = fixes[0] if fixes else None
+        else:
+            kw["fix"] = fixes[0] if fixes else None
         kw["fixes"] = fixes
         kw.setdefault("id", f"{kw['category']}-{len(self.issues)}")
         way_ids = kw.pop("affected_ways", None)
@@ -635,7 +635,8 @@ class _Validator:
                          refs=ref, location=loc, levels=["matsim"], fixes=[fix(kmh, f"Заменить на {kmh}")])
             elif kmh is None:
                 self.add(category="data", severity="warning", title="maxspeed не распознан",
-                         description=f"{self.name(w.id)}: maxspeed={raw} — ни один симулятор его не поймёт.",
+                         description=f"{self.name(w.id)}: maxspeed={raw} — ни один симулятор его не поймёт. "
+                                     f"Значение по умолчанию для этого класса: {default_limit(hw)} км/ч ({SPEED_SOURCE}).",
                          refs=ref, location=loc, levels=["matsim", "sumo"],
                          fixes=[fix(default_limit(hw))])
             elif kmh > URBAN_KMH and base not in ("motorway", "trunk"):

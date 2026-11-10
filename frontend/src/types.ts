@@ -97,7 +97,6 @@ export interface DocState {
 export type Severity = 'critical' | 'warning' | 'info';
 
 export interface Fix {
-  reason?: string;
   label: string;
   op: string;
   args: Record<string, unknown>;

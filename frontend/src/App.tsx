@@ -558,7 +558,7 @@ export default function App() {
     setFixReview(null);
     runOps({ op: r.fix.op, args: r.fix.args }, {
       label: r.fix.label + ': ' + r.issue.title,
-      reason: r.fix.reason ?? r.issue.description,
+      reason: r.issue.description,
     });
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
