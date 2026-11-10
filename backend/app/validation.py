@@ -15,7 +15,7 @@ from .norms import (GRADE_SOURCE, LIVING_KMH, SPEED_SHORTHAND, SPEED_SOURCE, URB
                     max_grade, speed_kmh)
 
 Severity = Literal["critical", "warning", "info"]
-Category = Literal["connectivity", "direction", "junction", "lanes", "geometry", "data"]
+Category = Literal["connectivity", "direction", "junction", "lanes", "geometry", "data", "pedestrian"]
 
 GAP_M = 8.0          # dangling end closer than this to another road = broken junction
 CLOSE_JUNCTION_M = 2.0
@@ -177,6 +177,9 @@ class _Validator:
         self.check_elevation()
         self.check_signals_and_stops()
         self.check_connections()
+        from .pedestrian import check
+        for item in check(self.doc):
+            self.issues.append(Issue(**item))
 
     def check_data(self) -> None:
         for w in self.doc.ways.values():
@@ -688,6 +691,23 @@ class _Validator:
             way = next((w for w in ways if w is not None), None)
             loc = self.loc(node) if node else (self.loc(way.nodes[len(way.nodes) // 2]) if way else None)
             fixes = [via_fix] if via_fix else []
+            # Only suggest incident roads at a known junction, never invent an
+            # out-of-extract road. The user must check the turn on the imagery.
+            if node is not None and len(vias) == 1:
+                for role, members in (("from", froms), ("to", tos)):
+                    if len(members) != 1 or members[0].type != "way":
+                        continue
+                    old = self.doc.ways.get(members[0].ref)
+                    if old is not None and old.nodes and node in (old.nodes[0], old.nodes[-1]):
+                        continue
+                    other_ids = {m.ref for m in rel.members if m.role in {"from", "to"} and m.role != role}
+                    candidates = sorted((w for w in self.doc.ways_of_node(node)
+                                         if w.nodes and node in (w.nodes[0], w.nodes[-1])
+                                         and is_drivable(w.tags) and w.id not in other_ids), key=lambda w: w.id)
+                    for candidate in candidates[:3]:
+                        fixes.append({"label": f"Проверить {role} → {self.name(candidate.id)} по снимку",
+                                      "op": "set_restriction_member",
+                                      "args": {"relation_id": rel.id, "role": role, "way_id": candidate.id}})
             fixes.append({"label": "Удалить отношение", "op": "delete", "args": {"kind": "relation", "id": rel.id}})
             self.add(category="junction", severity="warning", title="Запрет поворота не применится",
                      description=f"Отношение {rel.id} ({kind}): {'; '.join(problems)}. "

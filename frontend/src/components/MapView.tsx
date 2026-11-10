@@ -3,6 +3,7 @@ import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEv
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import type { PickedPoint } from '../utils/networkAnalysis';
 import type { BaseMap, ImageOverlay } from './Extras';
 import { LANE_MINZOOM, buildLanes, laneSplit, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
@@ -39,6 +40,9 @@ export interface RouteOverlay {
 }
 
 interface Props {
+  analysis?: FeatureCollection;
+  pickPoint?: boolean;
+  onPickPoint?: (point: PickedPoint) => void;
   geo: Geo | null;
   /** map groups from bottom to top */
   drawOrder: DrawGroup[];
@@ -295,7 +299,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
+        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview', 'analysis']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -430,6 +434,29 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': ['get', 'colour'], 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 4, 18, 9], 'line-opacity': 0.75 } });
       map.addLayer({ id: 'route-stops', type: 'circle', source: 'route-stops',
         paint: { 'circle-radius': 6, 'circle-color': '#FFFFFF', 'circle-stroke-color': ['get', 'colour'], 'circle-stroke-width': 3 } });
+      map.addLayer({ id: 'analysis-fill', type: 'fill', source: 'analysis',
+        filter: ['all', ['==', ['geometry-type'], 'Polygon'], ['!=', ['get', 'before'], true]],
+        paint: { 'fill-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'fill-opacity': 0.22 } });
+      const hatch = new Uint8Array(8 * 8 * 4);
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const i = (y * 8 + x) * 4;
+        hatch[i] = 100; hatch[i + 1] = 116; hatch[i + 2] = 139;
+        hatch[i + 3] = (x + y) % 8 < 2 ? 170 : 0;
+      }
+      map.addImage('analysis-hatch', { width: 8, height: 8, data: hatch });
+      map.addLayer({ id: 'analysis-uncovered', type: 'fill', source: 'analysis',
+        filter: ['all', ['==', ['get', 'set'], 'uncovered'], ['!=', ['get', 'before'], true]],
+        paint: { 'fill-pattern': 'analysis-hatch', 'fill-opacity': 0.6 } });
+      map.addLayer({ id: 'analysis-line', type: 'line', source: 'analysis',
+        filter: ['all', ['==', ['geometry-type'], 'LineString'], ['!=', ['get', 'before'], true]],
+        paint: { 'line-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'line-width': 5 } });
+      map.addLayer({ id: 'analysis-before', type: 'line', source: 'analysis', filter: ['==', ['get', 'before'], true],
+        paint: { 'line-color': '#334155', 'line-width': 2, 'line-dasharray': [3, 2] } });
+      map.addLayer({ id: 'analysis-pts', type: 'circle', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 7, 'circle-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
+      map.addLayer({ id: 'analysis-labels', type: 'symbol', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
+        layout: { 'text-field': ['coalesce', ['get', 'label'], ''], 'text-size': 14, 'text-offset': [0, -1.2], 'text-font': ['Noto Sans Regular'] },
+        paint: { 'text-color': '#111827', 'text-halo-color': '#fff', 'text-halo-width': 2 } });
       map.addLayer({ id: 'issues', type: 'circle', source: 'issues',
         paint: {
           'circle-radius': 9,
@@ -813,6 +840,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     (map.getSource('draft') as GeoJSONSource).setData({ type: 'FeatureCollection', features: feats });
   };
 
+  useEffect(() => {
+    const source = mapRef.current?.getSource('analysis') as GeoJSONSource | undefined;
+    if (ready && source) source.setData(props.analysis ?? EMPTY);
+  }, [ready, props.analysis]);
+
   // --------------------------------------------------------- interaction
   useEffect(() => {
     const map = mapRef.current;
@@ -858,6 +890,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       const p = propsRef.current;
       const { nodeId, wayId, joinId } = pick(e);
       const { lng, lat } = e.lngLat;
+      if (p.pickPoint) { p.onPickPoint?.({ lat, lon: lng, nodeId, wayId, isBuilding: wayId !== undefined && p.wayById(wayId)?.layer === 'building' }); return; }
       switch (p.tool) {
         case 'select': {
           if (joinId !== undefined) {
@@ -960,6 +993,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     const onDbl = (e: MapMouseEvent) => {
       const p = propsRef.current;
+      if (p.pickPoint) return;
       if (p.tool === 'way') {
         e.preventDefault();
         finishDraft();
@@ -994,7 +1028,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     const onDown = (e: MapMouseEvent) => {
       const p = propsRef.current;
-      if (p.tool !== 'select' || e.originalEvent.button !== 0) return;
+      if (p.pickPoint || p.tool !== 'select' || e.originalEvent.button !== 0) return;
       const { nodeId, wayId } = pick(e);
       const shapes = [
         ...(p.geo?.ways.features ?? []).map((f) => ({ nodes: f.properties.nodes, coords: f.geometry.coordinates })),

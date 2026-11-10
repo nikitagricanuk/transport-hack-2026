@@ -79,7 +79,7 @@ def _restore_order(doc: OsmDocument, tx: Transaction, orders: dict[str, list[int
             store.update(items)
 
 
-def preview(doc: OsmDocument, op: str, args: dict) -> dict[str, Any]:
+def preview(doc: OsmDocument, op: str, args: dict, probe=None) -> dict[str, Any]:
     """Apply `op` on a throwaway history, describe the change, then undo it.
 
     Raises OpError like the real operation, so the panel can show why a fix
@@ -107,6 +107,7 @@ def preview(doc: OsmDocument, op: str, args: dict) -> dict[str, Any]:
     try:
         # geometry of what exists after the fix, read before rolling it back
         after_feats, added_m = _features(doc, tx.after, status_of, "after")
+        probe_result = probe(doc) if probe else None
     finally:
         tx.undo()
         doc._next_new_id = next_id
@@ -116,6 +117,7 @@ def preview(doc: OsmDocument, op: str, args: dict) -> dict[str, Any]:
     for st in status_of.values():
         counts[st] += 1
     return {
+        "probe": probe_result,
         "features": before_feats + after_feats,
         "counts": counts,
         "added_road_m": round(added_m, 1),

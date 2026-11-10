@@ -1313,7 +1313,22 @@ def op_set_restriction_via(doc, tx, relation_id: int, node_id: int):
     return {"id": rel.id}
 
 
+def op_set_restriction_member(doc, tx, relation_id: int, role: str, way_id: int):
+    """Replace one broken from/to member after the user reviews the junction."""
+    rel = doc.relations.get(int(relation_id))
+    way = doc.ways.get(int(way_id))
+    if rel is None or way is None or role not in {"from", "to"} or not is_drivable(way.tags):
+        raise OpError("неверное отношение, роль или проезжее ребро")
+    vias = [m.ref for m in rel.members if m.role == "via" and m.type == "node"]
+    if len(vias) != 1 or not way.nodes or vias[0] not in (way.nodes[0], way.nodes[-1]):
+        raise OpError("ребро не заканчивается в узле via")
+    tx.touch("relation", rel.id)
+    rel.members = [m for m in rel.members if m.role != role] + [Member("way", way.id, role)]
+    return {"id": rel.id}
+
+
 OPS: dict[str, tuple[Callable[..., dict], str]] = {
+    "set_restriction_member": (op_set_restriction_member, "Исправлен участник запрета поворота"),
     "set_restriction_via": (op_set_restriction_via, "Исправлен узел запрета поворота"),
     "smooth_z": (op_smooth_z, "Плавный Z-переход"),
     "attach_to_road": (op_attach_to_road, "Узел привязан к дороге"),

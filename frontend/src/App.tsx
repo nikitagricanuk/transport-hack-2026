@@ -1,3 +1,5 @@
+import type { FeatureCollection } from 'geojson';
+import type { PickedPoint, RouteQuery } from './utils/networkAnalysis';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { USER_NAME, api, downloadFile, type OpResponse } from './api';
 import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
@@ -61,6 +63,9 @@ export default function App() {
   // houses above lawns by default; the layers panel reorders the groups
   const [drawOrder, setDrawOrder] = useState<DrawGroup[]>(['zones', 'buildings', 'paths', 'roads', 'rail']);
   // two ways of working: editing the graph, or analysing flows and scenarios
+  const [analysisOverlay, setAnalysisOverlay] = useState<FeatureCollection>({ type: 'FeatureCollection', features: [] });
+  const [analysisPick, setAnalysisPick] = useState(false);
+  const [analysisPicked, setAnalysisPicked] = useState<PickedPoint | null>(null);
   const [mode, setMode] = useState<'edit' | 'analytics'>('edit');
   const [base, setBase] = useState<BaseMap>('osm');
   const [overlay, setOverlay] = useState<ImageOverlay | null>(null);
@@ -529,10 +534,11 @@ export default function App() {
   // stable callbacks so memoized panels and the map skip unrelated re-renders
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
-  const onFix = useCallback((i: Issue, fix: Fix) => {
+  const onFix = useCallback((i: Issue, fix: Fix, probe?: RouteQuery) => {
     if (!docId) return;
+    setMode('edit'); modeRef.current = 'edit'; setAnalysisPick(false);
     setFixReview({ issue: i, fix, preview: null, error: null });
-    api.fixPreview(docId, { op: fix.op, args: fix.args })
+    api.fixPreview(docId, { op: fix.op, args: fix.args, probe })
       .then((preview) => {
         // frame what is added or removed (a long road that is only split would zoom too far out),
         // with at least ~80 m around a tiny change
@@ -556,7 +562,7 @@ export default function App() {
     const r = fixReview;
     if (!r) return;
     setFixReview(null);
-    runOps({ op: r.fix.op, args: r.fix.args }, { label: r.fix.label + ': ' + r.issue.title });
+    runOps({ op: r.fix.op, args: r.fix.args }, { label: r.fix.label + ': ' + r.issue.title + ' — ' + r.issue.description });
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
   // a review belongs to the document it was computed on
@@ -826,13 +832,13 @@ export default function App() {
         )}
         <main className="center">
           <div className="map-wrap">
-            <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
+            <MapView analysis={analysisOverlay} pickPoint={analysisPick && mode === 'analytics'} onPickPoint={setAnalysisPicked} ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
               threeD={threeD} highlight={highlight} onView={onView} fixPreview={fixReview?.preview ?? null}
               baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
-            <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
+            <div className="map-hint">{analysisOverlay.features.length > 0 ? analysisOverlay.features.some(f => f.properties?.mock) ? 'ТЕСТОВЫЕ интервалы ОТ — синтетические данные; скорости и коридор — допущения' : 'Анализ: скорости и коридор — допущения; интервалы ОТ — OSM / ручной ввод / по умолчанию' : hint ?? TOOL_HINTS[tool]}</div>
             {fixReview && (
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
                 onApply={applyReviewedFix} onCancel={cancelFixReview} />
@@ -867,10 +873,10 @@ export default function App() {
           <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
             label="Ширина панели свойств" />
         )}
-        {!win.layout.visible.right ? null : mode === 'analytics' && !selection ? (
-          <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
-            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
-        ) : (
+        {doc && <AnalyticsPanel key={doc.doc_id} active={win.layout.visible.right && mode === 'analytics' && !selection} analysis={{ docId: doc.doc_id, rev: doc.rev, picked: analysisPicked, onPick: setAnalysisPick, onOverlay: setAnalysisOverlay, onFix, onShowRoad }}
+          docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
+            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />}
+        {win.layout.visible.right && (mode !== 'analytics' || selection) && (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
           onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}

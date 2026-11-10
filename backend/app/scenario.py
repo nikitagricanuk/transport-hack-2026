@@ -18,9 +18,9 @@ from typing import Any
 
 import networkx as nx
 
-from .analysis import _speed, projection
+from .analysis import projection
 from .osm_model import OsmDocument
-from .roads import direction, is_drivable, parse_int
+from .roads import direction, parse_int
 from .transit import DEFAULT_LEVELS, M2_PER_PERSON, RESIDENTIAL
 
 M2_PER_JOB = 25.0
@@ -32,22 +32,8 @@ INTRA_MIN = 3.0         # travel time inside one zone, minutes
 # ------------------------------------------------------------ road graph
 def road_graph(doc: OsmDocument, closed: set[int] | frozenset[int] = frozenset()) -> nx.DiGraph:
     """Directed road graph weighted by free-flow time in seconds."""
-    proj = projection(doc)
-    g = nx.DiGraph()
-    for w in doc.ways.values():
-        if w.id in closed or not is_drivable(w.tags) or len(w.nodes) < 2:
-            continue
-        speed = _speed(w.tags) / 3.6
-        d = direction(w.tags)
-        refs = [r for r in w.nodes if r in doc.nodes]
-        for a, b in zip(refs, refs[1:]):
-            na, nb = doc.nodes[a], doc.nodes[b]
-            t = math.dist(proj.to_xy(na.lat, na.lon), proj.to_xy(nb.lat, nb.lon)) / speed
-            if d >= 0:
-                g.add_edge(a, b, t=t, way=w.id)
-            if d <= 0:
-                g.add_edge(b, a, t=t, way=w.id)
-    return g
+    from .routing import build_graph
+    return nx.DiGraph(build_graph(doc,"car",closed=closed,use_restrictions=False).g)
 
 
 # ------------------------------------------------------------- closures
