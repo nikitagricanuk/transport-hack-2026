@@ -109,6 +109,9 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1p
 .center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .map-wrap { flex: 1; min-height: 0; position: relative; }
 .simulation-panel { position: absolute; z-index: 2; top: 12px; left: 12px; right: 12px; width: max-content; max-width: calc(100% - 24px); max-height: calc(100% - 24px); overflow: auto; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #111827; box-shadow: 0 2px 8px #0f172a24; }
+.simulation-panel { color-scheme: light; --muted: #475569; --bad: #b91c1c; }
+.simulation-panel input, .simulation-panel select { background: #fff; color: #111827; border-color: #64748b; }
+.simulation-panel input::placeholder { color: #475569; opacity: 1; }
 .simulation-panel form, .simulation-playback { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .simulation-panel label { display: grid; gap: 4px; font-size: 12px; }
 .simulation-panel input[type=number], .simulation-panel input[name=crs] { width: 105px; }
