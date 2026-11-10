@@ -23,14 +23,21 @@ export const PANEL_NAMES: Record<PanelKey, string> = {
   tools: 'Инструменты', left: 'Слои и подложка', right: 'Свойства объекта', bottom: 'Проблемы и история',
 };
 
-const clamp = (k: keyof Layout['size'], v: number) => Math.round(Math.min(LIMITS[k][1], Math.max(LIMITS[k][0], v)));
+const clamp = (k: keyof Layout['size'], v: number) => {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return DEFAULT_LAYOUT.size[k];
+  return Math.round(Math.min(LIMITS[k][1], Math.max(LIMITS[k][0], v)));
+};
 
 function load(): Layout {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null');
     if (!raw) return DEFAULT_LAYOUT;
+    const visible = { ...DEFAULT_LAYOUT.visible };
+    for (const key of Object.keys(visible) as PanelKey[]) {
+      if (typeof raw.visible?.[key] === 'boolean') visible[key] = raw.visible[key];
+    }
     return {
-      visible: { ...DEFAULT_LAYOUT.visible, ...raw.visible },
+      visible,
       size: {
         left: clamp('left', raw.size?.left ?? DEFAULT_LAYOUT.size.left),
         right: clamp('right', raw.size?.right ?? DEFAULT_LAYOUT.size.right),
@@ -71,17 +78,19 @@ export function Splitter({ panel, value, onResize, label }: {
   onResize: (v: number) => void;
   label: string;
 }) {
-  const start = useRef<{ pos: number; value: number } | null>(null);
+  const start = useRef<{ pointerId: number; pos: number; value: number } | null>(null);
   const vertical = panel === 'bottom';
   // left panel grows when dragged right; inspector and bottom panel grow when dragged left / up
   const sign = panel === 'left' ? 1 : -1;
   const onPointerDown = (e: RPointerEvent) => {
+    if (e.button !== 0 || !e.isPrimary) return;
     e.preventDefault();
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    start.current = { pos: vertical ? e.clientY : e.clientX, value };
+    (e.currentTarget as HTMLElement).focus();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    start.current = { pointerId: e.pointerId, pos: vertical ? e.clientY : e.clientX, value };
   };
   const onPointerMove = (e: RPointerEvent) => {
-    if (!start.current) return;
+    if (!start.current || start.current.pointerId !== e.pointerId) return;
     const d = (vertical ? e.clientY : e.clientX) - start.current.pos;
     onResize(start.current.value + sign * d);
   };
@@ -97,7 +106,7 @@ export function Splitter({ panel, value, onResize, label }: {
       aria-orientation={vertical ? 'horizontal' : 'vertical'} aria-label={label}
       aria-valuenow={value} aria-valuemin={LIMITS[panel][0]} aria-valuemax={LIMITS[panel][1]}
       title={`${label}: перетащите, чтобы изменить размер · двойной клик — по умолчанию`}
-      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={end} onPointerCancel={end}
+      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
       onDoubleClick={() => onResize(DEFAULT_LAYOUT.size[panel])} onKeyDown={onKeyDown} />
   );
 }
@@ -121,7 +130,13 @@ export function MenuBar({ layout, onToggle, onReset, extra }: {
     return () => { window.removeEventListener('mousedown', close); window.removeEventListener('keydown', esc); };
   }, [open]);
   return (
-    <nav className="menubar" ref={ref} aria-label="Меню">
+    <nav className="menubar" ref={ref} onKeyDown={(event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape') {
+        setOpen(null);
+        ref.current?.querySelector<HTMLButtonElement>('.menu-title')?.focus();
+      }
+    }} aria-label="Меню">
       {extra}
       <div className="menu">
         <button className="menu-title" aria-haspopup="menu" aria-expanded={open === 'window'}

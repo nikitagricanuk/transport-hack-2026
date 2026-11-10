@@ -225,3 +225,40 @@ def test_edit_log_lists_each_applied_fix_with_author_and_time():
            headers={"X-User-Name": "Reviewer"})
     log = c.get(f"/api/documents/{doc_id}/edit-log").text
     assert "Правок: 1." in log and "| 1 |" in log and "Reviewer" in log and fix["label"].split(" (")[0] in log
+
+@pytest.mark.skipif(not EXAMPLE.exists(), reason="example.osm not present")
+def test_reviewed_fix_label_and_document_survive_undo_redo():
+    c, doc_id = _open_example_via_api()
+    base = f"/api/documents/{doc_id}"
+    before = c.get(f"{base}/export", params={"renumber": False}).content
+    validation = c.get(f"{base}/validate").json()
+    issue = next(i for i in validation["issues"] if any(f["op"] == "add_way" for f in i["fixes"]))
+    fix = next(f for f in issue["fixes"] if f["op"] == "add_way")
+    label = fix["label"] + ": " + issue["title"]
+    operation = {"op": fix["op"], "args": fix["args"]}
+
+    preview = c.post(f"{base}/fix-preview", json=operation)
+    assert preview.status_code == 200
+    assert c.get(f"{base}/validate").json() == validation
+    assert c.get(base).json()["history"]["can_undo"] is False
+
+    applied = c.post(f"{base}/ops", json={**operation, "label": label})
+    assert applied.status_code == 200
+    assert applied.json()["history"]["undo_label"] == label
+    assert label in c.get(f"{base}/edit-log").text
+    after = c.get(f"{base}/export", params={"renumber": False}).content
+    assert after != before
+    after_validation = c.get(f"{base}/validate").json()
+
+    undone = c.post(f"{base}/undo")
+    assert undone.status_code == 200
+    assert undone.json()["history"]["redo_label"] == label
+    assert c.get(f"{base}/export", params={"renumber": False}).content == before
+    assert c.get(f"{base}/validate").json() == validation
+
+    redone = c.post(f"{base}/redo")
+    assert redone.status_code == 200
+    assert redone.json()["history"]["undo_label"] == label
+    assert c.get(f"{base}/export", params={"renumber": False}).content == after
+    assert c.get(f"{base}/validate").json() == after_validation
+    assert label in c.get(f"{base}/edit-log").text
