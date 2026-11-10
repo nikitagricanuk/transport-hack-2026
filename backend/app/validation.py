@@ -500,14 +500,48 @@ class _Validator:
                 continue
             used |= {a, b}
             wa = self.doc.ways[self.road_node_ways[a][0]]
-            fix = {"label": f"Граничный разворот ({d:.0f} м)", "op": "add_way",
+            fix = {"label": f"Граничный разворот — фиктивное ребро ({d:.0f} м)", "op": "add_way",
                    "args": {"points": [{"id": a}, {"id": b}],
                             "tags": {"highway": wa.tags.get("highway", "road"), "oneway": "yes", "lanes": "1",
                                      "uds:fringe": "yes",
-                                     "note": "Граничный разворот: связывает проезжие части у края выгрузки для симуляции"}}}
+                                     "note": "Фиктивное ребро (граница выгрузки): связывает проезжие части "
+                                             "у края выгрузки, чтобы MatSim мог развернуть машины"}}}
             out[a] = fix
             out[b] = fix
         return out
+
+    def _lane_fix(self, wid: int, fw: int, bw: int, label: str) -> dict[str, Any]:
+        tags = {"lanes": str(fw), "lanes:forward": None, "lanes:backward": None} if bw == 0 else \
+            {"lanes": str(fw + bw), "lanes:forward": str(fw), "lanes:backward": str(bw)}
+        return {"label": label, "op": "set_tags", "args": {"kind": "way", "id": wid, "tags": tags}}
+
+    def check_lane_completeness(self, w, t: dict[str, str], lanes: int | None, fw: int | None, bw: int | None,
+                                loc: list[float] | None, ref: list[dict[str, Any]]) -> None:
+        """Lane counts the adapters would otherwise guess differently.
+
+        Without lanes MatSim assumes 1 lane per direction and SUMO 2 on a primary road;
+        an odd total on a two-way road is halved by MatSim (lanes=3 → 1.5 each way).
+        """
+        base = t.get("highway", "").removesuffix("_link")
+        two_way = direction(t) == 0
+        if lanes is None and "lanes" not in t and base in ("motorway", "trunk", "primary", "secondary"):
+            fixes = ([self._lane_fix(w.id, 1, 1, "lanes=2 (по 1 в каждую сторону)"),
+                      self._lane_fix(w.id, 2, 2, "lanes=4 (по 2 в каждую сторону)")] if two_way else
+                     [self._lane_fix(w.id, 1, 0, "lanes=1"), self._lane_fix(w.id, 2, 0, "lanes=2")])
+            self.add(category="lanes", severity="warning", title="Не указано число полос",
+                     description=f"{self.name(w.id)} ({t.get('highway')}) без lanes: MatSim поставит 1 полосу "
+                                 "в каждую сторону, SUMO — по таблице класса (у primary 2). "
+                                 "Сверьте число полос со снимком и выберите вариант.",
+                     refs=ref, location=loc, levels=["matsim", "sumo"], fixes=fixes)
+        elif two_way and lanes is not None and lanes >= 3 and lanes % 2 and fw is None and bw is None:
+            big, small = (lanes + 1) // 2, lanes // 2
+            self.add(category="lanes", severity="warning", title="Нечётное число полос без разбивки",
+                     description=f"{self.name(w.id)}: lanes={lanes} на двусторонней дороге без lanes:forward/"
+                                 f"backward. MatSim поделит поровну ({lanes / 2:g} в каждую сторону), SUMO — "
+                                 "по-своему. Укажите по снимку, в какую сторону полос больше.",
+                     refs=ref, location=loc, levels=["matsim", "sumo"],
+                     fixes=[self._lane_fix(w.id, big, small, f"{big} по ходу линии, {small} против"),
+                            self._lane_fix(w.id, small, big, f"{small} по ходу линии, {big} против")])
 
     def check_lanes(self) -> None:
         for w in self.road_ways:
@@ -516,6 +550,7 @@ class _Validator:
             fw, bw = parse_int(t.get("lanes:forward")), parse_int(t.get("lanes:backward"))
             loc = self.loc(w.nodes[len(w.nodes) // 2])
             ref = [{"kind": "way", "id": w.id}]
+            self.check_lane_completeness(w, t, lanes, fw, bw, loc, ref)
             if "lanes" in t and lanes is None:
                 self.add(category="lanes", severity="warning", title="lanes не число",
                          description=f"lanes={t['lanes']} на {self.name(w.id)}.", refs=ref, location=loc,

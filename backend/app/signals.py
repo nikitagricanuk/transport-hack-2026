@@ -24,7 +24,9 @@ from .roads import is_drivable
 
 DEFAULT_CYCLE = 90
 LOST_TIME_S = 10      # start-up and clearance lost per cycle (two phases)
-YELLOW_S = 3
+YELLOW_S = 3          # ГОСТ Р 52289-2019: жёлтый сигнал 3 с
+ALL_RED_S = (LOST_TIME_S - 2 * YELLOW_S) // 2   # all-red clearance after each yellow: 2 s
+# so per phase green + 3 s yellow + 2 s all-red, and the two phases add up to the cycle exactly
 MIN_SHARE, MAX_SHARE = 0.2, 0.8
 CLASS_RANK = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential",
               "living_street", "service", "road"]
@@ -111,9 +113,12 @@ def plan(doc: OsmDocument, node_id: int, cfg: dict[str, Any] | None, rows: dict[
         best_cycle = int(max(40, min(150, round((1.5 * LOST_TIME_S + 5) / (1 - total)))))
     best_share = round(max(MIN_SHARE, min(MAX_SHARE, y_main / total if total > 0 else 0.5)), 2)
     green = cycle - LOST_TIME_S
+    g_main = round(green * share)
     phases = [
-        {"name": "Главное направление", "group": "main", "green_s": round(green * share), "yellow_s": YELLOW_S},
-        {"name": "Пересекающее направление", "group": "cross", "green_s": round(green * (1 - share)), "yellow_s": YELLOW_S},
+        {"name": "Главное направление", "group": "main", "green_s": g_main, "yellow_s": YELLOW_S,
+         "all_red_s": ALL_RED_S},
+        {"name": "Пересекающее направление", "group": "cross", "green_s": green - g_main, "yellow_s": YELLOW_S,
+         "all_red_s": ALL_RED_S},
     ]
     return {
         "node_id": node_id,
@@ -155,12 +160,14 @@ def timing_tags(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> dict[i
         cycle = int(cfg.get("cycle", DEFAULT_CYCLE))
         share = float(cfg.get("main_share", 0.5))
         green = cycle - LOST_TIME_S
+        g_main = round(green * share)
         out[node_id] = {**out.get(node_id, {}),
             TAG_PREFIX + "cycle": str(cycle),
             TAG_PREFIX + "main_share": f"{share:.2f}",
-            TAG_PREFIX + "green_main": str(round(green * share)),
-            TAG_PREFIX + "green_cross": str(round(green * (1 - share))),
+            TAG_PREFIX + "green_main": str(g_main),
+            TAG_PREFIX + "green_cross": str(green - g_main),
             TAG_PREFIX + "yellow": str(YELLOW_S),
+            TAG_PREFIX + "all_red": str(ALL_RED_S),
         }
     return out
 
