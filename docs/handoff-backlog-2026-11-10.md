@@ -90,3 +90,20 @@ Draft PR: https://github.com/nikitagricanuk/transport-hack-2026/pull/23
 Fresh checks on implementation commit `86d456b`: **154 backend tests passed; 28 utility + 11 DOM frontend tests passed; Ruff, TypeScript and production build passed**.
 
 At PR creation, `main` had advanced to `528bba4` through PR #22 (`feat/handoff-analysis`), which independently adds overlapping analysis work. A read-only `git merge-tree` check confirmed content/add-add conflicts, including routing, AnalysisTools, API/main, validation and related UI/tests. This draft intentionally preserves the implemented branch for review; it has **not** reconciled the newer main, merged, or deployed. Next integration work must compare the two implementations and retain the accepted changes from main rather than overwriting them.
+
+## Reconciliation update — continuation
+
+The working branch now incorporates `main` at `528bba4`. The accepted `routing.py`, typed analysis requests, `network_analysis.py`, `pt_analysis.py`, `AnalysisTools` / `PtTools`, and analysis picking/overlay contracts are canonical. The duplicate `pt_routing.py` and frontend `utils/analysis.ts` implementations were removed. Editor, signal, closure alternatives, section/load caching, table sizing, and Help/Reports changes are retained. This merges main **into the PR branch**, not the PR into production.
+
+Additional work completed during integration:
+
+- Closure alternatives now use the canonical restriction structure; the diagnosed reverse-way fix uses the correct operation argument.
+- Loaded-speed isochrones include the weather/composition settings and selected closure scenario.
+- Segment editing reuses the single-way attribute controls (including lanes, speed, classification and bridge), shows length and a dedicated map highlight, previews all changes atomically, then selects the resulting middle segment after Apply.
+- Group common-tag lookup supports areas/buildings, and road templates only target road objects.
+- Map size tracks its container with ResizeObserver, including panel size/visibility changes.
+- Shared frontend source imports support the existing native Node test runner via TypeScript's no-emit `allowImportingTsExtensions` option.
+
+Verification after reconciliation: **156 backend tests; 33 utility + 11 DOM tests; Ruff, TypeScript and production build pass**. The user explicitly requested no further browser checks; subsequent verification is unit tests, lint and build only. Do not treat the attempted group/segment browser workflow as completed acceptance.
+
+Remaining implementation work is concentrated in routing diagnosis refinements, robust handling of rejected/overlapping optimistic load requests, final source/assumption documentation, and refreshing the PR description/CI. The earlier statements that reconciliation and the full segment inspector were missing are superseded by this update.

@@ -1,9 +1,9 @@
 import EditorMenus from './components/EditorMenus';
-import { PanelToggle, PanelClose } from './components/PanelClose';
+import { PanelToggle } from './components/PanelClose';
 import SelectionEditor, { type Segment } from './components/SelectionEditor';
 import { toggleSelection } from './utils/selection';
 import type { FeatureCollection } from 'geojson';
-import AnalysisTools from './components/AnalysisTools';
+import type { PickedPoint, RouteQuery } from './utils/networkAnalysis';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { USER_NAME, api, downloadFile, type OpResponse } from './api';
 import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
@@ -38,7 +38,8 @@ const NO_ISSUES: Issue[] = [];
 export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
   const [analysisOverlay, setAnalysisOverlay] = useState<FeatureCollection>({type:'FeatureCollection',features:[]});
-  const [pointPicker, setPointPicker] = useState<((p: {lat:number;lon:number;node_id?:number}) => void) | null>(null);
+  const [analysisPick,setAnalysisPick] = useState(false);
+  const [analysisPicked,setAnalysisPicked] = useState<PickedPoint|null>(null);
   const [multi, setMulti] = useState<NonNullable<Selection>[]>([]);
   const [segment, setSegment] = useState<Segment | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
@@ -544,7 +545,7 @@ export default function App() {
       if (opts?.select === 'result') {
         const id = res.result?.id ?? res.results?.[res.results.length - 1]?.id;
         const op = list[list.length - 1].op;
-        if (id !== undefined) setSelection({ kind: op === 'add_way' ? 'way' : 'node', id });
+        if (id !== undefined) setSelection({ kind: op === 'add_way' || op === 'edit_segment' ? 'way' : 'node', id });
         else if (list[0].op === 'set_tags' && list[0].args.kind === 'node') setSelection({ kind: 'node', id: Number(list[0].args.id) });
       }
       return true;
@@ -559,8 +560,9 @@ export default function App() {
   // stable callbacks so memoized panels and the map skip unrelated re-renders
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
-  const onFix = useCallback((i: Issue, fix: Fix, probe?: Record<string, unknown>) => {
+  const onFix = useCallback((i: Issue, fix: Fix, probe?: RouteQuery) => {
     if (!docId) return;
+    setMode('edit');modeRef.current='edit';setAnalysisPick(false);
     setFixReview({ issue: i, fix, preview: null, error: null });
     api.fixPreview(docId, { op: fix.op, args: fix.args, probe })
       .then((preview) => {
@@ -590,7 +592,8 @@ export default function App() {
     runOps({ op: r.fix.op, args: r.fix.args }, {
       label: r.fix.label + ': ' + r.issue.title,
       reason: r.issue.description,
-    });
+      select:r.fix.op==='edit_segment'?'result':'keep',
+    }).then(ok=>{if(ok && r.fix.op==='edit_segment'){setSegment(null);setMulti([]);}});
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
   // a review belongs to the document it was computed on
@@ -654,7 +657,7 @@ export default function App() {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
       if (e.key === 'Escape' && fixReview) { setFixReview(null); return; }
-      if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); setMulti([]); setSegment(null); setPointPicker(null); return; }
+      if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); setMulti([]); setSegment(null); setAnalysisPick(false); return; }
       // Delete/Backspace remove the selection, unless a way draft owns the key
       // (then it only drops the latest draft point). That listener is capture
       // on this same window, and stopPropagation() does not suppress another
@@ -863,14 +866,14 @@ export default function App() {
           <div className="map-wrap">
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
-              analysis={analysisOverlay} pickPoint={pointPicker ? (p) => { pointPicker(p); setPointPicker(null); } : null}
-              multiSelection={multi} onToggleSelection={(s) => setMulti((m) => toggleSelection(m.length ? m : selection ? [selection] : [], s))}
+              analysis={analysisOverlay} pickPoint={analysisPick && mode === 'analytics'} onPickPoint={setAnalysisPicked}
+              segment={segment} multiSelection={multi} onToggleSelection={(s) => setMulti((m) => toggleSelection(m.length ? m : selection ? [selection] : [], s))}
               onBoxSelection={setMulti} onSegment={setSegment}
               threeD={threeD} highlight={mapHighlight} onView={onView} fixPreview={fixReview?.preview ?? null}
               baseOpacity={baseOpacity} issues={mapIssues} onSelect={(s) => { setSelection(s); setMulti([]); setSegment(null); }} loadVc={loadVc}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
-            {analysisOverlay.features.some(f=>f.properties?.kind==='pt') && <div className="analysis-legend">Интервалы без OSM interval — условные (mock); скорость ОТ и ожидание — допущения</div>}
+            {analysisOverlay.features.some(f=>f.properties?.mock) && <div className="analysis-legend">Интервалы без OSM interval — условные (mock); скорость ОТ и ожидание — допущения</div>}
             <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
             {fixReview && (
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
@@ -906,28 +909,22 @@ export default function App() {
           <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
             label="Ширина панели свойств" />
         )}
-        {!win.layout.visible.right ? null : mode === 'analytics' ? (
-          <aside className="inspector analytics" style={{overflow:'auto'}}>
-          <PanelClose panel="right" />
-          <AnalysisTools docId={doc.doc_id} rev={doc.rev} geo={doc.geo} selection={selection}
-            pickPoint={(cb) => setPointPicker(() => cb)} onPick={() => setHint('Выберите точку на карте')}
-            onOverlay={setAnalysisOverlay} onFix={onFix} onShowRoad={onShowRoad} />
-          <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
-            onFix={onFix} onScenarioChanged={refreshLoad} onDetour={async (id,index) => {
+        <AnalyticsPanel key={doc.doc_id} active={win.layout.visible.right && mode === 'analytics' && !selection}
+          analysis={{docId:doc.doc_id,rev:doc.rev,picked:analysisPicked,onPick:setAnalysisPick,onOverlay:setAnalysisOverlay,onFix,onShowRoad}}
+          docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
+          onFix={onFix} onScenarioChanged={refreshLoad} onDetour={async (id,index) => {
               try {const next=await api.setClosure(doc.doc_id,id,true,index);setLoad(next);const options=next.closures?.find(c=>c.id===id)?.alternatives ?? [];setAnalysisOverlay({type:'FeatureCollection',features:options.flatMap((a,i)=>a.lines.map(coordinates=>({type:'Feature' as const,geometry:{type:'LineString' as const,coordinates},properties:{before:i!==index}})))});} catch(e){setError((e as Error).message);}
-            }} onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
-          </aside>
-        ) : multi.length > 1 || segment ? (
-          <SelectionEditor multi={multi} segment={segment} geo={doc.geo} onOp={onInspectorOp} onFix={onFix} onClear={() => {setMulti([]);setSegment(null);}} />
-        ) : (
+            }} onReopen={(id) => onClosure(id,false)} onOpenTasks={() => setTasksOpen(true)} />
+        {win.layout.visible.right && (mode !== 'analytics' || selection) && (mode === 'edit' && (multi.length > 1 || segment) ?
+          <SelectionEditor multi={multi} segment={segment} geo={doc.geo} onOp={onInspectorOp} onFix={onFix} onClear={() => {setMulti([]);setSegment(null);}} /> : (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
           onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}
           onOpenRoute={setOpenRoute} onScenarioChanged={refreshLoad}
           closed={selection?.kind === 'way' && (load?.closures ?? []).some((c) => c.id === selection.id)}
           onClosure={onClosure} onObjectReport={objectReport} onAutofill={autofillBuildings}
-          readOnly={false} />
-        )}
+          readOnly={mode === 'analytics'} />
+        ))}
       </div>
       {tasksOpen && <TasksModal docId={doc.doc_id} selection={selection} onClose={() => setTasksOpen(false)} />}
 

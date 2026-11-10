@@ -146,10 +146,10 @@ def preview(doc: OsmDocument, op: str, args: dict, probe=None) -> dict[str, Any]
     for st in status_of.values():
         counts[st] += 1
     return {
+        "probe": probe_result,
         "features": before_feats + after_feats,
         "counts": counts,
         "added_road_m": round(added_m, 1),
         "removed_road_m": round(removed_m, 1),
         "empty": tx.is_empty,
-        "probe": probe_result,
     }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { NODE_PRESETS, presetPatch, isPreset } from './nodePresets.ts';
 import { toggleSelection, boxSelection } from './selection.ts';
-import { analysisOverlay, cycleStop, formatTime } from './analysis.ts';
+import { analysisOverlay, cycleStop, formatRoute } from './networkAnalysis.ts';
 import { layerVisibilityOps, allLayersOn } from './layers.ts';
 import { taperPolygon, LANE_W } from './lanes.ts';
 
@@ -31,7 +31,7 @@ test('visibility operations do not contain data', () => {
 });
 test('analysis overlay and units', () => {
   assert.deepEqual(analysisOverlay(null).features, []);
-  assert.equal(formatTime(90), '1.5 мин');
+  assert.equal(formatRoute({time_s:90,length_m:100}), '100 м · 1.5 мин');
 });
 test('lane taper widths match lane counts', () => {
   const p = taperPolygon(
@@ -44,4 +44,19 @@ test('lane taper widths match lane counts', () => {
   );
   assert.ok(Math.abs(Math.abs((p[3][1] - p[0][1]) * 110540) - 3 * LANE_W) < 0.01);
   assert.ok(Math.abs(Math.abs((p[2][1] - p[1][1]) * 110540) - 2 * LANE_W) < 0.01);
+});
+
+test('changing one load colour does not repaint unchanged roads', async()=>{
+  const {loadColorChanges}=await import('./loadColors.ts');
+  assert.deepEqual(loadColorChanges(new Map([[1,.4],[2,.5]]),new Map([[1,.4],[2,.8]])),{remove:[],set:[{id:2,vc:.8}]});
+});
+
+test('segment clipping projects endpoints, includes bends, and ignores click order',async()=>{
+  const {segmentGeometry}=await import('./segments.ts');
+  const coords=[[104,52],[104.001,52],[104.001,52.001]];
+  const a={lat:52,lon:104.0005},b={lat:52.0005,lon:104.001};
+  const g=segmentGeometry(coords,a,b);
+  assert.equal(g.coordinates.length,3);
+  assert.ok(g.length_m>85 && g.length_m<100);
+  assert.deepEqual(segmentGeometry(coords,b,a),g);
 });

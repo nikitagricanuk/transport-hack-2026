@@ -1,4 +1,5 @@
-import type { AnalysisResult } from './utils/analysis';
+import type { PtResult, PtRoute } from './components/PtTools';
+import type { AnalysisResult } from './utils/networkAnalysis';
 import type {
   ChangesResult, Comparison, DocState, FixPreview, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
   SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
@@ -102,7 +103,11 @@ export interface AdapterComparison {
 }
 
 export const api = {
-  analysis: (id: string, kind: string, body: object) => request<AnalysisResult>(`/api/documents/${id}/analysis/${kind}`, json(body)),
+  ptParams: (docId: string) => request<{routes: PtRoute[]}>(`/api/documents/${docId}/analysis/pt-params`),
+  analysisPt: (docId: string, body: unknown) => request<PtResult>(`/api/documents/${docId}/analysis/pt-isochrone`, json(body)),
+  analysisRoute: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/route`, json(body)),
+  analysisCatchment: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/catchment`, json(body)),
+  analysisIsochrone: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/isochrone`, json(body)),
   adapters: (docId: string, wayId: number, signal: AbortSignal) =>
     request<{ adapters: AdapterComparison }>(`/api/documents/${docId}/elements/way/${wayId}`, { signal })
       .then(({ adapters }) => adapters),
@@ -116,7 +121,7 @@ export const api = {
   },
   op: (docId: string, op: Op, label?: string, reason?: string) =>
     request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label, reason })),
-  fixPreview: (docId: string, op: Op & { probe?: Record<string, unknown> }) =>
+  fixPreview: (docId: string, op: Op & { probe?: unknown }) =>
     request<FixPreview>(`/api/documents/${docId}/fix-preview`, json(op)),
   batch: (docId: string, ops: Op[], label?: string, reason?: string) =>
     request<OpResponse>(`/api/documents/${docId}/batch`, json({ ops, label, reason })),

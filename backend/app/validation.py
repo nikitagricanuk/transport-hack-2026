@@ -180,53 +180,8 @@ class _Validator:
         self.check_pedestrian()
 
     def check_pedestrian(self) -> None:
-        from .routing import build_graph, snap
-        from shapely.geometry import LineString
-        walk = build_graph(self.doc, 'walk')
-        from shapely.strtree import STRtree
-        sidewalks = []
-        for w in self.doc.ways.values():
-            if w.tags.get('footway') == 'sidewalk':
-                for a, b in zip(w.nodes, w.nodes[1:]):
-                    if a in self.doc.nodes and b in self.doc.nodes:
-                        pa = self.proj.to_xy(self.doc.nodes[a].lat, self.doc.nodes[a].lon)
-                        pb = self.proj.to_xy(self.doc.nodes[b].lat, self.doc.nodes[b].lon)
-                        sidewalks.append(LineString([pa, pb]).buffer(20))
-        sidewalk_tree = STRtree(sidewalks)
-        for w in self.road_ways:
-            t = w.tags
-            if t.get('foot') in {'no', 'yes', 'designated', 'permissive', 'use_sidepath'}:
-                continue
-            title, patches = None, []
-            if t.get('sidewalk') == 'no' or t.get('sidewalk:both') == 'no':
-                title = 'Проезжая часть без тротуара в пешеходном графе'
-                patches = [('Исключить из пешеходного графа', {'foot':'no'}), ('Пешеходы ходят по проезжей части', {'foot':'yes'})]
-            elif t.get('highway', '').endswith('_link') or t.get('highway') in {'motorway', 'trunk'} or t.get('tunnel') not in {None, 'no'}:
-                title = 'Съезд/тоннель может создавать ложный пешеходный путь'
-                patches = [('Исключить из пешеходного графа', {'foot':'no'}), ('Оставить пешеходам', {'foot':'yes'})]
-            elif t.get('highway') in {'primary','secondary','tertiary'} and not any(k.startswith('sidewalk') for k in t):
-                from shapely.ops import unary_union
-                coords = [self.proj.to_xy(self.doc.nodes[n].lat, self.doc.nodes[n].lon) for n in w.nodes if n in self.doc.nodes]
-                if len(coords) < 2:
-                    continue
-                line = LineString(coords)
-                nearby = [sidewalks[int(i)] for i in sidewalk_tree.query(line)]
-                if nearby and line.length and line.intersection(unary_union(nearby)).length / line.length >= .6:
-                    title = 'Тротуар нарисован отдельно — проезжая часть не для пешеходов'
-                    patches = [('Тротуар отдельно', {'sidewalk':'separate'}), ('Оставить пешеходам', {'foot':'yes'})]
-            if title:
-                self.add(category='pedestrian', severity='info', title=title,
-                         description='Эвристика: проверьте тротуары и знаки по снимку. Каждое решение применяется отдельно.',
-                         refs=[{'kind':'way','id':w.id}], levels=[],
-                         fixes=[{'label':label,'op':'set_tags','args':{'kind':'way','id':w.id,'tags':patch}} for label,patch in patches])
-        for n in self.doc.nodes.values():
-            if not (n.tags.get('highway') == 'bus_stop' or n.tags.get('public_transport') == 'platform' or n.tags.get('railway') == 'tram_stop'):
-                continue
-            if snap(walk, n.lat, n.lon, 60) is not None:
-                continue
-            self.add(category='pedestrian', severity='info', title='Остановка не связана с пешеходной сетью',
-                     description='Нет пешеходного ребра в радиусе 60 м. Проверьте подходы по снимку.',
-                     refs=[{'kind':'node','id':n.id}], location=[n.lon,n.lat], levels=[])
+        from .pedestrian import check
+        self.issues.extend(Issue(**item) for item in check(self.doc))
 
     def check_data(self) -> None:
         for w in self.doc.ways.values():

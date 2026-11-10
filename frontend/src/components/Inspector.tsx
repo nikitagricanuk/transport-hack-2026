@@ -243,7 +243,7 @@ function nodeTitle(tags: Tags) {
   return 'Узел';
 }
 
-function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
+export function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
   way: WayProps; tags: Tags; sharedJunctions?: number;
   setTags: (p: Record<string, string | null>, label?: string) => void;
   onOp: (op: Op | Op[], label?: string) => void;

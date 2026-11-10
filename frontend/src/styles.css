@@ -402,3 +402,11 @@ input[type="checkbox"]:disabled { cursor: default; }
 .column-resize { position:absolute;right:0;top:0;width:7px;height:100%;cursor:col-resize;touch-action:none; }
 .expanded-issues .ellipsis,.expanded-issues .issue-text,.expanded-issues .issue-desc,.expanded-issues .issue-title { white-space:normal;overflow:visible;text-overflow:clip; }
 .analysis-legend { position:absolute;left:12px;bottom:30px;background:var(--panel);padding:8px;border-radius:6px;max-width:70%;font-size:12px;pointer-events:none; }
+
+
+.analysis-tools [role="tablist"] { flex-wrap: wrap; }
+.analysis-tools input[type="number"] { max-width: 90px; }
+.analysis-tools table { width: 100%; border-collapse: collapse; }
+.analysis-tools td, .analysis-tools th { padding: 5px 3px; text-align: left; }
+.analysis-tools td { border-top: 1px solid #334155; }
+.analysis-tools > .row { flex-wrap: wrap; }

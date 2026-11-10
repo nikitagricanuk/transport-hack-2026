@@ -1,3 +1,5 @@
+import { segmentGeometry } from '../utils/segments';
+import type { PickedPoint } from '../utils/networkAnalysis';
 import { loadColorChanges } from '../utils/loadColors';
 import type { FilterSpecification } from 'maplibre-gl';
 import type { Segment } from './SelectionEditor';
@@ -67,12 +69,14 @@ interface Props {
   loadVc: Map<number, number> | null;
   /** edits vs the loaded file, drawn as "before" (dashed) and "after" overlays while set */
   changes: ChangesResult | null;
+  segment?: Segment | null;
   multiSelection?: NonNullable<Selection>[];
   onToggleSelection?: (s: NonNullable<Selection>) => void;
   onBoxSelection?: (items: NonNullable<Selection>[]) => void;
   onSegment?: (s: Segment) => void;
   analysis?: FeatureCollection;
-  pickPoint?: ((p: {lat:number;lon:number;node_id?:number}) => void) | null;
+  pickPoint?: boolean;
+  onPickPoint?: (point:PickedPoint)=>void;
   onSelect: (s: Selection) => void;
   /** resolves false when the backend rejected the edit */
   onOp: (op: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }) => void | Promise<boolean>;
@@ -289,6 +293,9 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     map.addControl(new ResetViewControl(() => resetView()), 'bottom-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
     mapRef.current = map;
+    let resizeFrame=0;
+    const observer=new ResizeObserver(()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>map.resize());});
+    observer.observe(container.current!);
     if (import.meta.env.DEV || localStorage.getItem('uds-debug')) (window as unknown as { __udsMap?: maplibregl.Map }).__udsMap = map;
     const onFullscreenEscape = (e: KeyboardEvent) => {
       if (!mapIsFullscreen(map)) return;
@@ -305,7 +312,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'analysis', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
+        'analysis', 'segment-selection', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -395,10 +402,30 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addLayer({ id: 'stop-label', type: 'symbol', source: 'nodes', minzoom: 16, filter: ['==', ['get', 'category'], 'stop'],
         layout: { 'text-field': ['coalesce', ['get', 'name', ['get', 'tags']], ['get', 'ref', ['get', 'tags']], 'Остановка'],
           'text-size': 11, 'text-offset': [0, 1.3] }, paint: { 'text-color': '#2563EB', 'text-halo-color': '#fff', 'text-halo-width': 1 } });
-      map.addLayer({ id: 'analysis-fill', type: 'fill', source: 'analysis', filter: ['==', ['geometry-type'], 'Polygon'], paint: {
-        'fill-color': ['match', ['get','set'], 'A','#2563EB','B','#f97316','AB','#9333ea','uncovered','#64748b','uncovered-building','#ef4444', ['coalesce',['get','color'],'#2563eb']], 'fill-opacity': .18 } });
-      map.addLayer({id:'analysis-points',type:'circle',source:'analysis',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':4,'circle-color':['coalesce',['get','color'],'#2563eb'],'circle-stroke-width':1,'circle-stroke-color':'#fff'}});
-      map.addLayer({ id: 'analysis-line', type: 'line', source: 'analysis', paint: { 'line-color': '#2563eb', 'line-width': 4, 'line-opacity': ['case',['boolean',['get','before'],false],.4,1] } });
+      map.addLayer({ id: 'analysis-fill', type: 'fill', source: 'analysis',
+        filter: ['all', ['==', ['geometry-type'], 'Polygon'], ['!=', ['get', 'before'], true]],
+        paint: { 'fill-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'fill-opacity': 0.22 } });
+      const hatch = new Uint8Array(8 * 8 * 4);
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const i = (y * 8 + x) * 4;
+        hatch[i] = 100; hatch[i + 1] = 116; hatch[i + 2] = 139;
+        hatch[i + 3] = (x + y) % 8 < 2 ? 170 : 0;
+      }
+      map.addImage('analysis-hatch', { width: 8, height: 8, data: hatch });
+      map.addLayer({ id: 'analysis-uncovered', type: 'fill', source: 'analysis',
+        filter: ['all', ['==', ['get', 'set'], 'uncovered'], ['!=', ['get', 'before'], true]],
+        paint: { 'fill-pattern': 'analysis-hatch', 'fill-opacity': 0.6 } });
+      map.addLayer({ id: 'analysis-line', type: 'line', source: 'analysis',
+        filter: ['all', ['==', ['geometry-type'], 'LineString'], ['!=', ['get', 'before'], true]],
+        paint: { 'line-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'line-width': 5 } });
+      map.addLayer({ id: 'analysis-before', type: 'line', source: 'analysis', filter: ['==', ['get', 'before'], true],
+        paint: { 'line-color': '#334155', 'line-width': 2, 'line-dasharray': [3, 2] } });
+      map.addLayer({ id: 'analysis-pts', type: 'circle', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 7, 'circle-color': ['coalesce', ['get', 'colour'], '#2563eb'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
+      map.addLayer({ id: 'analysis-labels', type: 'symbol', source: 'analysis', filter: ['==', ['geometry-type'], 'Point'],
+        layout: { 'text-field': ['coalesce', ['get', 'label'], ''], 'text-size': 14, 'text-offset': [0, -1.2], 'text-font': ['Noto Sans Regular'] },
+        paint: { 'text-color': '#111827', 'text-halo-color': '#fff', 'text-halo-width': 2 } });
+      map.addLayer({id:'segment-selection',type:'line',source:'segment-selection',paint:{'line-width':10,'line-color':'#2563eb','line-opacity':.65}});
       map.addLayer({ id: 'node-selected', type: 'circle', source: 'nodes', filter: ['==', ['get', 'id'], 0],
         paint: { 'circle-radius': 8, 'circle-color': 'rgba(37,99,235,0.25)', 'circle-stroke-color': '#2563EB', 'circle-stroke-width': 2.5 } });
 
@@ -476,6 +503,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     });
 
     return () => {
+      observer.disconnect();cancelAnimationFrame(resizeFrame);
       window.removeEventListener('keydown', onFullscreenEscape, true);
       document.documentElement.classList.remove(FULLSCREEN_ROOT);
       map.getContainer().parentElement?.classList.remove(FULLSCREEN_CLASS);
@@ -852,6 +880,13 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     }
   },[ready,props.layers.roadsSub,props.geo]);
 
+  useEffect(()=>{
+    const map=mapRef.current;if(!ready||!map)return;
+    const segment=props.segment,way=props.geo?.ways.features.find(f=>f.properties.id===segment?.way_id);
+    const clipped=segment&&way?segmentGeometry(way.geometry.coordinates,segment.start,segment.end):null;
+    (map.getSource('segment-selection') as GeoJSONSource).setData(clipped?{type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:clipped.coordinates}}]}:EMPTY);
+  },[ready,props.segment,props.geo]);
+
   // --------------------------------------------------------- interaction
   useEffect(() => {
     const map = mapRef.current;
@@ -901,10 +936,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     const onClick = (e: MapMouseEvent) => {
       if (drag.current?.moved) return;
       const p = propsRef.current;
-      if (propsRef.current.pickPoint) { const stop=map.queryRenderedFeatures(e.point,{layers:['stop-symbol']})[0];propsRef.current.pickPoint({lat:e.lngLat.lat,lon:e.lngLat.lng,...(stop?{node_id:Number(stop.properties.id)}:{})});return; }
-      const analysisPoint=map.queryRenderedFeatures(e.point,{layers:['analysis-points']}).find(f=>f.properties.kind==='pt-explain');
-      if(analysisPoint){const d=analysisPoint.properties;p.onHint(`Пешком ${Math.round(d.walk_s)} с + ожидание ${Math.round(d.wait_s)} с + поездка ${Math.round(d.ride_s)} с`);return;}
       const { nodeId, wayId, joinId, partPick } = pick(e);
+      if(p.pickPoint){p.onPickPoint?.({lat:e.lngLat.lat,lon:e.lngLat.lng,nodeId,wayId,isBuilding:wayId!==undefined && p.wayById(wayId)?.layer==='building'});return;}
       if (p.tool === 'select' && e.originalEvent.altKey && wayId !== undefined) {
         const point = {lat:e.lngLat.lat,lon:e.lngLat.lng};
         if (segmentStart?.way_id === wayId) { p.onSegment?.({way_id:wayId,start:segmentStart,end:point}); segmentStart=null; }
@@ -1020,6 +1053,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
     const onDbl = (e: MapMouseEvent) => {
       const p = propsRef.current;
+      if(p.pickPoint)return;
       if (p.tool === 'way') {
         e.preventDefault();
         finishDraft();

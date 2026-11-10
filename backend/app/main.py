@@ -25,7 +25,8 @@ from . import __version__, report
 from .collab import HUB, Peer, clean_presence
 from . import fix_preview
 from . import signals as signal_plans
-from . import routing, scenario, transit
+from . import routing, network_analysis, scenario, transit
+from .analysis_requests import RouteRequest, IsochroneRequest, CatchmentRequest, PtRequest
 from collections import OrderedDict
 from urllib.parse import unquote
 from .adapters import compare_adapters
@@ -41,7 +42,7 @@ from .analysis import (
 from .edits import History, OpError, apply_op, apply_ops
 from .geojson import geo_patch, to_geojson, vertices
 from .organizer import OrganizerError, credentials, upload_osm
-from .osm_model import OsmDocument
+from .osm_model import OsmDocument, clone
 from .sumo_check import find_netconvert, run_netconvert
 from .validation import validate
 
@@ -76,7 +77,6 @@ class Session:
     closures: set[int] = field(default_factory=set)        # roads closed by an accident or works
     tasks: list[dict[str, Any]] = field(default_factory=list)  # user-made Packet Tracer style tasks
     original_validation: dict[str, Any] | None = None
-    routing_cache: OrderedDict = field(default_factory=OrderedDict)
     load_cache: tuple | None = None
     detour_cache: tuple | None = None
     segments_cache: tuple | None = None
@@ -106,7 +106,7 @@ class OpRequest(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
     label: str | None = None
     reason: str | None = None
-    probe: dict[str, Any] | None = None
+    probe: RouteRequest | None = None
 
 
 class BatchRequest(BaseModel):
@@ -520,6 +520,104 @@ def get_element(doc_id: str, kind: Literal["node", "way", "relation"], eid: int)
         return out
 
 
+# Immutable routing graphs are bounded globally and keyed by document revision.
+_ROUTING_CACHE: OrderedDict = OrderedDict()
+_ROUTING_LOCK = threading.Lock()
+
+
+def _routing_graph(s, req):
+    closed = frozenset(s.closures) if req.use_closures else frozenset()
+    key = (s.id, s.revision, req.mode, closed, req.walk_kmh, req.use_restrictions)
+    with _ROUTING_LOCK:
+        if key not in _ROUTING_CACHE:
+            _ROUTING_CACHE[key] = routing.build_graph(s.doc, req.mode, closed=closed,
+                                                    walk_kmh=req.walk_kmh, use_restrictions=req.use_restrictions)
+        _ROUTING_CACHE.move_to_end(key)
+        while len(_ROUTING_CACHE) > 8:
+            _ROUTING_CACHE.popitem(last=False)
+        return _ROUTING_CACHE[key]
+
+
+def _analysis_context(s, req=None):
+    """Capture a consistent revision; run expensive searches without the edit lock."""
+    from copy import copy
+    from types import SimpleNamespace
+    with s.lock:
+        doc = copy(s.doc)
+        doc.nodes = {nid:clone(n) for nid,n in s.doc.nodes.items()}
+        doc.ways = {wid:clone(w) for wid,w in s.doc.ways.items()}
+        doc.relations = {rid:clone(rel) for rid,rel in s.doc.relations.items()}
+        return SimpleNamespace(doc=doc, graph=_routing_graph(s,req) if req else None, revision=s.revision,
+                               closed=frozenset(s.closures) if req and req.use_closures else frozenset(),
+                               loads=dict(s.loads), multiplier=s.multiplier, transit_freq=dict(s.transit_freq),
+                               signal_timing={k:dict(v) for k,v in s.signal_timing.items()},
+                               analysis_settings=dict(s.analysis_settings),closure_choices=dict(s.closure_choices))
+
+
+def _before_graph(ctx, doc, req):
+    return routing.build_graph(doc,req.mode,closed=ctx.closed,walk_kmh=req.walk_kmh,use_restrictions=req.use_restrictions)
+
+
+@app.get("/api/documents/{doc_id}/analysis/pt-params")
+def pt_params(doc_id: str) -> Response:
+    from . import pt_analysis
+    ctx = _analysis_context(_session(doc_id))
+    return _json({**pt_analysis.params(ctx.doc),"revision":ctx.revision})
+
+
+@app.post("/api/documents/{doc_id}/analysis/pt-isochrone")
+def pt_isochrone(doc_id: str, req: PtRequest) -> Response:
+    from . import pt_analysis
+    ctx = _analysis_context(_session(doc_id),req)
+    out = pt_analysis.analyse(ctx.doc,req,ctx.graph)
+    network_analysis.compare(ctx.doc,req,out,lambda doc:pt_analysis.analyse(doc,req,_before_graph(ctx,doc,req)))
+    return _json({**out,"revision":ctx.revision})
+
+
+@app.post("/api/documents/{doc_id}/analysis/route")
+def analysis_route(doc_id: str, req: RouteRequest) -> Response:
+    ctx = _analysis_context(_session(doc_id),req)
+    out = network_analysis.route(ctx.doc,req,ctx.graph)
+    network_analysis.compare(ctx.doc,req,out,lambda doc:network_analysis.route(doc,req,_before_graph(ctx,doc,req)))
+    return _json({**out,"revision":ctx.revision})
+
+
+@app.post("/api/documents/{doc_id}/analysis/catchment")
+def analysis_catchment(doc_id: str, req: CatchmentRequest) -> Response:
+    ctx = _analysis_context(_session(doc_id),req)
+    out = network_analysis.catchment(ctx.doc,req,ctx.graph)
+    network_analysis.compare(ctx.doc,req,out,lambda doc:network_analysis.catchment(doc,req,_before_graph(ctx,doc,req)))
+    return _json({**out,"revision":ctx.revision})
+
+
+@app.post("/api/documents/{doc_id}/analysis/isochrone")
+def analysis_isochrone(doc_id: str, req: IsochroneRequest) -> Response:
+    ctx = _analysis_context(_session(doc_id),req)
+    def compute(doc, rg):
+        if req.speed_source == "loaded" and req.mode == "car":
+            from copy import copy
+            rg = copy(rg)
+            rg.g = rg.g.copy()
+            rows = road_rows(doc,ctx.loads,ctx.multiplier,
+                             transit_pcu=transit.bus_pcu_by_way(doc,ctx.transit_freq),
+                             capacity_factor=signal_plans.capacity_factors(doc,ctx.signal_timing))
+            from .analysis import scenario_rows
+            scenario_rows(rows,doc,ctx.analysis_settings)
+            scenario.apply_closures(doc,rows,set(ctx.closed),ctx.closure_choices)
+            by_id = {row["id"]:row for row in rows}
+            for _,_,e in rg.g.edges(data=True):
+                row = by_id.get(e["way"])
+                if row and row["t0_s"]:
+                    e["t"] *= row["t_s"]/row["t0_s"]
+        out = network_analysis.isochrone(doc,req,rg)
+        if req.speed_source == "loaded":
+            out["assumptions"].append({"key":"loaded","label":"Загрузка BPR — сценарное допущение, не наблюдаемые скорости."})
+        return out
+    out = compute(ctx.doc,ctx.graph)
+    network_analysis.compare(ctx.doc,req,out,lambda doc:compute(doc,_before_graph(ctx,doc,req)))
+    return _json({**out,"revision":ctx.revision})
+
+
 @app.post("/api/documents/{doc_id}/ops")
 def run_op(doc_id: str, req: OpRequest, x_client_id: str | None = Header(default=None),
            x_user_name: str | None = Header(default=None)) -> Response:
@@ -543,7 +641,10 @@ def run_fix_preview(doc_id: str, req: OpRequest) -> Response:
     with s.lock:
         try:
             return _json(fix_preview.preview(s.doc, req.op, req.args,
-                                             (lambda doc: routing.route(doc, req.probe)) if req.probe else None))
+                                             probe=(lambda doc: network_analysis.route(doc, req.probe, routing.build_graph(doc,req.probe.mode,
+                                                 closed=frozenset(s.closures) if req.probe.use_closures else frozenset(),
+                                                 walk_kmh=req.probe.walk_kmh,use_restrictions=req.probe.use_restrictions),
+                                                 diagnosis=False)) if req.probe else None))
         except OpError as e:
             raise HTTPException(422, str(e)) from e
 
@@ -1173,94 +1274,6 @@ async def collaborate(ws: WebSocket, doc_id: str, client: str = "", name: str = 
     finally:
         task.cancel()
         HUB.leave(doc_id, peer.id)
-
-
-class AnalysisPoint(BaseModel):
-    lat: float | None = Field(default=None, ge=-90, le=90)
-    lon: float | None = Field(default=None, ge=-180, le=180)
-    node_id: int | None = None
-    way_id: int | None = None
-
-class AnalysisRequest(BaseModel):
-    bands_min: list[float] = Field(default_factory=lambda:[5,10,15], min_length=1, max_length=10)
-    pt_kmh: dict[str, float] = Field(default_factory=lambda:{'bus':20,'tram':20,'trolleybus':20,'minibus':20})
-    wait_factor: float = Field(default=.5, ge=0, le=1)
-    max_transfers: int = Field(default=2, ge=0, le=3)
-    headway_overrides: dict[str, float] = Field(default_factory=dict)
-    start: AnalysisPoint | None = Field(default=None, alias="from")
-    to: AnalysisPoint | None = None
-    mode: Literal["car", "walk"] = "car"
-    metric: Literal["time", "length"] = "time"
-    use_closures: bool = False
-    use_restrictions: bool = True
-    walk_kmh: float = Field(default=4.5, ge=0.5, le=15)
-    compare: Literal["original"] | None = None
-    step_min: float = Field(default=1, ge=0.5, le=5)
-    count: int = Field(default=5, ge=1, le=20)
-    how: Literal["buffer", "hull"] = "buffer"
-    buffer_m: float = Field(default=30, ge=1, le=200)
-    speed_source: Literal["free", "load"] = "free"
-    set_a: list[int] = Field(default_factory=list, max_length=2000)
-    set_b: list[int] = Field(default_factory=list, max_length=2000)
-    limit_m: float = Field(default=500, gt=0, le=10000)
-    limit_min: float | None = Field(default=None, gt=0, le=120)
-
-
-def _analysis_graph(s, req, mode):
-    closed = frozenset(s.closures) if req.use_closures else frozenset()
-    key = (s.revision, mode, closed, req.walk_kmh, req.use_restrictions)
-    if key not in s.routing_cache:
-        s.routing_cache[key] = routing.build_graph(s.doc, mode, closed=closed, walk_kmh=req.walk_kmh,
-                                                  use_restrictions=req.use_restrictions)
-        while len(s.routing_cache) > 8:
-            s.routing_cache.popitem(last=False)
-    s.routing_cache.move_to_end(key)
-    return s.routing_cache[key]
-
-
-@app.post("/api/documents/{doc_id}/analysis/{kind}")
-def network_analysis(doc_id: str, kind: Literal["route", "isochrone", "catchment", "pt-isochrone"], req: AnalysisRequest):
-    s = _session(doc_id)
-    with s.lock:
-        data = req.model_dump(by_alias=True, exclude_none=True)
-        for name in (["from", "to"] if kind == "route" else ["from"] if kind in {"isochrone", "pt-isochrone"} else []):
-            point = data.get(name, {})
-            if not ("node_id" in point or "way_id" in point or ("lat" in point and "lon" in point)):
-                raise HTTPException(400, f"{name}: задайте координаты или объект")
-        if kind == 'pt-isochrone':
-            from . import pt_routing
-            if any(not 0 < n <= 120 for n in req.bands_min) or any(not 1 <= v <= 100 for v in req.pt_kmh.values()) or any(not 0 < v <= 180 for v in req.headway_overrides.values()):
-                raise HTTPException(400,'Проверьте диапазоны интервалов, скоростей и времени')
-            try:
-                result = pt_routing.isochrone(s.doc,data)
-            except (ValueError,KeyError) as e:
-                raise HTTPException(400,str(e)) from e
-            return _json({**result,'read_only':True,'revision':s.revision})
-        mode = "walk" if kind == "catchment" else req.mode
-        rg = _analysis_graph(s, req, mode)
-        if req.speed_source == "load" and kind == "isochrone" and mode == "car":
-            import copy
-            rg = copy.copy(rg)
-            rg.g = rg.g.copy()
-            rows = {r["id"]: r for r in _rows(s)}
-            for _, _, e in rg.g.edges(data=True):
-                r = rows.get(e["way"])
-                if r and r["t0_s"]:
-                    e["t"] *= r["t_s"] / r["t0_s"]
-        try:
-            result = getattr(routing, kind)(s.doc, data, rg)
-        except (ValueError, KeyError) as e:
-            raise HTTPException(400, str(e)) from e
-        return _json({**result, "read_only": True, "revision": s.revision})
-
-
-@app.get('/api/documents/{doc_id}/analysis/pt-params')
-def pt_params(doc_id: str):
-    from .pt_routing import params
-    s = _session(doc_id)
-    with s.lock:
-        return _json(params(s.doc))
-
 
 # --------------------------------------------------------- static frontend
 if STATIC_DIR.is_dir():

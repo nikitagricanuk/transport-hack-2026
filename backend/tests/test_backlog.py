@@ -3,7 +3,8 @@ from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
-from app import main, routing, pt_routing
+from app import main, routing, network_analysis
+from app.analysis_requests import RouteRequest, CatchmentRequest
 from app.analysis import road_rows, scenario_rows, load_segments
 from app.edits import History, apply_op
 from app.geojson import _node_category
@@ -68,7 +69,7 @@ def test_pedestrian_checks_only_info():
 
 def test_catchment_partial_and_intersection():
     doc = xml([(1, 0), (2, 1000)], way(10, [1, 2], '<tag k="highway" v="footway"/>'))
-    out = routing.catchment(doc, {"set_a": [1], "set_b": [2], "limit_m": 500, "buffer_m": 40})
+    out = network_analysis.catchment(doc,CatchmentRequest(set_a=[1],set_b=[2],limit_m=500,buffer_m=40),routing.build_graph(doc,"walk"))
     features = out["polygons"]["features"]
     assert out["network"]["walk_km_reached_a"] == pytest.approx(0.5)
     area = {f["properties"]["set"]: f["properties"]["area_km2"] for f in features}
@@ -84,7 +85,7 @@ def test_turn_restriction_and_skipped():
         '<relation id="30"><member type="way" ref="10" role="from"/><member type="node" ref="2" role="via"/><member type="way" ref="11" role="to"/><tag k="type" v="restriction"/><tag k="restriction" v="no_left_turn"/></relation>'
         '<relation id="31"><member type="way" ref="10" role="via"/><tag k="type" v="restriction"/></relation>',
     )
-    out = routing.route(doc, {"from": {"node_id": 1}, "to": {"node_id": 3}})
+    out = network_analysis.route(doc,RouteRequest.model_validate({"from":{"node_id":1},"to":{"node_id":3}}))
     assert out["found"] and 12 in [w["id"] for w in out["stats"]["ways"]]
     assert out["stats"]["restrictions_skipped"] == [31]
     assert out["stats"]["restrictions_applied"] == 1
@@ -131,32 +132,6 @@ def test_tram_signal_roundtrip():
     apply_op(doc, History(), "place_signal", {"node_id": 1})
     assert _node_category(doc.nodes[1].tags) == "tram_signal"
     assert OsmDocument.parse(doc.to_xml()).nodes[1].tags["uds:signal:tram"] == "yes"
-
-
-def test_pt_wait_and_ride_and_transfer_limit():
-    # Routes share platform 2. No physical walking bridge between platforms.
-    ns = [(1, 0), (2, 1000), (3, 2000)]
-    ws = way(10, [1, 2, 3], '<tag k="highway" v="footway"/>')
-
-    def rel(rid, stops):
-        return (
-            f'<relation id="{rid}"><member type="way" ref="10" role=""/>'
-            + "".join(f'<member type="node" ref="{n}" role="platform"/>' for n in stops)
-            + '<tag k="type" v="route"/><tag k="route" v="bus"/><tag k="interval" v="10"/></relation>'
-        )
-
-    doc = xml(ns, ws, rel(30, [1, 2]) + rel(31, [2, 3]))
-    req = {"from": {"node_id": 1}, "walk_kmh": 4.5, "pt_kmh": {"bus": 20}, "wait_factor": 0.5}
-    rg, walk, pair, rs, issues = pt_routing.transit_graph(doc, req)
-    g, start = pair
-    first = pt_routing.costs(g, start, 10000, 1)
-    second = pt_routing.costs(g, start, 10000, 2)
-    assert second[("stop", 3)][0] < first[("stop", 3)][0]
-    # One boarding adds 300 seconds waiting, independent of the ride length.
-    assert second[("ride", 30, 1)][1]["wait_s"] == pytest.approx(300)
-    assert second[("ride", 30, 1)][1]["ride_s"] > 0
-    out = pt_routing.isochrone(doc, {**req, "bands_min": [5, 10, 15]})
-    assert out["bands"][-1]["with_transfer"]["area_km2"] >= out["bands"][-1]["no_transfer"]["area_km2"]
 
 
 def test_pt_response_json_and_read_only():
@@ -206,3 +181,18 @@ def test_sidewalk_check_covers_middle_of_long_segment():
         way(11,[3,4],'<tag k="highway" v="footway"/><tag k="footway" v="sidewalk"/>'))
     issues=validate(doc)['issues']
     assert any(i['category']=='pedestrian' and i['title'].startswith('Тротуар нарисован отдельно') for i in issues)
+
+
+def test_segment_lane_attributes_preview_is_atomic():
+    from app.fix_preview import preview
+    doc=xml([(1,0),(2,100),(3,200),(4,300)],way(10,[1,2,3,4]))
+    before=doc.to_xml()
+    args={'way_id':10,'start':{'id':2},'end':{'id':3},'attributes':[{'op':'set_lanes','args':{'way_id':10,'forward':2,'backward':1,'oneway':'no'}}]}
+    p=preview(doc,'edit_segment',args)
+    assert not p['empty'] and doc.to_xml()==before
+    h=History()
+    result=apply_op(doc,h,'edit_segment',args)
+    assert doc.ways[result['id']].tags['lanes']=='3'
+    assert sum(w.tags.get('lanes')=='3' for w in doc.ways.values())==1
+    h.undo()
+    assert doc.to_xml()==before

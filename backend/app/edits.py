@@ -1378,7 +1378,7 @@ def op_move_selection(doc, tx, refs: list[dict], dlat: float, dlon: float):
     return {'nodes': len(ids)}
 
 
-def op_edit_segment(doc, tx, way_id: int, start: dict, end: dict, tags: dict):
+def op_edit_segment(doc, tx, way_id: int, start: dict, end: dict, tags: dict | None = None, attributes: list[dict] | None = None):
     """Materialise two projected endpoints, split with relation rewriting, tag middle."""
     way = _way(doc, int(way_id))
     if way.is_closed:
@@ -1394,7 +1394,18 @@ def op_edit_segment(doc, tx, way_id: int, start: dict, end: dict, tags: dict):
         middle = op_split_way(doc, tx, way.id, a)['new_id']
     if b != doc.ways[middle].nodes[-1]:
         op_split_way(doc, tx, middle, b)
-    op_set_tags(doc, tx, kind='way', id=middle, tags=tags)
+    if tags:
+        op_set_tags(doc, tx, kind='way', id=middle, tags=tags)
+    for attribute in attributes or []:
+        args = dict(attribute.get('args', {}))
+        args.pop('way_id',None)
+        args.pop('id',None)
+        if attribute.get('op') == 'set_lanes':
+            op_set_lanes(doc,tx,way_id=middle,**args)
+        elif attribute.get('op') == 'smooth_z':
+            op_smooth_z(doc,tx,way_id=middle)
+        else:
+            raise OpError('для участка поддерживаются теги, полосы и плавный Z')
     return {'id': middle}
 
 

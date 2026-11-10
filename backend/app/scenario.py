@@ -18,9 +18,9 @@ from typing import Any
 
 import networkx as nx
 
-from .analysis import _speed, projection
+from .analysis import projection
 from .osm_model import OsmDocument
-from .roads import direction, is_drivable, parse_int
+from .roads import direction, parse_int
 from .transit import DEFAULT_LEVELS, M2_PER_PERSON, RESIDENTIAL
 
 M2_PER_JOB = 25.0
@@ -32,28 +32,15 @@ INTRA_MIN = 3.0         # travel time inside one zone, minutes
 # ------------------------------------------------------------ road graph
 def road_graph(doc: OsmDocument, closed: set[int] | frozenset[int] = frozenset()) -> nx.DiGraph:
     """Directed road graph weighted by free-flow time in seconds."""
-    proj = projection(doc)
-    g = nx.DiGraph()
-    for w in doc.ways.values():
-        if w.id in closed or not is_drivable(w.tags) or len(w.nodes) < 2:
-            continue
-        speed = _speed(w.tags) / 3.6
-        d = direction(w.tags)
-        refs = [r for r in w.nodes if r in doc.nodes]
-        for a, b in zip(refs, refs[1:]):
-            na, nb = doc.nodes[a], doc.nodes[b]
-            t = math.dist(proj.to_xy(na.lat, na.lon), proj.to_xy(nb.lat, nb.lon)) / speed
-            if d >= 0:
-                g.add_edge(a, b, t=t, way=w.id)
-            if d <= 0:
-                g.add_edge(b, a, t=t, way=w.id)
-    return g
+    from .routing import build_graph
+    return nx.DiGraph(build_graph(doc,"car",closed=closed,use_restrictions=False).g)
 
 
 # ------------------------------------------------------------- closures
 def detours(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int], choices=None) -> dict[int, dict[str, Any]]:
     """Up to three diverse, restriction-aware alternatives, bounded to 30 paths."""
-    from .routing import build_graph, issue, snap, diagnose
+    from .routing import build_graph, snap
+    from .network_analysis import issue, diagnose
     from itertools import islice
     import time
     if not closed:
@@ -65,7 +52,8 @@ def detours(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int], choi
         incoming = {e['way'] for _, _, e in rg.g.in_edges(u, data=True)} | {None}
         for inc in incoming:
             for _, v, e in rg.g.out_edges(u, data=True):
-                if any((e['way'] != to if only else e['way'] == to) for only,to,_ in rg.restrictions.get((inc,u), [])):
+                rule=rg.restrictions.get((inc,u))
+                if rule and (e['way'] in rule['no'] or (rule['only'] is not None and e['way'] not in rule['only'])):
                     continue
                 g.add_edge((u,inc),(v,e['way']),**e)
     by_id = {r['id']:r for r in rows}
@@ -119,7 +107,7 @@ def detours(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int], choi
             if sa and sb:
                 diagnostics=diagnose(doc,rg,sa,sb)
             if not diagnostics:
-                diagnostics=[issue('Объезда нет в пределах карты','Проверьте разрывы, направления и запреты; за границей выгрузки путь неизвестен.',[{'kind':'way','id':wid}])]
+                diagnostics=[issue('Объезда нет в пределах карты','Проверьте разрывы, направления и запреты; за границей выгрузки путь неизвестен.',refs=[{'kind':'way','id':wid}])]
             for card in diagnostics:
                 card['id']=f'closure-{wid}-'+card['id']
         out[wid] = dict(ways=selected['ways'],volume=row['volume']/len(legs),moved=round(row['volume']*count/len(legs)),
