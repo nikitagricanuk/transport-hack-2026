@@ -630,8 +630,16 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     if (!ready || !map) return;
     const translucent = (solid: number, planned: number): maplibregl.ExpressionSpecification =>
       ['case', ['==', ['get', 'planned'], true], planned, solid];
+    // Screen-space round caps grow beyond the metre-wide lane polygons,
+    // especially with a tilted camera. Retire the overview strokes once the
+    // physical surface is visible instead of leaving disks at way endpoints.
+    const overviewOpacity: maplibregl.ExpressionSpecification = [
+      'interpolate', ['linear'], ['zoom'],
+      LANE_MINZOOM, translucent(1, 0.4),
+      LANE_MINZOOM + 0.5, 0,
+    ];
     for (const id of ['road-fill', 'road-casing', 'road-link']) {
-      if (map.getLayer(id)) map.setPaintProperty(id, 'line-opacity', translucent(1, 0.4));
+      if (map.getLayer(id)) map.setPaintProperty(id, 'line-opacity', overviewOpacity);
     }
     if (map.getLayer('buildings-fill')) map.setPaintProperty('buildings-fill', 'fill-opacity', translucent(0.6, 0.2));
     if (map.getLayer('zones-fill')) map.setPaintProperty('zones-fill', 'fill-opacity', translucent(0.45, 0.15));

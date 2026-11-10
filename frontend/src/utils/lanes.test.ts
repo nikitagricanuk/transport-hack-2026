@@ -69,3 +69,23 @@ test('display smoothing preserves the road class lane width',()=>{
   const polygon=geometry.surface.features[0].geometry.coordinates[0];
   assert.ok(Math.abs(Math.abs(polygon[0][1]-polygon[3][1])*M_PER_DEG_LAT-6)<.01);
 });
+
+
+test('T junction asphalt stays within the incident road edges instead of forming a disk', async () => {
+  const { findJunctions, junctionPlate } = await import('./lanes.ts');
+  const a = [104.28, 52.28], b = [104.281, 52.28], c = [104.282, 52.28], d = [104.281, 52.281];
+  const roads = [
+    { id: 1, coords: [a, b, c], nodes: [1, 2, 3], halfWidth: 7, forward: 2, backward: 2 },
+    { id: 2, coords: [b, d], nodes: [2, 4], halfWidth: 1.75, forward: 1, backward: 0 },
+  ];
+  const junction = findJunctions(roads).get(2)!;
+  const ring = junctionPlate(junction, roads);
+  assert.equal(ring.length, 5);
+  assert.deepEqual(ring[0], ring[ring.length - 1]);
+  const kx = 111_320 * Math.cos(b[1] * Math.PI / 180);
+  for (const point of ring) {
+    assert.ok(Math.abs((point[0] - b[0]) * kx) <= 1.751);
+    assert.ok(Math.abs((point[1] - b[1]) * M_PER_DEG_LAT) <= 7.001);
+  }
+  assert.equal(buildLanes(roads, [junction]).surface.features.length, 3);
+});
