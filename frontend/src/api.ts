@@ -1,3 +1,5 @@
+import type { PtResult, PtRoute } from './components/PtTools';
+import type { AnalysisResult } from './utils/networkAnalysis';
 import type {
   ChangesResult, Comparison, DocState, FixPreview, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
   SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
@@ -24,18 +26,54 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set('X-Client-Id', CLIENT_ID);
   if (USER_NAME.current) headers.set('X-User-Name', encodeURIComponent(USER_NAME.current));
-  const res = await fetch(url, { ...init, headers });
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, headers });
+  } catch {
+    throw new Error('Нет связи с сервером редактора. Проверьте подключение и обновите страницу.');
+  }
   if (!res.ok) {
-    let msg = `${res.status} ${res.statusText}`;
+    let detail: unknown = null;
     try {
-      const body = await res.json();
-      if (body?.detail) msg = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+      detail = (await res.json())?.detail ?? null;
     } catch {
       /* not json */
     }
-    throw new Error(msg);
+    throw new Error(errorText(res.status, detail));
   }
   return res.json() as Promise<T>;
+}
+
+const STATUS_RU: Record<number, string> = {
+  400: 'Сервер не принял запрос',
+  401: 'Нужна авторизация',
+  403: 'Нет доступа',
+  404: 'Не найдено: документ или объект удалён, либо сервер перезапустился — обновите страницу',
+  409: 'Конфликт: документ изменили одновременно — обновите страницу',
+  413: 'Файл слишком большой',
+  422: 'Неверные данные запроса',
+  429: 'Слишком много запросов подряд — подождите немного',
+  500: 'Внутренняя ошибка сервера',
+  502: 'Сервер временно недоступен',
+  503: 'Сервер временно недоступен',
+  504: 'Сервер не ответил вовремя',
+};
+
+/**
+ * One Russian message for a failed request. The server's own Russian text is kept;
+ * FastAPI's English defaults («Not Found») and validation lists become readable Russian.
+ */
+export function errorText(status: number, detail: unknown): string {
+  const base = STATUS_RU[status] ?? `Ошибка сервера (${status})`;
+  if (typeof detail === 'string') return /[А-Яа-яЁё]/.test(detail) ? detail : base;
+  if (Array.isArray(detail)) {
+    const fields = detail
+      .map((d) => (d && typeof d === 'object' && Array.isArray((d as { loc?: unknown[] }).loc)
+        ? (d as { loc: unknown[] }).loc.filter((x) => x !== 'body').join('.') : ''))
+      .filter(Boolean);
+    return fields.length ? `${base}: проверьте поля ${fields.join(', ')}` : base;
+  }
+  return base;
 }
 
 const json = (body: unknown): RequestInit => ({
@@ -101,6 +139,11 @@ export interface AdapterComparison {
 }
 
 export const api = {
+  ptParams: (docId: string) => request<{routes: PtRoute[]}>(`/api/documents/${docId}/analysis/pt-params`),
+  analysisPt: (docId: string, body: unknown) => request<PtResult>(`/api/documents/${docId}/analysis/pt-isochrone`, json(body)),
+  analysisRoute: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/route`, json(body)),
+  analysisCatchment: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/catchment`, json(body)),
+  analysisIsochrone: (docId: string, body: unknown) => request<AnalysisResult>(`/api/documents/${docId}/analysis/isochrone`, json(body)),
   adapters: (docId: string, wayId: number, signal: AbortSignal) =>
     request<{ adapters: AdapterComparison }>(`/api/documents/${docId}/elements/way/${wayId}`, { signal })
       .then(({ adapters }) => adapters),
@@ -112,9 +155,11 @@ export const api = {
     fd.append('file', file);
     return request<DocState>('/api/documents', { method: 'POST', body: fd });
   },
-  op: (docId: string, op: Op, label?: string) =>
-    request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label })),
-  fixPreview: (docId: string, op: Op) =>
+  op: (docId: string, op: Op, label?: string, reason?: string) =>
+    request<OpResponse>(`/api/documents/${docId}/ops`, json({ ...op, label, reason })),
+  /** «Править всё»: safe fixes and disputed issues; applies nothing */
+  fixAllPlan: (docId: string) => request<unknown>(`/api/documents/${docId}/fix-all`),
+  fixPreview: (docId: string, op: Op & { probe?: unknown }) =>
     request<FixPreview>(`/api/documents/${docId}/fix-preview`, json(op)),
   batch: (docId: string, ops: Op[], label?: string) =>
     request<OpResponse>(`/api/documents/${docId}/batch`, json({ ops, label })),

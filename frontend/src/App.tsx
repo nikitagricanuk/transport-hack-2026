@@ -1,3 +1,5 @@
+import type { FeatureCollection } from 'geojson';
+import type { PickedPoint, RouteQuery } from './utils/networkAnalysis';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { USER_NAME, api, downloadFile, type OpResponse } from './api';
 import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
@@ -9,6 +11,7 @@ import { AnalyticsPanel, BasemapControls, TasksModal, type BaseMap, type ImageOv
 import StartScreen from './components/StartScreen';
 import { FixReview, type FixReviewState } from './components/FixReview';
 import { OrganizerReport, SumoReport } from './components/CheckResults';
+import { FixAllDialog } from './components/FixAll';
 import { MenuBar, Splitter, useLayout } from './components/WindowLayout';
 import type {
   ChangesResult, Comparison, DocState, Fix, Geo, GeoDiff, Issue, LayerVisibility, LoadState, NodeProps, Op, OrganizerResult, Peer,
@@ -54,13 +57,16 @@ export default function App() {
   const onCursor = useCallback((ll: [number, number] | null, zoom: number) => {
     sendRef.current({ cursor: ll });
     if (cursorEl.current) {
-      cursorEl.current.textContent = (ll ? `${ll[1].toFixed(5)}° N · ${ll[0].toFixed(5)}° E   ` : '') + `z ${zoom.toFixed(1)}`;
+      cursorEl.current.textContent = (ll ? `${ll[1].toLocaleString('ru-RU', { minimumFractionDigits: 5, maximumFractionDigits: 5 })}° с. ш. · ${ll[0].toLocaleString('ru-RU', { minimumFractionDigits: 5, maximumFractionDigits: 5 })}° в. д.   ` : '') + `масштаб ${zoom.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}`;
     }
   }, []);
   const [mapDiff, setMapDiff] = useState<GeoDiff | null>(null);
   // houses above lawns by default; the layers panel reorders the groups
   const [drawOrder, setDrawOrder] = useState<DrawGroup[]>(['zones', 'buildings', 'paths', 'roads', 'rail']);
   // two ways of working: editing the graph, or analysing flows and scenarios
+  const [analysisOverlay, setAnalysisOverlay] = useState<FeatureCollection>({ type: 'FeatureCollection', features: [] });
+  const [analysisPick, setAnalysisPick] = useState(false);
+  const [analysisPicked, setAnalysisPicked] = useState<PickedPoint | null>(null);
   const [mode, setMode] = useState<'edit' | 'analytics'>('edit');
   const [base, setBase] = useState<BaseMap>('osm');
   const [overlay, setOverlay] = useState<ImageOverlay | null>(null);
@@ -69,6 +75,7 @@ export default function App() {
   // a suggested fix under review: drawn on the map, applied only on the user's click
   const [fixReview, setFixReview] = useState<FixReviewState | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [fixAllOpen, setFixAllOpen] = useState(false);
   const [followId, setFollowId] = useState<string | null>(null);
   const followRef = useRef<string | null>(null);
   const modeRef = useRef<'edit' | 'analytics'>('edit');
@@ -264,7 +271,7 @@ export default function App() {
       setLoad(state);
       const c = state.closures?.find((x) => x.id === wayId);
       setNotice(!closed ? 'Перекрытие снято'
-        : c?.found ? `Дорога перекрыта: ${c.moved ?? 0} авт/ч ушли на объезд по ${c.ways.length} рёбрам`
+        : c?.found ? `Дорога перекрыта: ${c.moved ?? 0} авт./ч ушли на объезд по ${c.ways.length} рёбрам`
           + (c.partial ? ' (в обратную сторону объезда нет)' : '')
         : 'Дорога перекрыта, но объезда в пределах карты нет — поток теряется');
       if (c?.found) flash(c.ways.map((w) => ({ kind: 'way', id: w })), 8000);
@@ -457,6 +464,8 @@ export default function App() {
       setTool('select');
       setBottomTab('load');
       setLoadColor(true);
+      // load colouring is the default view of analytics: make sure the roads are visible
+      setLayers((prev) => (prev.roads ? prev : { ...prev, roads: true }));
     } else {
       setLoadColor(false);
     }
@@ -493,7 +502,7 @@ export default function App() {
   }, [doc, selection, wayIndex, selectedNode]);
 
   // -------------------------------------------------------------- ops
-  const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string }): Promise<boolean> => {
+  const runOps = useCallback(async (ops: Op | Op[], opts?: { select?: 'result' | 'keep'; label?: string; reason?: string }): Promise<boolean> => {
     if (!docId) return false;
     if (modeRef.current === 'analytics') {
       setNotice('Режим аналитики: граф не редактируется. Переключитесь на «Редактирование».');
@@ -503,7 +512,7 @@ export default function App() {
     try {
       let res: OpResponse;
       const list = Array.isArray(ops) ? ops : [ops];
-      if (list.length === 1) res = await api.op(docId, list[0], opts?.label);
+      if (list.length === 1) res = await api.op(docId, list[0], opts?.label, opts?.reason);
       else res = await api.batch(docId, list, opts?.label);
       ingest(res);
       const warnings = [
@@ -529,10 +538,11 @@ export default function App() {
   // stable callbacks so memoized panels and the map skip unrelated re-renders
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
-  const onFix = useCallback((i: Issue, fix: Fix) => {
+  const onFix = useCallback((i: Issue, fix: Fix, probe?: RouteQuery) => {
     if (!docId) return;
+    setMode('edit'); modeRef.current = 'edit'; setAnalysisPick(false);
     setFixReview({ issue: i, fix, preview: null, error: null });
-    api.fixPreview(docId, { op: fix.op, args: fix.args })
+    api.fixPreview(docId, { op: fix.op, args: fix.args, probe })
       .then((preview) => {
         // frame what is added or removed (a long road that is only split would zoom too far out),
         // with at least ~80 m around a tiny change
@@ -556,7 +566,10 @@ export default function App() {
     const r = fixReview;
     if (!r) return;
     setFixReview(null);
-    runOps({ op: r.fix.op, args: r.fix.args }, { label: r.fix.label + ': ' + r.issue.title });
+    runOps({ op: r.fix.op, args: r.fix.args }, {
+      label: r.fix.label + ': ' + r.issue.title,
+      reason: r.issue.description,
+    });
   }, [fixReview, runOps]);
   const cancelFixReview = useCallback(() => setFixReview(null), []);
   // a review belongs to the document it was computed on
@@ -615,12 +628,42 @@ export default function App() {
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       const k = e.key.toLowerCase();
-      if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'я')) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+      // Esc and Ctrl+Z work the same way: first they cancel what is still in progress
+      // (a road being drawn, an open dialog, a fix under review, vertex or merge picking),
+      // and when nothing is pending they undo the last edit from the history.
+      const cancelUnsaved = (): boolean => {
+        if ((mapRef.current?.draftPointCount() ?? 0) > 0) { mapRef.current?.cancelDraft(); return true; }
+        if (organizer && organizer !== 'running') { setOrganizer(null); return true; }
+        if (sumo && sumo !== 'running') { setSumo(null); return true; }
+        if (exportCheck) { setExportCheck(false); return true; }
+        if (report !== undefined) { setReport(undefined); return true; }
+        if (tasksOpen) { setTasksOpen(false); return true; }
+        if (fixAllOpen) { setFixAllOpen(false); return true; }
+        if (fixReview) { setFixReview(null); return true; }
+        return mapRef.current?.cancelPending() ?? false;
+      };
+      const undoWithNotice = () => {
+        if (!doc?.history.can_undo) return;
+        undo();
+        if (doc.history.undo_label) setNotice(`Отменено: ${doc.history.undo_label}`);
+      };
+      if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'я')) {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else if (!cancelUnsaved()) undoWithNotice();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && (k === 'y' || k === 'н')) { e.preventDefault(); redo(); return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
-      if (e.key === 'Escape' && fixReview) { setFixReview(null); return; }
-      if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); return; }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (cancelUnsaved()) return;
+        if (selection) { setSelection(null); return; }
+        if (tool !== 'select') { setTool('select'); return; }
+        undoWithNotice();
+        return;
+      }
       // Delete/Backspace remove the selection, unless a way draft owns the key
       // (then it only drops the latest draft point). That listener is capture
       // on this same window, and stopPropagation() does not suppress another
@@ -642,7 +685,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey, false);
     return () => window.removeEventListener('keydown', onKey, false);
-  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview]);
+  }, [tool, selection, undo, redo, runOps, applyTemplate, fixReview, organizer, sumo, exportCheck, report, tasksOpen, fixAllOpen, doc]);
 
   useEffect(() => { setHint(null); }, [tool]);
 
@@ -652,7 +695,7 @@ export default function App() {
     const name = `${team || 'team'}.osm`;
     try {
       const size = await downloadFile(api.exportUrl(doc.doc_id, team || 'team'), name, true);
-      setNotice(`Сохранён ${name} — ${(size / 1024 / 1024).toFixed(2)} МБ`);
+      setNotice(`Сохранён ${name} — ${(size / 1024 / 1024).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} МБ`);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -826,13 +869,13 @@ export default function App() {
         )}
         <main className="center">
           <div className="map-wrap">
-            <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
+            <MapView analysis={analysisOverlay} pickPoint={analysisPick && mode === 'analytics'} onPickPoint={setAnalysisPicked} ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
               threeD={threeD} highlight={highlight} onView={onView} fixPreview={fixReview?.preview ?? null}
-              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
+              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc} analytics={mode === 'analytics'}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
-            <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
+            <div className="map-hint">{analysisOverlay.features.length > 0 ? analysisOverlay.features.some(f => f.properties?.mock) ? 'ТЕСТОВЫЕ интервалы ОТ — синтетические данные; скорости и коридор — допущения' : 'Анализ: скорости и коридор — допущения; интервалы ОТ — OSM / ручной ввод / по умолчанию' : hint ?? TOOL_HINTS[tool]}</div>
             {fixReview && (
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
                 onApply={applyReviewedFix} onCancel={cancelFixReview} />
@@ -851,7 +894,7 @@ export default function App() {
           <BottomPanel validation={validation} history={doc.history} tab={bottomTab} onTab={setBottomTab}
             validating={validating} onShow={showIssue} onFix={onFix}
             issueFilters={issueFilters} onIssueFilter={onIssueFilter} onSelectAllIssues={onSelectAllIssues}
-            onShowRefs={onShowRefs} onDownloadLog={downloadEditLog}>
+            onShowRefs={onShowRefs} onDownloadLog={downloadEditLog} onFixAll={() => setFixAllOpen(true)}>
             {bottomTab === 'load' && (
               <LoadPanel load={load} comparison={comparison} onMultiplier={onMultiplier} onSnapshot={onSnapshot}
                 onDeleteSnapshot={onDeleteSnapshot} onCompare={onCompare} onReset={onResetLoad} onShowRoad={onShowRoad}
@@ -867,10 +910,10 @@ export default function App() {
           <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
             label="Ширина панели свойств" />
         )}
-        {!win.layout.visible.right ? null : mode === 'analytics' && !selection ? (
-          <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
-            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
-        ) : (
+        {doc && <AnalyticsPanel key={doc.doc_id} active={win.layout.visible.right && mode === 'analytics' && !selection} analysis={{ docId: doc.doc_id, rev: doc.rev, picked: analysisPicked, onPick: setAnalysisPick, onOverlay: setAnalysisOverlay, onFix, onShowRoad }}
+          docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
+            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />}
+        {win.layout.visible.right && (mode !== 'analytics' || selection) && (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
           onSetLoad={onSetLoad} onOp={onInspectorOp} docId={doc.doc_id} rev={doc.rev} openRoute={openRoute}
@@ -880,6 +923,14 @@ export default function App() {
           readOnly={mode === 'analytics'} />
         )}
       </div>
+      {fixAllOpen && (
+        <FixAllDialog docId={doc.doc_id} onClose={() => setFixAllOpen(false)}
+          onApply={(ops, label) => { runOps(ops, { label }); }}
+          onShow={(loc, ref) => {
+            if (loc) mapRef.current?.flyTo(loc[0], loc[1], 18);
+            if (ref && (ref.kind === 'way' || ref.kind === 'node')) setSelection({ kind: ref.kind, id: ref.id });
+          }} />
+      )}
       {tasksOpen && <TasksModal docId={doc.doc_id} selection={selection} onClose={() => setTasksOpen(false)} />}
 
       <footer className="status mono">

@@ -7,6 +7,7 @@ export const ISSUE_FILTERS = [
   { key: 'junction', label: 'Перекрёстки', road: true },
   { key: 'lanes', label: 'Полосы', road: true },
   { key: 'geometry', label: 'Геометрия', road: true },
+  { key: 'pedestrian', label: 'Пешеходы', road: false },
   { key: 'data', label: 'Данные', road: true },
 ] as const;
 
@@ -33,6 +34,7 @@ export function defaultIssueFilters(): IssueFilters {
     lanes: false,
     geometry: false,
     data: false,
+    pedestrian: false,
   };
 }
 
@@ -57,6 +59,7 @@ export function allIssueFiltersOn(): IssueFilters {
     lanes: true,
     geometry: true,
     data: true,
+    pedestrian: true,
   };
 }
 

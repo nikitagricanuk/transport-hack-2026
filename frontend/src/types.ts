@@ -73,6 +73,7 @@ export interface HistoryInfo {
 }
 
 export interface HistoryEntry {
+  reason?: string | null;
   label: string;
   author: string | null;
   at: number;
@@ -103,6 +104,7 @@ export interface Fix {
 
 /** Dry run of a fix: what it would add, delete or change (the document is not touched). */
 export interface FixPreview {
+  probe?: { found: boolean; stats?: { time_s: number; length_m: number } | null } | null;
   features: Feature<LineString | Point, { kind: Kind; id: number; status: 'added' | 'deleted' | 'modified'; name: string; length_m?: number; fringe?: boolean }>[];
   counts: { added: number; deleted: number; modified: number };
   added_road_m: number;
@@ -113,7 +115,7 @@ export interface FixPreview {
 export interface Issue {
   id: string;
   severity: Severity;
-  category: 'connectivity' | 'direction' | 'junction' | 'lanes' | 'geometry' | 'data';
+  category: 'connectivity' | 'direction' | 'junction' | 'lanes' | 'geometry' | 'data' | 'pedestrian';
   title: string;
   description: string;
   refs: { kind: Kind; id: number }[];

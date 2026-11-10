@@ -1,5 +1,6 @@
 import { levelOfService } from '../utils/los';
 import { memo, useState } from 'react';
+import { useEnterKey } from '../utils/useEnterKey';
 import type { ChangesResult, Comparison, LoadRow, LoadState, Los, ReportData, ValidationResult } from '../types';
 import { fmt } from '../utils/geom';
 
@@ -208,6 +209,15 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
   const vc = row.capacity ? val / row.capacity : 0;
   const los = v === null ? row.los : levelOfService(vc);
   const commit = () => { if (v !== null) { onSet(Math.round(v)); setV(null); } };
+  // exact count typed by hand (a traffic survey), not only the slider
+  const [typed, setTyped] = useState<string | null>(null);
+  const typedValue = typed === null ? null : Number(typed.replace(',', '.').replace(/\s/g, ''));
+  const typedOk = typedValue !== null && Number.isFinite(typedValue) && typedValue >= 0 && typedValue <= 20000;
+  const commitTyped = () => {
+    if (typed === null) return;
+    if (typedOk) onSet(Math.round(typedValue!));
+    setTyped(null);
+  };
   return (
     <div className={`card stack10 ${row.needs_intensity ? 'warn-card' : ''}`}>
       {row.needs_intensity && <b className="small">Новая дорога: задайте интенсивность — без неё модель берёт оценку по классу</b>}
@@ -216,11 +226,19 @@ export function RoadLoad({ row, onSet }: { row: LoadRow; onSet: (volume: number 
         <b>Интенсивность</b>
         <span className="los-dot" style={{ background: LOS_COLOR[los] }} title={LOS_TEXT[los]}>{los}</span>
       </div>
-      <input type="range" min={0} max={max} step={10} value={val} aria-label="Интенсивность, авт/ч"
+      <input type="range" min={0} max={max} step={10} value={val} aria-label="Интенсивность, авт./ч"
         onChange={(e) => setV(Number(e.target.value))} onPointerUp={commit} onKeyUp={commit} />
+      <label className="row gap8 small">
+        <span>Данные учёта, авт./ч</span>
+        <input type="number" inputMode="numeric" min={0} max={20000} step={1} className="num-input"
+          aria-label="Интенсивность по данным учёта, авт./ч" placeholder={String(Math.round(val))}
+          value={typed ?? ''} onChange={(e) => setTyped(e.target.value)} onBlur={commitTyped}
+          onKeyDown={(e) => { if (e.key === 'Enter') commitTyped(); if (e.key === 'Escape') setTyped(null); }} />
+        {typed !== null && !typedOk && <span className="bad">от 0 до 20 000</span>}
+      </label>
       <div className="row between small">
-        <span className="mono">{fmt(val)} авт/ч {row.custom ? '' : '(нет данных учёта)'}</span>
-        <span className="mono muted">пропускная {fmt(row.capacity)} · v/c {fmt(vc, 2)}</span>
+        <span className="mono">{fmt(val)} авт./ч {row.custom ? '(введено вручную)' : '(нет данных учёта)'}</span>
+        <span className="mono muted">пропускная способность {fmt(row.capacity)} авт./ч · v/c {fmt(vc, 2)}</span>
       </div>
       <div className="row between small muted">
         <span>t: {fmt(row.t0_s, 0)} с свободно → {fmt(row.t_s, 0)} с</span>
@@ -310,6 +328,7 @@ export function ExportCheck({ validation, onFixList, onExport, onClose, filename
 }) {
   const s = validation?.summary;
   const blocked = !s || s.counts.critical > 0 || s.components > 1;
+  useEnterKey(!blocked, onExport);  // Enter saves a file that passed the check
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal" role="dialog" aria-label="Проверка перед сохранением" onClick={(e) => e.stopPropagation()}>

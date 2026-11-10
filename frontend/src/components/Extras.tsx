@@ -1,3 +1,4 @@
+import { AnalysisTools, type AnalysisProps } from './AnalysisTools';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import type { HistoryEntry, Kind, LoadState, OdMatrix, Selection, Task, TaskCriterion, TaskResult } from '../types';
@@ -11,7 +12,7 @@ export const INTENSITY_PRESETS: { name: string; multiplier: number; hint: string
   { name: 'Межпиковый', multiplier: 0.65, hint: 'день' },
   { name: 'Выходной', multiplier: 0.5, hint: 'суббота' },
   { name: 'Ночь', multiplier: 0.15, hint: '00–05' },
-  { name: 'Перспектива +30%', multiplier: 1.3, hint: 'рост спроса' },
+  { name: 'Перспектива +30 %', multiplier: 1.3, hint: 'рост спроса' },
 ];
 
 export function IntensityPresets({ current, onPick }: { current: number; onPick: (m: number) => void }) {
@@ -33,7 +34,9 @@ const CLASS_RU: Record<string, string> = {
   residential: 'Жилые', service: 'Проезды', unclassified: 'Прочие', living_street: 'Жилые зоны',
 };
 
-export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onReopen, onOpenTasks }: {
+export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onReopen, onOpenTasks, analysis, active }: {
+  analysis: AnalysisProps;
+  active: boolean;
   docId: string;
   rev: number;
   load: LoadState | null;
@@ -42,14 +45,17 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
   onReopen: (wayId: number) => void;
   onOpenTasks: () => void;
 }) {
+  const [opened, setOpened] = useState(active);
+  useEffect(() => { if (active) setOpened(true); }, [active]);
   const [od, setOd] = useState<OdMatrix | null>(null);
   const [grid, setGrid] = useState(3);
   const [view, setView] = useState<'trips' | 'shares' | 'minutes'>('trips');
   useEffect(() => {
+    if (!active) return;
     let alive = true;
     api.od(docId, grid).then((m) => alive && setOd(m)).catch(() => undefined);
     return () => { alive = false; };
-  }, [docId, grid, rev]);
+  }, [docId, grid, rev, active]);
 
   const flows = useMemo(() => {
     if (!load) return null;
@@ -65,14 +71,15 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
     return { classes, top, transit, missing };
   }, [load]);
 
-  if (!load || !flows) return <aside className="inspector empty"><p>Расчёт аналитики…</p></aside>;
+  if (!load || !flows) return <aside className="inspector empty" style={{ display: active ? undefined : 'none' }}><p>Расчёт аналитики…</p></aside>;
   const s = load.summary;
   const matrix = od ? (view === 'trips' ? od.trips : view === 'shares' ? od.shares : od.minutes) : [];
   const maxCell = Math.max(1, ...matrix.flat().map((v) => (typeof v === 'number' ? v : 0)));
   return (
-    <aside className="inspector analytics" aria-label="Аналитика сети">
+    <aside className="inspector analytics" aria-label="Аналитика сети" style={{ display: active ? undefined : 'none' }}>
       <div className="insp-head"><span className="badge">АНАЛИТИКА</span><h2>Потоки и сценарии</h2></div>
       <div className="insp-body stack16">
+        {opened && <AnalysisTools {...analysis} />}
         <section className="stack10">
           <b>Сценарий спроса</b>
           <IntensityPresets current={load.multiplier} onPick={onMultiplier} />
@@ -101,7 +108,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
             <button key={r.id} className="link worst" onClick={() => onShowRoad(r.id)}>
               <span className="los-dot" style={{ background: LOS_COLOR[r.los] }}>{r.los}</span>
               <span className="grow ellipsis">{r.name || `${r.highway} #${r.id}`}</span>
-              <span className="mono small">{fmt(r.volume)} авт/ч</span>
+              <span className="mono small">{fmt(r.volume)} авт./ч</span>
             </button>
           ))}
           {flows.missing.length > 0 && (
@@ -125,7 +132,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
                 <button className="btn small" onClick={() => onReopen(c.id)}>Открыть</button>
               </div>
               <span className="small">{c.found
-                ? `Объезд по ${c.ways.length} рёбрам, +${fmt(Math.max(0, c.detour_s), 0)} с, перешло ${fmt(c.moved ?? c.volume)} авт/ч`
+                ? `Объезд по ${c.ways.length} рёбрам, +${fmt(Math.max(0, c.detour_s), 0)} с, перешло ${fmt(c.moved ?? c.volume)} авт./ч`
                   + (c.partial ? '; в обратном направлении объезда нет' : '')
                 : 'Объезда нет в пределах карты — поток не может проехать'}</span>
             </div>
@@ -198,6 +205,7 @@ export function HistoryList({ details, labels, onShow }: {
             {h.refs.slice(0, 3).map((r) => `${r.kind === 'way' ? 'ребро' : r.kind === 'node' ? 'узел' : 'отношение'} ${r.name || r.id} ${STATUS_RU[r.status]}`).join('; ')}
             {h.count > 3 ? ` и ещё ${h.count - 3}` : ''}
           </span>
+          {h.reason && <span className="hist-reason small"><b>Почему</b> {h.reason}</span>}
         </button>
       ))}
     </>
@@ -393,7 +401,7 @@ export function BasemapControls({ base, onBase, overlay, onOverlayFile, onOverla
         <div className="card stack6">
           <div className="row between"><b className="ellipsis">{overlay.name}</b>
             <button className="icon-btn" aria-label="Убрать снимок" onClick={() => onOverlay(null)}>×</button></div>
-          <label className="small muted stack4">Прозрачность снимка {Math.round(overlay.opacity * 100)}%
+          <label className="small muted stack4">Прозрачность снимка {Math.round(overlay.opacity * 100)} %
             <input type="range" min={0.1} max={1} step={0.05} value={overlay.opacity}
               onChange={(e) => onOverlay({ ...overlay, opacity: Number(e.target.value) })} />
           </label>
