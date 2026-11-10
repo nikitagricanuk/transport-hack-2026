@@ -395,3 +395,10 @@ input[type="checkbox"]:disabled { cursor: default; }
 .splitter:hover, .splitter:focus-visible, .splitter:active { background: var(--accent); outline: none; }
 .fix-review-note { padding: 8px; border-radius: 8px; background: #102033; border: 1px solid #1e3a5f; color: #bfdbfe; }
 .fix-review-note p { margin: 0; }
+.panel-close { align-self: flex-end; float: right; flex-shrink: 0; }
+.rail .panel-close { padding: 3px; }
+.inspector.analytics .inspector.analytics { width: 100%; border: 0; }
+.cmp th,.od th { position: relative; }
+.column-resize { position:absolute;right:0;top:0;width:7px;height:100%;cursor:col-resize;touch-action:none; }
+.expanded-issues .ellipsis,.expanded-issues .issue-text,.expanded-issues .issue-desc,.expanded-issues .issue-title { white-space:normal;overflow:visible;text-overflow:clip; }
+.analysis-legend { position:absolute;left:12px;bottom:30px;background:var(--panel);padding:8px;border-radius:6px;max-width:70%;font-size:12px;pointer-events:none; }

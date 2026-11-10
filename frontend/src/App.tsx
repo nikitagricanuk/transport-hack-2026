@@ -1,3 +1,9 @@
+import EditorMenus from './components/EditorMenus';
+import { PanelToggle, PanelClose } from './components/PanelClose';
+import SelectionEditor, { type Segment } from './components/SelectionEditor';
+import { toggleSelection } from './utils/selection';
+import type { FeatureCollection } from 'geojson';
+import AnalysisTools from './components/AnalysisTools';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { USER_NAME, api, downloadFile, type OpResponse } from './api';
 import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
@@ -31,6 +37,10 @@ const NO_ISSUES: Issue[] = [];
 
 export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
+  const [analysisOverlay, setAnalysisOverlay] = useState<FeatureCollection>({type:'FeatureCollection',features:[]});
+  const [pointPicker, setPointPicker] = useState<((p: {lat:number;lon:number;node_id?:number}) => void) | null>(null);
+  const [multi, setMulti] = useState<NonNullable<Selection>[]>([]);
+  const [segment, setSegment] = useState<Segment | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -67,6 +77,7 @@ export default function App() {
   const [threeD, setThreeD] = useState(false);
   const [highlight, setHighlight] = useState<{ kind: string; id: number }[]>([]);
   // a suggested fix under review: drawn on the map, applied only on the user's click
+  const mapHighlight = useMemo(() => [...highlight,...multi], [highlight,multi]);
   const [fixReview, setFixReview] = useState<FixReviewState | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
   const [followId, setFollowId] = useState<string | null>(null);
@@ -295,15 +306,34 @@ export default function App() {
     const id = docIdRef.current;
     if (id) api.load(id).then(setLoad).catch(() => undefined);
   }, []);
-  const onMultiplier = useCallback((m: number) => { if (docId) loadAction(api.setLoad(docId, { multiplier: m })); }, [docId, loadAction]);
+  const loadTimer=useRef<ReturnType<typeof setTimeout>>();
+  useEffect(()=>()=>clearTimeout(loadTimer.current),[docId]);
+  const onMultiplier = useCallback((m: number) => { clearTimeout(loadTimer.current);loadTimer.current=setTimeout(()=>{if(docId)loadAction(api.setLoad(docId,{multiplier:m}));},150); }, [docId, loadAction]);
   const onSnapshot = useCallback((name: string) => { if (docId) loadAction(api.addSnapshot(docId, name)); }, [docId, loadAction]);
   const onDeleteSnapshot = useCallback((sid: string) => { if (docId) loadAction(api.deleteSnapshot(docId, sid)); }, [docId, loadAction]);
   const onResetLoad = useCallback(() => {
     if (docId) loadAction(api.setLoad(docId, { reset_all: true }));
     setComparison(null);
   }, [docId, loadAction]);
+  const volumeTimers=useRef(new Map<number,ReturnType<typeof setTimeout>>());
+  useEffect(()=>()=>{for(const timer of volumeTimers.current.values())clearTimeout(timer);volumeTimers.current.clear();},[docId]);
   const onSetLoad = useCallback((wayId: number, volume: number | null) => {
-    if (docId) loadAction(api.setLoad(docId, { way_id: wayId, volume }));
+    if(!docId)return;
+    if(volume!==null)setLoad(prev=>{
+      if(!prev)return prev;
+      const cfg=prev.settings??{};
+      const demand=({morning:1,day:.65,evening:1.1,night:.15} as Record<string,number>)[cfg.time_of_day??'morning'];
+      const pcu=1+(cfg.truck_share??0)+1.5*(cfg.bus_share??0);
+      return {...prev,rows:prev.rows.map(row=>{
+        if(row.id!==wayId || row.closed)return row;
+        const effective=Math.round(volume*prev.multiplier+(row.transit_pcu??0))*demand*pcu;
+        const vc=row.capacity?effective/row.capacity:0;
+        const los = vc<.2?'A':vc<.45?'B':vc<.7?'C':vc<.9?'D':vc<=1?'E':'F';
+        return {...row,volume:effective,base_volume:volume,custom:true,vc,los,t_s:row.t0_s*(1+.15*vc**4)};
+      })};
+    });
+    clearTimeout(volumeTimers.current.get(wayId));
+    volumeTimers.current.set(wayId,setTimeout(()=>{volumeTimers.current.delete(wayId);loadAction(api.setLoad(docId,{way_id:wayId,volume}));},150));
   }, [docId, loadAction]);
   const onCompare = useCallback(async (a: string, b: string) => {
     if (!docId) return;
@@ -504,7 +534,7 @@ export default function App() {
       let res: OpResponse;
       const list = Array.isArray(ops) ? ops : [ops];
       if (list.length === 1) res = await api.op(docId, list[0], opts?.label, opts?.reason);
-      else res = await api.batch(docId, list, opts?.label);
+      else res = await api.batch(docId, list, opts?.label, opts?.reason);
       ingest(res);
       const warnings = [
         ...(res.result?.warnings ?? []),
@@ -529,10 +559,10 @@ export default function App() {
   // stable callbacks so memoized panels and the map skip unrelated re-renders
   const onMapOp = useCallback((op: Op | Op[], o?: { select?: 'result' | 'keep'; label?: string }) =>
     runOps(op, { select: o?.select, label: o?.label }), [runOps]);
-  const onFix = useCallback((i: Issue, fix: Fix) => {
+  const onFix = useCallback((i: Issue, fix: Fix, probe?: Record<string, unknown>) => {
     if (!docId) return;
     setFixReview({ issue: i, fix, preview: null, error: null });
-    api.fixPreview(docId, { op: fix.op, args: fix.args })
+    api.fixPreview(docId, { op: fix.op, args: fix.args, probe })
       .then((preview) => {
         // frame what is added or removed (a long road that is only split would zoom too far out),
         // with at least ~80 m around a tiny change
@@ -556,6 +586,7 @@ export default function App() {
     const r = fixReview;
     if (!r) return;
     setFixReview(null);
+    setMode('edit');
     runOps({ op: r.fix.op, args: r.fix.args }, {
       label: r.fix.label + ': ' + r.issue.title,
       reason: r.issue.description,
@@ -623,7 +654,7 @@ export default function App() {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
       if (e.key === 'Escape' && fixReview) { setFixReview(null); return; }
-      if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); return; }
+      if (e.key === 'Escape' && tool !== 'way') { setTool('select'); setSelection(null); setMulti([]); setSegment(null); setPointPicker(null); return; }
       // Delete/Backspace remove the selection, unless a way draft owns the key
       // (then it only drops the latest draft point). That listener is capture
       // on this same window, and stopPropagation() does not suppress another
@@ -747,7 +778,8 @@ export default function App() {
   return (
     <div className="app" style={win.style}>
       {versionNotice}
-      <MenuBar layout={win.layout} onToggle={win.toggle} onReset={win.reset} />
+      <PanelToggle.Provider value={win.toggle}>
+      <MenuBar extra={<EditorMenus onReport={openReport} onDownload={(kind) => { downloadFile(api.reportUrl(doc.doc_id, kind), `report.${kind}`).catch((e:Error) => setError(e.message)); }} />} layout={win.layout} onToggle={win.toggle} onReset={win.reset} />
       <header className="top">
         <div className="brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -811,7 +843,7 @@ export default function App() {
           <input value={team} onChange={(e) => setTeam(e.target.value.replace(/[^\w\-]/g, ''))} aria-label="Название команды" />
           <span className="muted mono">.osm</span>
         </label>
-        <button className="btn" onClick={openReport} title="Отчёт с графиками, выгрузка в Word и Excel">Отчёт</button>
+
         <button className="btn primary" onClick={() => { setExportCheck(true); scheduleValidate(doc.doc_id); }}>Экспорт .osm</button>
       </header>
 
@@ -831,10 +863,14 @@ export default function App() {
           <div className="map-wrap">
             <MapView ref={mapRef} geo={doc.geo} diff={mapDiff} selection={selection} tool={tool} layers={layers}
               drawOrder={drawOrder} route={routeOverlay} base={base} overlay={overlay} onOverlay={setOverlay}
-              threeD={threeD} highlight={highlight} onView={onView} fixPreview={fixReview?.preview ?? null}
-              baseOpacity={baseOpacity} issues={mapIssues} onSelect={setSelection} loadVc={loadVc}
+              analysis={analysisOverlay} pickPoint={pointPicker ? (p) => { pointPicker(p); setPointPicker(null); } : null}
+              multiSelection={multi} onToggleSelection={(s) => setMulti((m) => toggleSelection(m.length ? m : selection ? [selection] : [], s))}
+              onBoxSelection={setMulti} onSegment={setSegment}
+              threeD={threeD} highlight={mapHighlight} onView={onView} fixPreview={fixReview?.preview ?? null}
+              baseOpacity={baseOpacity} issues={mapIssues} onSelect={(s) => { setSelection(s); setMulti([]); setSegment(null); }} loadVc={loadVc}
               changes={bottomTab === 'changes' && changesOverlay ? changesData : null}
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
+            {analysisOverlay.features.some(f=>f.properties?.kind==='pt') && <div className="analysis-legend">Интервалы без OSM interval — условные (mock); скорость ОТ и ожидание — допущения</div>}
             <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>
             {fixReview && (
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
@@ -870,9 +906,19 @@ export default function App() {
           <Splitter panel="right" value={win.layout.size.right} onResize={(v) => win.resize('right', v)}
             label="Ширина панели свойств" />
         )}
-        {!win.layout.visible.right ? null : mode === 'analytics' && !selection ? (
+        {!win.layout.visible.right ? null : mode === 'analytics' ? (
+          <aside className="inspector analytics" style={{overflow:'auto'}}>
+          <PanelClose panel="right" />
+          <AnalysisTools docId={doc.doc_id} rev={doc.rev} geo={doc.geo} selection={selection}
+            pickPoint={(cb) => setPointPicker(() => cb)} onPick={() => setHint('Выберите точку на карте')}
+            onOverlay={setAnalysisOverlay} onFix={onFix} onShowRoad={onShowRoad} />
           <AnalyticsPanel docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
-            onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
+            onFix={onFix} onScenarioChanged={refreshLoad} onDetour={async (id,index) => {
+              try {const next=await api.setClosure(doc.doc_id,id,true,index);setLoad(next);const options=next.closures?.find(c=>c.id===id)?.alternatives ?? [];setAnalysisOverlay({type:'FeatureCollection',features:options.flatMap((a,i)=>a.lines.map(coordinates=>({type:'Feature' as const,geometry:{type:'LineString' as const,coordinates},properties:{before:i!==index}})))});} catch(e){setError((e as Error).message);}
+            }} onReopen={(id) => onClosure(id, false)} onOpenTasks={() => setTasksOpen(true)} />
+          </aside>
+        ) : multi.length > 1 || segment ? (
+          <SelectionEditor multi={multi} segment={segment} geo={doc.geo} onOp={onInspectorOp} onFix={onFix} onClear={() => {setMulti([]);setSegment(null);}} />
         ) : (
         <Inspector way={selectedWay} node={selectedNode} geometry={selectedGeometry} loadRow={loadRow} nodeOnRoad={nodeOnRoad}
           canSeparate={canSeparate} sharedJunctions={sharedJunctions}
@@ -880,7 +926,7 @@ export default function App() {
           onOpenRoute={setOpenRoute} onScenarioChanged={refreshLoad}
           closed={selection?.kind === 'way' && (load?.closures ?? []).some((c) => c.id === selection.id)}
           onClosure={onClosure} onObjectReport={objectReport} onAutofill={autofillBuildings}
-          readOnly={mode === 'analytics'} />
+          readOnly={false} />
         )}
       </div>
       {tasksOpen && <TasksModal docId={doc.doc_id} selection={selection} onClose={() => setTasksOpen(false)} />}
@@ -929,6 +975,7 @@ export default function App() {
           </div>
         </div>
       )}
+      </PanelToggle.Provider>
     </div>
   );
 }

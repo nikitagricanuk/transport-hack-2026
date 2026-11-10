@@ -1,3 +1,4 @@
+import ResizableTable from './ResizableTable';
 import { levelOfService } from '../utils/los';
 import { memo, useState } from 'react';
 import type { ChangesResult, Comparison, LoadRow, LoadState, Los, ReportData, ValidationResult } from '../types';
@@ -170,7 +171,7 @@ function ComparisonView({ c, onShowRoad }: { c: Comparison; onShowRoad: (id: num
   return (
     <section className="load-col wide">
       <b>«{c.a.name}» → «{c.b.name}»</b>
-      <table className="cmp">
+      <ResizableTable id="analysis-1" className="cmp">
         <thead><tr><th>Показатель</th><th>Было</th><th>Стало</th><th>Δ</th></tr></thead>
         <tbody>
           {Object.entries(TOTALS_RU).map(([k, [label, digits, lower]]) => c.totals[k] && (
@@ -182,7 +183,7 @@ function ComparisonView({ c, onShowRoad }: { c: Comparison; onShowRoad: (id: num
             </tr>
           ))}
         </tbody>
-      </table>
+      </ResizableTable>
       <span className="small muted">Изменённые рёбра: {c.changed.length}. Загрузка v/c было → стало:</span>
       <Bars max={Math.max(1.2, ...c.changed.slice(0, 8).map((x) => Math.max(x.vc_before ?? 0, x.vc_after ?? 0)))}
         items={c.changed.slice(0, 8).map((x) => ({
@@ -252,7 +253,7 @@ export const ChangesPanel = memo(function ChangesPanel({ data, onShow, overlay, 
           <b>Исходный файл → сейчас</b>
           <label className="row gap8 small"><input type="checkbox" checked={overlay} onChange={(e) => onOverlay(e.target.checked)} />показать на карте</label>
         </div>
-        <table className="cmp">
+        <ResizableTable id="analysis-2" className="cmp">
           <thead><tr><th /><th>Было</th><th>Стало</th><th>Δ</th></tr></thead>
           <tbody>
             {rows.map(([label, b, a]) => (
@@ -260,7 +261,7 @@ export const ChangesPanel = memo(function ChangesPanel({ data, onShow, overlay, 
                 <td className="mono"><Delta before={b} after={a} digits={0} lowerBetter /></td></tr>
             ))}
           </tbody>
-        </table>
+        </ResizableTable>
         <div className="row gap8 small">
           {(['matsim', 'sumo', 'webots'] as const).map((l) => (
             <span key={l} className={`level ${data.after.levels[l]}`}>

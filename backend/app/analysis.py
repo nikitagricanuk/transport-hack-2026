@@ -311,3 +311,72 @@ def _coords(doc: OsmDocument, w: Way, original: bool) -> list[list[float]]:
         if n is not None:
             pts.append([n.lon, n.lat])  # type: ignore[union-attr]
     return pts
+
+
+def scenario_rows(rows, doc, settings):
+    """Explicit scenario assumptions. PCU coefficients are not claimed as norms."""
+    from .norms import road_category
+    demand = {'morning':1, 'day':.65, 'evening':1.1, 'night':.15}[settings.get('time_of_day','morning')]
+    weather = {'dry':1, 'rain':.85, 'snow':.65}[settings.get('weather','dry')]
+    truck = settings.get('truck_share', 0)
+    bus = settings.get('bus_share', 0)
+    pcu = 1 - truck - bus + 2 * truck + 2.5 * bus
+    for r in rows:
+        r['category'] = road_category(doc.ways[r['id']].tags)
+        r['capacity'] *= weather
+        r['volume'] *= demand * pcu
+        r['vc'] = r['volume'] / r['capacity'] if r['capacity'] else 0
+        r['los'] = los(r['vc'])
+        r['t_s'] = r['t0_s'] * (1 + .15 * r['vc'] ** 4)
+    return rows
+
+
+def segment_chains(doc):
+    """Aggregate physical edges into maximal chains between non-degree-2 nodes.
+
+    z is the maximum along a chain; this keeps the limiting capacity visible.
+    Parallel ways remain separate edges.
+    """
+    import networkx as nx
+    g = nx.MultiGraph()
+    proj = projection(doc)
+    for w in doc.ways.values():
+        if not is_drivable(w.tags):
+            continue
+        for i,(a,b) in enumerate(zip(w.nodes,w.nodes[1:])):
+            if a in doc.nodes and b in doc.nodes and a != b:
+                na,nb = doc.nodes[a],doc.nodes[b]
+                length = math.dist(proj.to_xy(na.lat,na.lon),proj.to_xy(nb.lat,nb.lon))
+                g.add_edge(a,b,key=(w.id,i),way=w.id,length=length)
+    visited, out = set(), []
+    for start in sorted(g.nodes, key=lambda n: g.degree(n) == 2):
+        for _,n,key,e in list(g.edges(start,keys=True,data=True)):
+            if key in visited:
+                continue
+            ways, length, end, edge = set(), 0, n, e
+            while True:
+                visited.add(key)
+                ways.add(edge['way'])
+                length += edge['length']
+                if g.degree(end) != 2:
+                    break
+                candidates = [(v,k,d) for _,v,k,d in g.edges(end,keys=True,data=True) if k not in visited]
+                if not candidates:
+                    break
+                end,key,edge = candidates[0]
+            out.append(dict(id=len(out),from_node=start,to_node=end,ways=sorted(ways),length_m=length))
+    return out
+
+
+def load_segments(doc, rows, chains=None):
+    by_id = {r['id']:r for r in rows}
+    result = []
+    for chain in segment_chains(doc) if chains is None else chains:
+        members = [by_id[w] for w in chain['ways'] if w in by_id]
+        if not members:
+            continue
+        limiting = max(members,key=lambda r:r['vc'])
+        result.append({**chain,'vc':limiting['vc'],'los':limiting['los'],
+                       'category':limiting['category'],
+                       'name':' / '.join(dict.fromkeys(r['name'] for r in members if r['name']))})
+    return result
