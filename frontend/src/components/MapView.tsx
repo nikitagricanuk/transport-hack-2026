@@ -2,7 +2,7 @@ import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } fr
 import maplibregl, { type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
-import type { ChangesResult, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
+import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, Tool, WayProps } from '../types';
 import type { BaseMap, ImageOverlay } from './Extras';
 import { LANE_MINZOOM, buildLanes, laneSplit, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
@@ -47,6 +47,8 @@ interface Props {
   overlay: ImageOverlay | null;
   onOverlay: (o: ImageOverlay | null) => void;
   threeD: boolean;
+  /** dry run of a fix under review: added (green), deleted (red, dashed), changed (blue) */
+  fixPreview: FixPreview | null;
   /** elements to flash, e.g. those touched by a history entry */
   highlight: { kind: string; id: number }[];
   /** camera after each move, sent to collaborators who follow this editor */
@@ -290,7 +292,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
       for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
-        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl']) {
+        'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
 
@@ -409,6 +411,17 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': '#F59E0B', 'line-width': 9, 'line-opacity': 0.55 } });
       map.addLayer({ id: 'hist-hl-pt', type: 'circle', source: 'hist-hl', filter: ['==', ['geometry-type'], 'Point'],
         paint: { 'circle-radius': 10, 'circle-color': 'rgba(245,158,11,0.35)', 'circle-stroke-color': '#F59E0B', 'circle-stroke-width': 2 } });
+      const FIX_COLOUR = ['match', ['get', 'status'], 'added', '#22C55E', 'deleted', '#EF4444', '#3B82F6'];
+      // line-dasharray cannot depend on data, so deletions get their own dashed layer
+      map.addLayer({ id: 'fix-preview-line', type: 'line', source: 'fix-preview',
+        filter: ['all', ['==', ['geometry-type'], 'LineString'], ['!=', ['get', 'status'], 'deleted']],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': FIX_COLOUR as never, 'line-width': 7, 'line-opacity': 0.85 } });
+      map.addLayer({ id: 'fix-preview-del', type: 'line', source: 'fix-preview',
+        filter: ['all', ['==', ['geometry-type'], 'LineString'], ['==', ['get', 'status'], 'deleted']],
+        paint: { 'line-color': '#EF4444', 'line-width': 7, 'line-opacity': 0.9, 'line-dasharray': [1.2, 1] } });
+      map.addLayer({ id: 'fix-preview-pt', type: 'circle', source: 'fix-preview', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 7, 'circle-color': FIX_COLOUR as never, 'circle-stroke-color': '#0B1220', 'circle-stroke-width': 2 } });
       map.addLayer({ id: 'route-lines', type: 'line', source: 'route-lines',
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['get', 'colour'], 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 4, 18, 9], 'line-opacity': 0.75 } });
@@ -564,6 +577,18 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     }
     (map.getSource('hist-hl') as GeoJSONSource).setData({ type: 'FeatureCollection', features: feats });
   }, [ready, props.highlight, props.geo]);
+
+  // fix under review
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    (map.getSource('fix-preview') as GeoJSONSource).setData(
+      props.fixPreview ? { type: 'FeatureCollection', features: props.fixPreview.features } : EMPTY);
+    // above roads and selection, which the draw-order effect keeps moving up
+    if (props.fixPreview) {
+      for (const id of ['fix-preview-del', 'fix-preview-line', 'fix-preview-pt']) if (map.getLayer(id)) map.moveLayer(id);
+    }
+  }, [ready, props.fixPreview]);
 
   // camera for followers
   useEffect(() => {

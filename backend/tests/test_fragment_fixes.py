@@ -4,12 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from app.edits import History, apply_op
+from app.edits import History, OpError, apply_op
 from app.osm_model import OsmDocument
-from app.scenario import builtin_tasks, check_task
 from app.validation import validate
 
-FIXED = Path(__file__).resolve().parents[2] / "data" / "irkutsk_fragment_fixed.osm"
+EXAMPLE = Path(__file__).resolve().parents[2] / "data" / "example.osm"
 
 
 def _osm(nodes: dict[int, tuple[float, float]], ways: list[tuple[int, list[int], dict[str, str]]]) -> OsmDocument:
@@ -122,26 +121,106 @@ def test_spur_joined_at_its_other_end_is_not_a_gap():
     assert not [i for i in validate(doc)["issues"] if i["title"] == "Разорванный перекрёсток"]
 
 
-@pytest.mark.skipif(not FIXED.exists(), reason="fixed fragment not built")
-def test_fixed_fragment_is_simulation_ready():
-    doc = OsmDocument.parse(FIXED.read_bytes())
-    v = validate(doc)
-    assert v["summary"]["counts"]["critical"] == 0
-    assert v["summary"]["components"] == 1
-    assert v["summary"]["levels"]["matsim"] == "ok" and v["summary"]["levels"]["sumo"] == "ok"
-    task = next(t for t in builtin_tasks(doc) if t["id"] == "fix-graph")
-    assert check_task(doc, task, v, [])["done"]
-
-
-@pytest.mark.skipif(not FIXED.exists(), reason="fixed fragment not bundled")
-def test_kurchatova_closure_has_a_real_detour():
-    """Demo case: closing ул. Академика Курчатова reroutes its whole volume."""
+def _open_example_via_api():
     from fastapi.testclient import TestClient
 
     from app.main import app
 
     c = TestClient(app)
-    doc_id = c.post("/api/documents", files={"file": ("f.osm", FIXED.read_bytes(), "application/xml")}).json()["doc_id"]
+    doc_id = c.post("/api/documents", files={"file": ("example.osm", EXAMPLE.read_bytes(), "application/xml")}).json()["doc_id"]
+    return c, doc_id
+
+
+@pytest.mark.skipif(not EXAMPLE.exists(), reason="example.osm not present")
+def test_opening_the_raw_fragment_changes_nothing_and_offers_fixes():
+    """Fixes are offered, never applied on load: the user reviews and clicks each one."""
+    c, doc_id = _open_example_via_api()
+    v = c.get(f"/api/documents/{doc_id}/validate").json()
+    assert v["summary"]["counts"]["critical"] > 0  # the task fragment is broken on purpose
+    for issue in v["issues"]:
+        if issue["severity"] != "info":
+            assert issue.get("fixes"), issue["title"]
+    exported = c.get(f"/api/documents/{doc_id}/export", params={"renumber": False}).content
+    assert OsmDocument.parse(exported).stats() == OsmDocument.parse(EXAMPLE.read_bytes()).stats()
+
+
+@pytest.mark.skipif(not EXAMPLE.exists(), reason="example.osm not present")
+def test_offered_fixes_can_make_the_fragment_simulation_ready():
+    """Test helper only: apply one offered fix per issue, reconnecting before deleting.
+
+    In the product every one of these steps is a user's choice; this only proves
+    that the offered options are enough to reach a simulation-ready graph.
+    """
+    doc = OsmDocument.parse(EXAMPLE.read_bytes())
+    h = History()
+    tried: set[tuple] = set()
+
+    def key(i):  # issue ids are positional, so identify an issue by what it points at
+        return i["title"], tuple(sorted((r["kind"], r["id"]) for r in i["refs"]))
+
+    for _ in range(60):
+        todo = [i for i in validate(doc)["issues"]
+                if i["severity"] == "critical" and i.get("fixes") and key(i) not in tried]
+        if not todo:
+            break
+        issue = todo[0]
+        tried.add(key(issue))
+        for fix in sorted(issue["fixes"], key=lambda f: f["op"] in ("delete", "delete_ways")):
+            try:
+                apply_op(doc, h, fix["op"], fix["args"])
+                break
+            except OpError:
+                continue
+    v = validate(doc)
+    assert v["summary"]["counts"]["critical"] == 0
+    assert "fail" not in v["summary"]["levels"].values()
+
+
+@pytest.mark.skipif(not EXAMPLE.exists(), reason="example.osm not present")
+def test_kurchatova_closure_has_a_real_detour():
+    """Demo case: closing ул. Академика Курчатова reroutes its whole volume."""
+    c, doc_id = _open_example_via_api()
     closure = c.post(f"/api/documents/{doc_id}/scenario/closures",
                      json={"way_id": 80347185, "closed": True}).json()["closures"][0]
     assert closure["found"] and not closure["partial"] and closure["moved"] > 0 and len(closure["ways"]) >= 3
+
+
+@pytest.mark.skipif(not EXAMPLE.exists(), reason="example.osm not present")
+def test_fix_preview_shows_the_change_and_leaves_the_document_alone():
+    c, doc_id = _open_example_via_api()
+    before = c.get(f"/api/documents/{doc_id}/export", params={"renumber": False}).content
+    issues = [i for i in c.get(f"/api/documents/{doc_id}/validate").json()["issues"] if i["severity"] == "critical"]
+    seen_delete = seen_add = False
+    for issue in issues:
+        for fix in issue["fixes"]:
+            r = c.post(f"/api/documents/{doc_id}/fix-preview", json={"op": fix["op"], "args": fix["args"]})
+            if r.status_code == 422:
+                continue
+            p = r.json()
+            assert p["features"], fix["label"]
+            if fix["op"] in ("delete", "delete_ways"):
+                seen_delete = True
+                assert p["removed_road_m"] > 0 and p["counts"]["deleted"] > 0
+            if fix["op"] == "add_way":
+                seen_add = True
+                assert p["added_road_m"] > 0 and any(f["properties"]["status"] == "added" for f in p["features"])
+    assert seen_delete and seen_add
+    assert c.get(f"/api/documents/{doc_id}/export", params={"renumber": False}).content == before
+    assert c.get(f"/api/documents/{doc_id}").json()["history"]["can_undo"] is False
+    # a real apply afterwards gets the same new id it would have without previews
+    fix = next(f for i in issues for f in i["fixes"] if f["op"] == "add_way")
+    res = c.post(f"/api/documents/{doc_id}/ops", json={"op": fix["op"], "args": fix["args"]}).json()
+    fresh = apply_op(OsmDocument.parse(EXAMPLE.read_bytes()), History(), fix["op"], fix["args"])
+    assert res["result"]["id"] == fresh["id"]
+
+
+@pytest.mark.skipif(not EXAMPLE.exists(), reason="example.osm not present")
+def test_edit_log_lists_each_applied_fix_with_author_and_time():
+    c, doc_id = _open_example_via_api()
+    issue = next(i for i in c.get(f"/api/documents/{doc_id}/validate").json()["issues"]
+                 if any(f["op"] == "add_way" for f in i["fixes"]))
+    fix = next(f for f in issue["fixes"] if f["op"] == "add_way")
+    c.post(f"/api/documents/{doc_id}/ops", json={"op": fix["op"], "args": fix["args"], "label": fix["label"]},
+           headers={"X-User-Name": "Reviewer"})
+    log = c.get(f"/api/documents/{doc_id}/edit-log").text
+    assert "Правок: 1." in log and "| 1 |" in log and "Reviewer" in log and fix["label"].split(" (")[0] in log

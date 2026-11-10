@@ -32,8 +32,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY --chown=app:app backend/app ./app
 COPY --chown=app:app --from=web /web/dist ./static
-# Sample files for the start screen: the task fragment as given and after auto-fix.
-COPY --chown=app:app data/example.osm data/irkutsk_fragment_fixed.osm ./samples/
+# Sample for the start screen: the task fragment exactly as given (fixes are the user's job).
+COPY --chown=app:app data/example.osm ./samples/
 RUN mkdir -p /data && chown app:app /data
 
 USER app
