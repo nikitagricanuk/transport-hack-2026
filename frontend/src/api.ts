@@ -83,7 +83,48 @@ const json = (body: unknown): RequestInit => ({
 });
 
 /** Edits answer with a patch of the touched map features instead of the whole map. */
-export type DocumentSummary = { doc_id: string; filename: string; updated_at: number; peers: { id: string; name: string; color: string }[] };
+export type DocumentSummary = {
+  doc_id: string;
+  filename: string;
+  updated_at: number;
+  peers: { id: string; name: string; color: string }[];
+  shared?: boolean;
+};
+
+const RECENT_KEY = 'uds-recent-documents';
+
+export type RecentDocument = { doc_id: string; filename: string };
+
+/** Private projects stay off the public lobby; this browser keeps its own recent list. */
+export function loadRecentDocuments(): RecentDocument[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((item) => {
+        if (typeof item === 'string') return { doc_id: item, filename: item };
+        if (item && typeof item === 'object' && typeof item.doc_id === 'string') {
+          return { doc_id: item.doc_id, filename: typeof item.filename === 'string' ? item.filename : item.doc_id };
+        }
+        return null;
+      })
+      .filter((item): item is RecentDocument => !!item);
+  } catch {
+    return [];
+  }
+}
+
+export function rememberRecentDocument(doc: { doc_id: string; filename: string }) {
+  try {
+    const next = [
+      { doc_id: doc.doc_id, filename: doc.filename },
+      ...loadRecentDocuments().filter((item) => item.doc_id !== doc.doc_id),
+    ].slice(0, 30);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {
+    /* private mode / quota */
+  }
+}
 
 export type OpResponse = Omit<DocState, 'geo'> & {
   geo?: Geo;

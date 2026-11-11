@@ -511,11 +511,39 @@ class DocumentName(BaseModel):
     name: str = Field(min_length=1, max_length=160)
 
 
+def _shared_sample_id(name: str) -> str:
+    """Stable id so every participant joins the same preloaded room."""
+    return "sample-" + uuid.uuid5(uuid.NAMESPACE_URL, name).hex[:24]
+
+
+def _is_shared_doc(doc_id: str) -> bool:
+    return doc_id.startswith("sample-")
+
+
+def _document_row(doc_id: str, filename: str, updated_at: float = 0.0) -> dict[str, Any]:
+    return {
+        "doc_id": doc_id,
+        "filename": filename,
+        "updated_at": updated_at,
+        "peers": HUB.peers(doc_id),
+        "shared": _is_shared_doc(doc_id),
+    }
+
+
 @app.get("/api/documents")
 def list_documents() -> Response:
-    """Shared workspace index; do not parse every map just to list it."""
-    rows = []
+    """Lobby index: only preloaded shared samples. Private uploads stay off the list."""
+    rows: dict[str, dict[str, Any]] = {}
+    for name, path in _sample_files().items():
+        did = _shared_sample_id(name)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        rows[did] = _document_row(did, name, mtime)
     for did in set(_draft_ids()) | set(SESSIONS):
+        if not _is_shared_doc(did):
+            continue
         session = SESSIONS.get(did)
         paths = _draft_paths(did)
         try:
@@ -523,16 +551,17 @@ def list_documents() -> Response:
             if not session and meta.get("doc_id") != did:
                 continue
             files = [p for p in (*paths, _journal_path(did), _analysis_path(did)) if p and p.is_file()] if paths else []
-            rows.append({"doc_id": did, "filename": session.filename if session else meta.get("filename", "draft.osm"),
-                         "updated_at": max((p.stat().st_mtime for p in files), default=0),
-                         "peers": HUB.peers(did)})
+            filename = session.filename if session else str(meta.get("filename") or rows.get(did, {}).get("filename", "draft.osm"))
+            updated = max((p.stat().st_mtime for p in files), default=rows.get(did, {}).get("updated_at", 0.0))
+            rows[did] = _document_row(did, filename, float(updated))
         except (OSError, ValueError, TypeError, AttributeError):
             continue
-    return _json(sorted(rows, key=lambda row: row["updated_at"], reverse=True))
+    return _json(sorted(rows.values(), key=lambda row: row["updated_at"], reverse=True))
 
 
 @app.post("/api/documents/new")
 def new_document(req: DocumentName) -> Response:
+    """Blank private project — reachable by link, not shown in the public lobby."""
     if not req.name.strip():
         raise HTTPException(400, "Введите название документа")
     return _json(_open(b'<osm version="0.6" generator="UDS Editor"/>', _safe_filename(req.name.strip())))
@@ -564,20 +593,38 @@ def rename_document(doc_id: str, req: DocumentName) -> Response:
 _SAMPLE_OPEN_LOCK = threading.Lock()
 
 
+def _ensure_shared_sample(doc_id: str) -> Session | None:
+    """Create the stable shared room on first join, matched by sample id."""
+    if not _is_shared_doc(doc_id):
+        return None
+    with _SAMPLE_OPEN_LOCK:
+        existing = SESSIONS.get(doc_id)
+        if existing is not None:
+            return existing
+        if _draft_exists(doc_id):
+            return _materialize_draft(doc_id)
+        for name, path in _sample_files().items():
+            if _shared_sample_id(name) != doc_id:
+                continue
+            raw = path.read_bytes()
+            doc = OsmDocument.parse(raw)
+            session = Session(id=doc_id, filename=name, doc=doc, signal_timing=signal_plans.timing_from_tags(doc))
+            SESSIONS[doc_id] = session
+            _start_draft(session, raw)
+            return session
+    return None
+
+
 @app.post("/api/workspace/samples/{name}/open")
 def open_shared_sample(name: str) -> Response:
     path = _sample_files().get(name)
     if path is None:
         raise HTTPException(404, "Файл не найден")
-    did = "sample-" + uuid.uuid5(uuid.NAMESPACE_URL, name).hex[:24]
-    with _SAMPLE_OPEN_LOCK:
-        if did in SESSIONS or _draft_exists(did):
-            return get_document(did)
-        raw = path.read_bytes()
-        doc = OsmDocument.parse(raw)
-        session = Session(id=did, filename=name, doc=doc, signal_timing=signal_plans.timing_from_tags(doc))
-        SESSIONS[did] = session
-        _start_draft(session, raw)
+    did = _shared_sample_id(name)
+    session = _ensure_shared_sample(did)
+    if session is None:
+        raise HTTPException(404, "Файл не найден")
+    with session.lock:
         return _json(_state(session))
 
 
@@ -586,6 +633,8 @@ def get_document(doc_id: str) -> Response:
     s = SESSIONS.get(doc_id)
     if s is None and _draft_exists(doc_id):
         s = _materialize_draft(doc_id)
+    if s is None:
+        s = _ensure_shared_sample(doc_id)
     if s is None:
         raise HTTPException(404, "документ не найден — загрузите .osm заново")
     with s.lock:
