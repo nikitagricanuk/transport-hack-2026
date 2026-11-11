@@ -358,7 +358,7 @@ export default function App() {
       if(!prev)return prev;
       const cfg=prev.settings??{};
       const demand=({morning:1,day:.65,evening:1.1,night:.15} as Record<string,number>)[cfg.time_of_day??'morning'];
-      const pcu=1+(cfg.truck_share??0)+1.5*(cfg.bus_share??0);
+      const pcu=prev.pcu_factor ?? 1+(cfg.truck_share??0)+1.5*(cfg.bus_share??0);
       return {...prev,rows:prev.rows.map(row=>{
         if(row.id!==wayId || row.closed)return row;
         const effective=Math.round(volume*prev.multiplier+(row.transit_pcu??0))*demand*pcu;
@@ -393,6 +393,8 @@ export default function App() {
     }
   }, []);
   const onShowRoad = useCallback((id: number) => showElement('way', id), [showElement]);
+  const onShowNode = useCallback((id: number) => showElement('node', id), [showElement]);
+  const onFlyTo = useCallback((lon: number, lat: number) => mapRef.current?.flyTo(lon, lat, 17), []);
 
   const openReport = async () => {
     if (!doc) return;
@@ -1014,7 +1016,7 @@ export default function App() {
             label="Ширина панели свойств" />
         )}
         <AnalyticsPanel key={doc.doc_id} active={win.layout.visible.right && mode === 'analytics' && !selection}
-          analysis={{docId:doc.doc_id,rev:doc.rev,picked:analysisPicked,onPick:setAnalysisPick,onOverlay:setAnalysisOverlay,onFix,onShowRoad}}
+          analysis={{docId:doc.doc_id,rev:doc.rev,picked:analysisPicked,onPick:setAnalysisPick,onOverlay:setAnalysisOverlay,onFix,onShowRoad,onShowNode,onFlyTo}}
           docId={doc.doc_id} rev={doc.rev} load={load} onMultiplier={onMultiplier} onShowRoad={onShowRoad}
           onFix={onFix} onScenarioChanged={refreshLoad} onDetour={async (id,index) => {
               try {const next=await loadMutations.current.run(()=>api.setClosure(doc.doc_id,id,true,index));if(docIdRef.current!==doc.doc_id)return;setLoad(next);const options=next.closures?.find(c=>c.id===id)?.alternatives ?? [];setAnalysisOverlay({type:'FeatureCollection',features:options.flatMap((a,i)=>a.lines.map(coordinates=>({type:'Feature' as const,geometry:{type:'LineString' as const,coordinates},properties:{before:i!==index}})))});} catch(e){setError((e as Error).message);}

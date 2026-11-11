@@ -1,6 +1,6 @@
 import type { PtResult, PtRoute } from './components/PtTools';
 import type { AnalysisResult } from './utils/networkAnalysis';
-import type {
+import type { StopsAnalysis, VehicleMixInput,
   ChangesResult, Comparison, DocState, FixPreview, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
   SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
   SimulationRecording, ValidationResult,
@@ -187,9 +187,12 @@ export const api = {
   discardDraft: (docId: string) =>
     request<{ ok: boolean }>(`/api/draft?doc_id=${encodeURIComponent(docId)}`, { method: 'DELETE' }),
   load: (docId: string) => request<LoadState>(`/api/documents/${docId}/load`),
+  /** stop coverage of housing, gaps, districts, stop load and advice */
+  stopsAnalysis: (docId: string, p: { radius_m: number; trips_per_resident: number; peak_share: number }) =>
+    request<StopsAnalysis>(`/api/documents/${docId}/analysis/stops?radius_m=${p.radius_m}&trips_per_resident=${p.trips_per_resident}&peak_share=${p.peak_share}`),
   /** every step of one road's load calculation: formula, substitution, result */
   explainLoad: (docId: string, wayId: number) => request<unknown>(`/api/documents/${docId}/load/${wayId}/explain`),
-  setLoad: (docId: string, body: { way_id?: number; volume?: number | null; multiplier?: number; reset_all?: boolean; time_of_day?:string;weather?:string;truck_share?:number;bus_share?:number }) =>
+  setLoad: (docId: string, body: { way_id?: number; volume?: number | null; multiplier?: number; reset_all?: boolean; time_of_day?:string;weather?:string;truck_share?:number;bus_share?:number;vehicle_mix?:VehicleMixInput }) =>
     request<LoadState>(`/api/documents/${docId}/load`, json(body)),
   addSnapshot: (docId: string, name: string) =>
     request<LoadState>(`/api/documents/${docId}/load/snapshots`, json({ name })),

@@ -120,11 +120,18 @@ class BatchRequest(BaseModel):
     label: str | None = None
 
 
+class VehicleShare(BaseModel):
+    share: float = Field(default=0, ge=0, le=1)
+    pcu: float | None = Field(default=None, gt=0, le=6)
+
+
 class LoadRequest(BaseModel):
     time_of_day: Literal['morning','day','evening','night'] | None = None
     weather: Literal['dry','rain','snow'] | None = None
     truck_share: float | None = Field(default=None, ge=0, le=1)
     bus_share: float | None = Field(default=None, ge=0, le=1)
+    # {type: {share 0..1, pcu}}; types from analysis.VEHICLE_TYPES, cars take the remainder
+    vehicle_mix: dict[str, VehicleShare] | None = None
     way_id: int | None = None
     volume: float | None = Field(default=None, ge=0, le=20000)  # veh/h; null resets the way to its default
     multiplier: float | None = Field(default=None, gt=0, le=5)
@@ -856,7 +863,7 @@ def check_organizer(doc_id: str) -> dict[str, Any]:
 # ------------------------------------------------------------ load model
 def _load_state(s: Session) -> dict[str, Any]:
     rows, det = _rows_detours(s)
-    from .analysis import load_segments, segment_chains
+    from .analysis import load_segments, pcu_factor, segment_chains, vehicle_mix
     if not s.chain_cache or s.chain_cache[0] != s.revision:
         s.chain_cache = (s.revision,segment_chains(s.doc))
     if not s.segments_cache or s.segments_cache[0] != s.load_cache[0]:
@@ -864,6 +871,8 @@ def _load_state(s: Session) -> dict[str, Any]:
     names = {r["id"]: r["name"] for r in rows}
     return {
         "settings": s.analysis_settings,
+        "vehicle_mix": vehicle_mix(s.analysis_settings),
+        "pcu_factor": round(pcu_factor(s.analysis_settings), 3),
         "segments": s.segments_cache[1],
         "multiplier": s.multiplier,
         "rows": rows,
@@ -894,7 +903,7 @@ def _explain(s: Session, row: dict[str, Any]) -> dict[str, Any]:
 
     timing = {nid: cfg for nid, cfg in s.signal_timing.items() if nid in s.doc.nodes}
     signal = signal_plans.signal_approaches(s.doc, timing).get(row["id"])
-    return explain(row, s.doc, signal, s.multiplier)
+    return explain(row, s.doc, signal, s.multiplier, s.analysis_settings)
 
 
 @app.get("/api/documents/{doc_id}/load/{way_id}/explain")
@@ -908,12 +917,38 @@ def explain_load(doc_id: str, way_id: int) -> Response:
         return _json(_explain(s, row))
 
 
+def vehicle_mix_settings(cfg: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """The stored mix, or the one implied by the older truck_share/bus_share fields."""
+    if cfg.get('vehicle_mix'):
+        return {k: dict(v) for k, v in cfg['vehicle_mix'].items()}
+    out: dict[str, dict[str, float]] = {}
+    if cfg.get('truck_share'):
+        out['truck'] = {'share': cfg['truck_share']}
+    if cfg.get('bus_share'):
+        out['bus'] = {'share': cfg['bus_share']}
+    return out
+
+
 @app.post("/api/documents/{doc_id}/load")
 def set_load(doc_id: str, req: LoadRequest, x_client_id: str | None = Header(default=None)) -> Response:
     s = _session(doc_id)
     with s.lock:
-        cfg = {**s.analysis_settings, **{k:v for k,v in req.model_dump().items() if k in {'time_of_day','weather','truck_share','bus_share'} and v is not None}}
-        if cfg.get('truck_share',0) + cfg.get('bus_share',0) > 1:
+        from .analysis import VEHICLE_KEYS, vehicle_mix
+        cfg = {**s.analysis_settings, **{k:v for k,v in req.model_dump().items() if k in {'time_of_day','weather'} and v is not None}}
+        mix = dict(vehicle_mix_settings(cfg))
+        if req.vehicle_mix is not None:
+            unknown = set(req.vehicle_mix) - VEHICLE_KEYS
+            if unknown:
+                raise HTTPException(400, f"неизвестный тип транспорта: {', '.join(sorted(unknown))}")
+            mix = {k: {kk: vv for kk, vv in v.model_dump().items() if vv is not None} for k, v in req.vehicle_mix.items()}
+        # the old two-field form updates the same mix
+        for key, field_ in (('truck', 'truck_share'), ('bus', 'bus_share')):
+            if getattr(req, field_) is not None:
+                mix[key] = {**mix.get(key, {}), 'share': getattr(req, field_)}
+        cfg.pop('truck_share', None)
+        cfg.pop('bus_share', None)
+        cfg['vehicle_mix'] = mix
+        if sum(v["share"] for v in vehicle_mix(cfg) if v["key"] != "car") > 1 + 1e-9:
             raise HTTPException(400, 'Сумма долей не более 100%')
         s.analysis_settings = cfg
 
@@ -1040,6 +1075,17 @@ def set_route_frequency(doc_id: str, route_id: int, req: FrequencyRequest,
         _save_analysis(s)
         HUB.publish(s.id, {"type": "load"}, exclude=x_client_id)
         return _json(transit.route_geometry(s.doc, route_id, s.transit_freq))
+
+
+@app.get("/api/documents/{doc_id}/analysis/stops")
+def stops_analysis(doc_id: str, radius_m: float = Query(500, ge=100, le=1500),
+                   trips_per_resident: float = Query(1.0, ge=0, le=5),
+                   peak_share: float = Query(0.1, ge=0.01, le=0.5)) -> Response:
+    """Housing coverage by stops, gaps, districts, stop load and advice."""
+    from . import stops_analysis as sa
+    s = _session(doc_id)
+    with s.lock:
+        return _json(sa.analyse(s.doc, s.transit_freq, radius_m, trips_per_resident, peak_share))
 
 
 @app.get("/api/documents/{doc_id}/transit/stops/{node_id}")
