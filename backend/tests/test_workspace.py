@@ -4,6 +4,7 @@ from app import main
 
 def test_private_upload_stays_off_lobby(raw, monkeypatch):
     monkeypatch.setattr(main, 'SESSIONS', {})
+    monkeypatch.setattr(main, '_sample_files', lambda: {})  # isolate from bundled samples
     c = TestClient(main.app)
     did = c.post('/api/documents', files={'file': ('roads.osm', raw, 'application/xml')}).json()['doc_id']
     c.post(f'/api/documents/{did}/ops', json={'op': 'set_tags', 'args': {'kind': 'way', 'id': 100, 'tags': {'maxspeed': '40'}}}).raise_for_status()
@@ -19,6 +20,7 @@ def test_private_upload_stays_off_lobby(raw, monkeypatch):
 
 def test_new_blank_document_is_private(monkeypatch):
     monkeypatch.setattr(main, 'SESSIONS', {})
+    monkeypatch.setattr(main, '_sample_files', lambda: {})  # isolate from bundled samples
     c = TestClient(main.app)
     response = c.post('/api/documents/new', json={'name': 'New map'})
     response.raise_for_status()
