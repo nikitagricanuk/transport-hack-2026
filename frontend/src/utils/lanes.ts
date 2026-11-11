@@ -89,9 +89,15 @@ export function buildLanes(roads: LaneRoad[], plates: LaneJunction[] = []): Lane
   const surface: Feature<Polygon>[] = [];
   const marks: Feature<LineString>[] = [];
   const arrows: Feature<LineString>[] = [];
+  const junctionRings = new Map<LaneJunction, number[][]>();
   // Join the incident carriageway edges without adding a circular apron.
   for (const j of plates) {
     const ring = junctionPlate(j, roads);
+    junctionRings.set(j, ring);
+    // Each arm contributes a cross-section followed by its curved curb return.
+    for (let i = 0; i + 9 < ring.length; i += 10) {
+      marks.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: ring.slice(i + 1, i + 10) }, properties: { kind: 'edge', junction: true } });
+    }
     if (ring.length >= 4) surface.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] }, properties: { junction: true } });
   }
   const ends=new Map<string,LaneRoad[]>();
@@ -112,18 +118,11 @@ export function buildLanes(roads: LaneRoad[], plates: LaneJunction[] = []): Lane
     const rounded:number[][]=[];
     for(let i=0;i<anchors.length-1;i++){const piece=smoothLine(display.slice(anchors[i],anchors[i+1]+1));rounded.push(...(i?piece.slice(1):piece));}
     const r={...raw,coords:rounded.length?rounded:display};
-    const cuts = r.junctions ?? [];
+    const cuts = (r.junctions ?? []).map(j => junctionRings.get(j) ?? []).filter(ring => ring.length >= 4);
     const n = r.forward + r.backward;
     if (n < 1 || r.coords.length < 2) continue;
     const lw = r.laneW ?? LANE_W;
     const half = (n * lw) / 2;
-    const left = offsetLine(r.coords, -half);
-    const right = offsetLine(r.coords, half);
-    surface.push({
-      type: 'Feature',
-      geometry: { type: 'Polygon', coordinates: [[...left, ...right.reverse(), left[0]]] },
-      properties: { id: r.id },
-    });
     // Match width at a two-way join, then return to own width within 25 metres.
     const ownHalf=half;
     const widths=r.coords.map((p)=>{
@@ -136,21 +135,80 @@ export function buildLanes(roads: LaneRoad[], plates: LaneJunction[] = []): Lane
       }
       return width;
     });
-    const unitLeft=offsetLine(r.coords,-1),unitRight=offsetLine(r.coords,1);
-    const taperedLeft=r.coords.map((p,i)=>p.map((v,j)=>v+(unitLeft[i][j]-v)*widths[i]));
-    const taperedRight=r.coords.map((p,i)=>p.map((v,j)=>v+(unitRight[i][j]-v)*widths[i]));
-    surface[surface.length-1].geometry.coordinates=[[...taperedLeft,...taperedRight.reverse(),taperedLeft[0]]];
+    // Every boundary uses the same width profile, including arrow baselines.
+    // A degree-two join shares a tangent as well as a width; otherwise a bend
+    // between separate OSM ways leaves a wedge-shaped hole.
+    const boundary = (fraction: number): number[][] => {
+      const unit = offsetLine(r.coords, 1);
+      return r.coords.map((p, i) => {
+        let normal = [(unit[i][0] - p[0]), (unit[i][1] - p[1])];
+        if (i === 0 || i === r.coords.length - 1) {
+          const linked = ends.get(p.join(','));
+          const other = linked?.length === 2 ? linked.find(w => w.id !== r.id) : undefined;
+          if (other) {
+            const kx = M_PER_DEG_LON_EQ * Math.cos(p[1] * Math.PI / 180);
+            const adjacent = r.coords[i === 0 ? 1 : i - 1];
+            const atStart = other.coords[0].join(',') === p.join(',');
+            const neighbor = other.coords[atStart ? 1 : other.coords.length - 2];
+            const direction = (q: number[]) => {
+              const dx = (q[0] - p[0]) * kx, dy = (q[1] - p[1]) * M_PER_DEG_LAT;
+              const len = Math.hypot(dx, dy) || 1;
+              return [dx / len, dy / len];
+            };
+            const a = direction(adjacent), b = direction(neighbor);
+            const dx = a[0] - b[0], dy = a[1] - b[1];
+            const len = Math.hypot(dx, dy);
+            if (len > 0.1) {
+              const sign = i === 0 ? 1 : -1;
+              normal = [sign * dy / len / kx, -sign * dx / len / M_PER_DEG_LAT];
+            }
+          }
+        }
+        let offset = widths[i] * fraction;
+        // Match lane boundaries at a lane-count change. A disappearing divider
+        // converges on the edge, rather than ending abruptly in a live lane.
+        if (fraction > -1 && fraction < 1) for (const endIndex of [0, r.coords.length - 1]) {
+          const end = r.coords[endIndex];
+          const linked = ends.get(end.join(','));
+          const other = linked?.length === 2 ? linked.find(w => w.id !== r.id) : undefined;
+          if (!other) continue;
+          const distance = Math.hypot((p[0]-end[0])*M_PER_DEG_LON_EQ*Math.cos(p[1]*Math.PI/180), (p[1]-end[1])*M_PER_DEG_LAT);
+          const weight = Math.max(0, 1-distance/25);
+          const reversed = (endIndex === 0) === (other.coords[0].join(',') === end.join(','));
+          const backward = reversed ? other.forward : other.backward;
+          const forward = reversed ? other.backward : other.forward;
+          const otherWidth = other.laneW ?? LANE_W;
+          const joinHalf = (n*lw + (backward+forward)*otherWidth)/4;
+          const center = ((r.backward-r.forward)*lw + (backward-forward)*otherWidth)/4;
+          const lane = (fraction+1)*n/2-r.backward;
+          const common = lane < 0 ? Math.min(r.backward,backward) : Math.min(r.forward,forward);
+          const target = lane === 0 ? center : common > 0
+            ? center + Math.min(1,Math.abs(lane)/common) * (lane < 0 ? -joinHalf-center : joinHalf-center)
+            : (lane < 0 ? -joinHalf : joinHalf);
+          offset += (target-joinHalf*fraction)*weight;
+        }
+        return [p[0] + normal[0] * offset, p[1] + normal[1] * offset];
+      });
+    };
+    const taperedLeft = boundary(-1), taperedRight = boundary(1);
+    surface.push({
+      type: 'Feature', geometry: { type: 'Polygon',
+        coordinates: [[...taperedLeft, ...[...taperedRight].reverse(), taperedLeft[0]]] },
+      properties: { id: r.id },
+    });
     for (let j = 0; j <= n; j++) {
       const kind = j === 0 || j === n ? 'edge' : j === r.backward && r.backward > 0 && r.forward > 0 ? 'center' : 'lane';
-      const line = j === 0 ? left : j === n ? offsetLine(r.coords, half) : offsetLine(r.coords, -half + j * lw);
-      for (const piece of cutAround(line, cuts)) {
+      const line = boundary(-1 + 2 * j / n);
+      // Four or more lanes use a double solid opposing-flow separator (1.3).
+      const lines = kind === 'center' && n >= 4 ? [offsetLine(line, -0.15), offsetLine(line, 0.15)] : [line];
+      for (const marking of lines) for (const piece of cutPolygons(marking, cuts)) {
         marks.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: piece }, properties: { id: r.id, kind } });
       }
     }
     for (let i = 0; i < n; i++) {
-      const line = offsetLine(r.coords, -half + lw * (i + 0.5));
+      const line = boundary(-1 + 2 * (i + 0.5) / n);
       const backward = i < r.backward;
-      for (const piece of cutAround(backward ? line.reverse() : line, cuts)) {
+      for (const piece of cutPolygons(backward ? line.reverse() : line, cuts)) {
         arrows.push({
           type: 'Feature', geometry: { type: 'LineString', coordinates: piece },
           properties: { id: r.id, lane: i, dir: backward ? 'backward' : 'forward' },
@@ -212,29 +270,50 @@ export function findJunctions(roads: { coords: number[][]; nodes: number[]; half
   return out;
 }
 
-/** Convex patch bounded by the actual edges of the incident carriageways. */
+/** Curved curb returns between incident arms, in local metre coordinates.
+ * End sections lie inside each road. Quadratic corners avoid the convex hull's
+ * pointed "house" shape and are bounded so acute ramps cannot grow spikes.
+ */
 export function junctionPlate(j: LaneJunction, roads: LaneRoad[]): number[][] {
-  const points: number[][] = [];
+  const kx = M_PER_DEG_LON_EQ * Math.cos(j.coord[1] * Math.PI / 180);
+  const arms: { x: number; y: number; half: number; reach: number; angle: number }[] = [];
   for (const road of roads) {
-    if (road.coords.length < 2 || road.forward + road.backward < 1) continue;
     const index = road.coords.findIndex(p => p[0] === j.coord[0] && p[1] === j.coord[1]);
-    if (index < 0) continue;
-    const half = (road.forward + road.backward) * (road.laneW ?? LANE_W) / 2;
-    points.push(offsetLine(road.coords, -half)[index], offsetLine(road.coords, half)[index]);
-  }
-  points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const cross = (a: number[], b: number[], c: number[]) =>
-    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-  const chain = (input: number[][]) => {
-    const hull: number[][] = [];
-    for (const p of input) {
-      while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], p) <= 0) hull.pop();
-      hull.push(p);
+    if (index < 0 || road.forward + road.backward < 1) continue;
+    for (const adjacent of [index - 1, index + 1]) {
+      const p = road.coords[adjacent];
+      if (!p) continue;
+      const dx = (p[0] - j.coord[0]) * kx, dy = (p[1] - j.coord[1]) * M_PER_DEG_LAT;
+      const len = Math.hypot(dx, dy);
+      if (len < 0.01) continue;
+      arms.push({ x: dx / len, y: dy / len,
+        half: (road.forward + road.backward) * (road.laneW ?? LANE_W) / 2,
+        reach: Math.min(j.radius * 2, len / 2), angle: Math.atan2(dy, dx) });
     }
-    return hull.slice(0, -1);
-  };
-  const hull = [...chain(points), ...chain([...points].reverse())];
-  return hull.length >= 3 ? [...hull, hull[0]] : [];
+  }
+  arms.sort((a,b) => a.angle - b.angle);
+  const ring: number[][] = [];
+  const add = (p: number[]) => ring.push([j.coord[0] + p[0] / kx, j.coord[1] + p[1] / M_PER_DEG_LAT]);
+  const edge = (a: typeof arms[number], side: number) =>
+    [a.x * a.reach - a.y * a.half * side, a.y * a.reach + a.x * a.half * side];
+  for (let i = 0; i < arms.length; i++) {
+    const a = arms[i], b = arms[(i + 1) % arms.length];
+    add(edge(a, -1));
+    const from = edge(a, 1), to = edge(b, -1);
+    add(from);
+    const cross = a.x * b.y - a.y * b.x;
+    let control = [(from[0] + to[0]) / 2, (from[1] + to[1]) / 2];
+    if (Math.abs(cross) > 0.05) {
+      const t = ((to[0] - from[0]) * b.y - (to[1] - from[1]) * b.x) / cross;
+      const candidate = [from[0] + t * a.x, from[1] + t * a.y];
+      if (Math.hypot(...candidate) < j.radius * 3) control = candidate;
+    }
+    for (let step = 1; step <= 8; step++) {
+      const t = step / 8, u = 1 - t;
+      add([u*u*from[0] + 2*u*t*control[0] + t*t*to[0], u*u*from[1] + 2*u*t*control[1] + t*t*to[1]]);
+    }
+  }
+  return ring.length >= 3 ? [...ring, ring[0]] : [];
 }
 
 /**
@@ -307,45 +386,50 @@ export function taperPolygon(coords:number[][], startLanes:number,endLanes:numbe
   return [...left,...right.reverse(),left[0]];
 }
 
-/**
- * Display-only attachment of a branching road to the lanes of the wider road it joins.
- *
- * In OSM (and for SUMO) every connection is a node on the road axis. Drawn like that,
- * a slip road or a Y branch starts from the centre line of the main road. Here the end
- * of a road that meets a wider road is shifted sideways, towards the side the branch
- * leaves on, by (half width of the wider road − own half width): the outer edges line
- * up, so a ramp leaves from the outer lane and incoming Y roads join their own side.
- * The file is not changed.
- */
-export function attachToLanes(roads: { id: number; coords: number[][]; nodes: number[]; halfWidth: number }[]): Map<number, number[][]> {
-  const at = new Map<number, { road: (typeof roads)[number]; i: number }[]>();
-  for (const r of roads) r.nodes.forEach((n, i) => at.set(n, [...(at.get(n) ?? []), { road: r, i }]));
-  const out = new Map<number, number[][]>();
-  for (const r of roads) {
-    if (r.coords.length < 2) continue;
-    let coords: number[][] | null = null;
-    for (const end of [0, r.coords.length - 1]) {
-      const node = r.nodes[end];
-      // the parent: the widest other road at this node, clearly wider than this one
-      const parent = (at.get(node) ?? []).filter((x) => x.road.id !== r.id && x.road.halfWidth > r.halfWidth + 0.5)
-        .sort((a, b) => b.road.halfWidth - a.road.halfWidth)[0];
-      if (!parent) continue;
-      const p = parent.road.coords;
-      const pi = parent.i;
-      const a = p[Math.max(0, pi - 1)], b = p[Math.min(p.length - 1, pi + 1)];
-      const kx = M_PER_DEG_LON_EQ * Math.cos((r.coords[end][1] * Math.PI) / 180);
-      const dx = (b[0] - a[0]) * kx, dy = (b[1] - a[1]) * M_PER_DEG_LAT;
-      const len = Math.hypot(dx, dy);
-      if (len < 1e-6) continue;
-      const nx = dy / len, ny = -dx / len;   // right-hand normal of the parent
-      const inner = r.coords[end === 0 ? 1 : r.coords.length - 2];
-      const vx = (inner[0] - r.coords[end][0]) * kx, vy = (inner[1] - r.coords[end][1]) * M_PER_DEG_LAT;
-      const side = vx * nx + vy * ny >= 0 ? 1 : -1;   // which side of the parent the branch goes to
-      const shift = side * (parent.road.halfWidth - r.halfWidth);
-      coords = coords ?? r.coords.map((c) => [...c]);
-      coords[end] = [r.coords[end][0] + (nx * shift) / kx, r.coords[end][1] + (ny * shift) / M_PER_DEG_LAT];
+/** Clip markings to the actual junction footprint, rather than a circle that
+ * leaves crossing edge lines visible or erases unrelated nearby carriageways. */
+export function cutPolygons(coords: number[][], rings: number[][][]): number[][][] {
+  if (!rings.length || coords.length < 2) return [coords];
+  const origin = coords[0];
+  const kx = M_PER_DEG_LON_EQ * Math.cos(origin[1] * Math.PI / 180);
+  const project = (p: number[]) => [(p[0]-origin[0])*kx, (p[1]-origin[1])*M_PER_DEG_LAT];
+  const restore = (p: number[]) => [origin[0]+p[0]/kx, origin[1]+p[1]/M_PER_DEG_LAT];
+  const polygons = rings.map(r => r.map(project));
+  const inside = (p: number[], ring: number[][]) => {
+    let hit = false;
+    for (let i=0, j=ring.length-1; i<ring.length; j=i++) {
+      const a=ring[i], b=ring[j];
+      if ((a[1]>p[1]) !== (b[1]>p[1]) && p[0] < (b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1])+a[0]) hit=!hit;
     }
-    if (coords) out.set(r.id, coords);
+    return hit;
+  };
+  const pieces: number[][][] = [];
+  let current: number[][] = [];
+  for (let i=1; i<coords.length; i++) {
+    const a=project(coords[i-1]), b=project(coords[i]);
+    const dx=b[0]-a[0], dy=b[1]-a[1];
+    const ts=[0,1];
+    for (const ring of polygons) for (let j=1;j<ring.length;j++) {
+      const c=ring[j-1], d=ring[j], ex=d[0]-c[0], ey=d[1]-c[1];
+      const det=dx*ey-dy*ex;
+      if (Math.abs(det)<1e-9) continue;
+      const t=((c[0]-a[0])*ey-(c[1]-a[1])*ex)/det;
+      const u=((c[0]-a[0])*dy-(c[1]-a[1])*dx)/det;
+      if(t>0 && t<1 && u>=0 && u<=1) ts.push(t);
+    }
+    ts.sort((a,b)=>a-b);
+    for(let j=1;j<ts.length;j++) {
+      if(ts[j]-ts[j-1]<1e-9)continue;
+      const at=(t:number)=>[a[0]+dx*t,a[1]+dy*t];
+      if(polygons.some(ring=>inside(at((ts[j]+ts[j-1])/2),ring))) {
+        if(current.length>1)pieces.push(current.map(restore));
+        current=[];
+      } else {
+        if(!current.length)current.push(at(ts[j-1]));
+        current.push(at(ts[j]));
+      }
+    }
   }
-  return out;
+  if(current.length>1)pieces.push(current.map(restore));
+  return pieces;
 }

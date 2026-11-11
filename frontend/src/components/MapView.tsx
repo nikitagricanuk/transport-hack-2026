@@ -9,7 +9,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
 import type { ChangesResult, FixPreview, Geo, GeoDiff, Issue, LayerVisibility, Op, Peer, Selection, SimVehicle, Tool, WayProps } from '../types';
 import type { BaseMap, ImageOverlay } from './Extras';
-import { LANE_MINZOOM, attachToLanes, buildLanes, findJunctions, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
+import { LANE_MINZOOM, buildLanes, findJunctions, laneSplit, laneWidthFor, type LaneRoad } from '../utils/lanes';
 import { joinHandles } from '../utils/joins';
 import { claimDraftPointKey, isEscapeKey } from '../utils/keys';
 import { PATH_LAYER_IDS, PATH_STYLES, casingColor, casingWidthExtra, classScale, linkFilter, pathFilter, roadLineColor, solidRoadFilter } from '../utils/roadStyle';
@@ -425,10 +425,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         layout: { 'line-cap': 'butt', 'line-join': 'round' },
         paint: { 'line-color': roadLineColor(), 'line-width': laneWidth(), 'line-dasharray': [2, 1.4] } });
       map.addLayer({ id: 'lane-surface', type: 'fill', source: 'lane-surface', minzoom: LANE_MINZOOM,
-        paint: { 'fill-color': '#3F4652', 'fill-opacity': ['interpolate', ['linear'], ['zoom'], LANE_MINZOOM, 0, LANE_MINZOOM + 0.5, 0.92] } });
+        paint: { 'fill-color': '#3F4652', 'fill-antialias': false, 'fill-opacity': ['interpolate', ['linear'], ['zoom'], LANE_MINZOOM, 0, LANE_MINZOOM + 0.5, 1] } });
       map.addLayer({ id: 'lane-marks', type: 'line', source: 'lane-marks', minzoom: LANE_MINZOOM,
         filter: ['!=', ['get', 'kind'], 'lane'],
-        paint: { 'line-color': '#F8FAFC', 'line-width': ['match', ['get', 'kind'], 'center', 2.2, 1.4] } });
+        paint: { 'line-color': '#F8FAFC', 'line-width': ['match', ['get', 'kind'], 'center', 1.2, 1.4] } });
       map.addLayer({ id: 'lane-dashes', type: 'line', source: 'lane-marks', minzoom: LANE_MINZOOM,
         filter: ['==', ['get', 'kind'], 'lane'],
         paint: { 'line-color': '#F8FAFC', 'line-width': 1.4, 'line-dasharray': [4, 4] } });
@@ -835,9 +835,6 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     for (const r of roads) {
       r.junctions = r.nodes.flatMap((id) => { const j = junctions.get(id); return j ? [j] : []; });
     }
-    // a branch that meets a wider road starts from that road's lanes on its side, not its centre
-    const attached = attachToLanes(roads);
-    for (const r of roads) r.coords = attached.get(r.id) ?? r.coords;
     const g = buildLanes(roads, [...junctions.values()]);
     (map.getSource('lane-surface') as GeoJSONSource).setData(g.surface);
     (map.getSource('lane-marks') as GeoJSONSource).setData(g.marks);
