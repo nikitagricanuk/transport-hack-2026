@@ -359,3 +359,78 @@ export TEAM_NAME=...         # имя файла на сервере, без .os
 - Панели возвращаются через «Окно», отчёты доступны в «Отчёты», руководство — в «Справка». Ширины столбцов запоминаются отдельно для каждой таблицы; двойной клик по границе возвращает автоматическую ширину.
 
 Расчёты анализа и предпросмотры не меняют документ. Неизвестные интервалы ОТ и синтетические тестовые значения явно подписаны; население ИД5, измеренный спрос и поправка на рельеф не подменяются оценками.
+
+## MCP: AI editing with in-app OAuth
+
+The app serves a **Streamable HTTP MCP endpoint at `/mcp`**. In Claude's custom
+connector settings (or another web MCP client), enter `https://your-app.example/mcp`
+and use OAuth. The client registers automatically and opens this app's approval
+page. No API key, client secret, or external identity provider is required.
+Find the URL under **Справка → Подключить ИИ через MCP**, or on the start screen.
+
+Set `UDS_PUBLIC_URL=https://your-app.example` to the app's canonical external
+origin when running behind a reverse proxy. Forward `/mcp`, `/oauth/*`, and
+`/.well-known/*` to the backend alongside `/api/*`; do not rewrite `/mcp` to a
+trailing-slash URL. HTTPS is required for remote clients. With Docker Compose,
+set `UDS_PUBLIC_URL` in the environment or `.env` before starting the service.
+For local development, start the backend and Vite normally and set
+`UDS_PUBLIC_URL=http://localhost:5173` if connecting through Vite; its proxy
+includes all MCP and OAuth routes. Remote clients need a publicly reachable HTTPS
+origin; a localhost URL only works for clients on the same machine.
+
+This MVP retains the editor's **shared workspace without user accounts**.
+The approval page grants `workspace:edit` access to all shared documents; it does
+not establish a user's identity. Existing editor HTTP routes keep their shared
+access model. MCP itself requires an OAuth access token on every request and
+never accepts API keys. Anyone who can open the approval page can approve a
+client, so deploy this MVP within the same trusted audience as the editor.
+
+The OAuth implementation supports authorization-server and protected-resource
+discovery, dynamic public-client registration, exact registered redirect URIs,
+mandatory S256 PKCE, one-use five-minute codes, CSRF-protected explicit consent,
+resource-bound one-hour access tokens, rotating 30-day refresh tokens, and
+`POST /oauth/revoke` (form field `token`) for access or refresh-token revocation.
+Revoking a refresh token prevents renewal; existing access tokens expire within
+one hour unless separately revoked. Grants survive restarts in
+`$UDS_DATA_DIR/oauth.sqlite3`; `UDS_OAUTH_DB` can override the location. Keep this
+file private and on persistent storage. Only hashes of bearer credentials are
+stored. A single SQLite file can be shared by local worker processes; separate
+replicas need a shared authorization store and shared editor state.
+
+The server negotiates MCP versions `2025-11-25`, `2025-06-18`, and `2025-03-26`.
+It uses stateless JSON responses, with no long-lived SSE stream or MCP session ID.
+The tools are:
+
+- `list_documents`: discover open documents and persisted drafts by `doc_id`.
+- `api_schema`: discover API request schemas and every edit operation's arguments;
+  use `path_filter` to narrow the returned paths.
+- `editor_api`: invoke any documented local editor endpoint using `method`,
+  `path`, optional `query` and JSON `body`. Covers geometry/tags, batched edits,
+  undo/redo, lanes, signals, transit, loads, closures, tasks, validation, analysis,
+  reports, export and draft deletion. Multipart endpoints accept `files` mapping
+  field names to `{ "filename": "events.xml", "base64": "..." }` objects.
+  JSON responses are returned as JSON text, XML as text and binary reports as
+  base64 with their content type. HTTP failures become MCP tool errors.
+- `import_osm`: create a document from `xml` text and an optional `filename`.
+  Bundled samples can also be opened through `editor_api`.
+
+AI edits use the same API handlers as the UI: they autosave, broadcast to open
+editors and participate in normal undo/redo. Edit history records the registered
+client name prefixed with `AI:`. Use `/batch` for an atomic multi-operation edit.
+For example, after finding a document and consulting `api_schema`, call:
+
+```json
+{
+  "name": "editor_api",
+  "arguments": {
+    "method": "POST",
+    "path": "/api/documents/DOC_ID/ops",
+    "body": {
+      "op": "set_tags",
+      "args": { "kind": "way", "id": 10, "tags": { "maxspeed": "40" } },
+      "label": "Set speed limit",
+      "reason": "Requested by the user"
+    }
+  }
+}
+```

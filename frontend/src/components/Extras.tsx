@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import type { HistoryEntry, Kind, LoadState, OdMatrix, Selection, Task, TaskCriterion, TaskResult } from '../types';
 import { fmt } from '../utils/geom';
-import { AnalyticsAssumptions, Bars, LOS_COLOR } from './Analysis';
+import { AnalyticsAssumptions, Bars, LOS_COLOR, VC_TIP } from './Analysis';
 import { VehicleMix } from './VehicleMix';
 
 // --------------------------------------------------------- intensity presets
@@ -109,6 +109,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
         <section className="stack10">
           <b>Статистика потоков</b>
           <div className="kpis">
+            <div title={VC_TIP} className="has-tip"><b>{fmt(s.avg_vc, 2)}</b><span>средняя v/c, загрузка z ⓘ</span></div>
             <div><b>{fmt(s.veh_km)}</b><span>авт·км за час</span></div>
             <div><b>{fmt(s.veh_hours, 0)}</b><span>авт·ч в пути</span></div>
             <div><b>{fmt(s.delay_hours, 1)}</b><span>авт·ч задержки</span></div>

@@ -6,6 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import ResizableTable from './ResizableTable.tsx';
 import { PanelClose, PanelToggle } from './PanelClose.tsx';
 import EditorMenus from './EditorMenus.tsx';
+import TagEditor from './TagEditor.tsx';
 let dom: JSDOM, root: Root, host: HTMLDivElement;
 beforeEach(() => {
   dom = new JSDOM('<html><body></body></html>', { url: 'https://test.local' });
@@ -114,4 +115,17 @@ test('column drag stores the width and release stops resizing', () => {
   pointer('pointerup', 40);
   pointer('pointermove', 100);
   assert.equal(th.style.width, '130px');
+});
+
+
+test('tag pencil focuses and selects both dropdown and free-text values', () => {
+  act(() => root.render(<TagEditor tags={{ surface: 'asphalt', name: 'Main street' }} onChange={() => undefined} />));
+  for (const key of ['surface', 'name']) {
+    click(host.querySelector(`[aria-label="Редактировать значение ${key} как текст"]`)!);
+    const input = document.activeElement as HTMLInputElement;
+    assert.equal(input.tagName, 'INPUT');
+    assert.equal(input.selectionStart, 0);
+    assert.equal(input.selectionEnd, input.value.length);
+    assert.equal(input.value, key === 'surface' ? 'asphalt' : 'Main street');
+  }
 });

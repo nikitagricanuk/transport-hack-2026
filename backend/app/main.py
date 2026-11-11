@@ -43,6 +43,7 @@ from .analysis import (
 from .edits import History, OpError, apply_op, apply_ops
 from .geojson import geo_patch, to_geojson, vertices
 from .organizer import OrganizerError, credentials, upload_osm
+from .mcp_server import install_mcp
 from .osm_model import OsmDocument, clone
 from .sumo_check import find_netconvert, run_netconvert
 from .simulation import FILE_LIMIT, SimulationError, read_matsim, read_webots, run_sumo, unpack_recording
@@ -504,6 +505,80 @@ def upload(file: UploadFile = File(...)) -> Response:
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "файл слишком большой")
     return _json(_open(data, file.filename or "upload.osm"))
+
+
+class DocumentName(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
+@app.get("/api/documents")
+def list_documents() -> Response:
+    """Shared workspace index; do not parse every map just to list it."""
+    rows = []
+    for did in set(_draft_ids()) | set(SESSIONS):
+        session = SESSIONS.get(did)
+        paths = _draft_paths(did)
+        try:
+            meta = json.loads(paths[1].read_text(encoding="utf-8")) if paths and paths[1].is_file() else {}
+            if not session and meta.get("doc_id") != did:
+                continue
+            files = [p for p in (*paths, _journal_path(did), _analysis_path(did)) if p and p.is_file()] if paths else []
+            rows.append({"doc_id": did, "filename": session.filename if session else meta.get("filename", "draft.osm"),
+                         "updated_at": max((p.stat().st_mtime for p in files), default=0),
+                         "peers": HUB.peers(did)})
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return _json(sorted(rows, key=lambda row: row["updated_at"], reverse=True))
+
+
+@app.post("/api/documents/new")
+def new_document(req: DocumentName) -> Response:
+    if not req.name.strip():
+        raise HTTPException(400, "Введите название документа")
+    return _json(_open(b'<osm version="0.6" generator="UDS Editor"/>', _safe_filename(req.name.strip())))
+
+
+@app.post("/api/documents/{doc_id}/rename")
+def rename_document(doc_id: str, req: DocumentName) -> Response:
+    if not req.name.strip():
+        raise HTTPException(400, "Введите название документа")
+    s = _session(doc_id)
+    with s.lock:
+        filename = _safe_filename(req.name.strip())
+        paths = _draft_paths(doc_id)
+        if paths is None:
+            raise HTTPException(400, "Некорректный документ")
+        try:
+            meta = json.loads(paths[1].read_text(encoding="utf-8"))
+            meta["filename"] = filename
+            temporary = paths[1].with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(paths[1])
+        except (OSError, ValueError) as exc:
+            raise HTTPException(500, "Не удалось сохранить название") from exc
+        s.filename = filename
+        HUB.publish(doc_id, {"type": "rename", "filename": filename})
+        return _json({"doc_id": doc_id, "filename": filename})
+
+
+_SAMPLE_OPEN_LOCK = threading.Lock()
+
+
+@app.post("/api/workspace/samples/{name}/open")
+def open_shared_sample(name: str) -> Response:
+    path = _sample_files().get(name)
+    if path is None:
+        raise HTTPException(404, "Файл не найден")
+    did = "sample-" + uuid.uuid5(uuid.NAMESPACE_URL, name).hex[:24]
+    with _SAMPLE_OPEN_LOCK:
+        if did in SESSIONS or _draft_exists(did):
+            return get_document(did)
+        raw = path.read_bytes()
+        doc = OsmDocument.parse(raw)
+        session = Session(id=did, filename=name, doc=doc, signal_timing=signal_plans.timing_from_tags(doc))
+        SESSIONS[did] = session
+        _start_draft(session, raw)
+        return _json(_state(session))
 
 
 @app.get("/api/documents/{doc_id}")
@@ -1464,6 +1539,9 @@ async def collaborate(ws: WebSocket, doc_id: str, client: str = "", name: str = 
     finally:
         task.cancel()
         HUB.leave(doc_id, peer.id)
+
+
+install_mcp(app, DATA_DIR)
 
 # --------------------------------------------------------- static frontend
 if STATIC_DIR.is_dir():

@@ -1,3 +1,4 @@
+import { CAR_MODEL_MINZOOM, vehicleModels } from '../utils/vehicleModels';
 import { segmentGeometry } from '../utils/segments';
 import type { PickedPoint } from '../utils/networkAnalysis';
 import { loadColorChanges } from '../utils/loadColors';
@@ -294,7 +295,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
   useImperativeHandle(ref, () => ({
     updateVehicles: (vehicles) => {
       vehiclesRef.current = vehicles;
-      (mapRef.current?.getSource('sim-vehicles') as GeoJSONSource | undefined)?.setData(vehicleFeatures(vehicles));
+      const map = mapRef.current;
+      (map?.getSource('sim-vehicles') as GeoJSONSource | undefined)?.setData(vehicleFeatures(vehicles));
+      (map?.getSource('sim-car-models') as GeoJSONSource | undefined)?.setData(
+        vehicleModels(map && map.getZoom() >= CAR_MODEL_MINZOOM ? vehicles : []));
     },
     updatePeers,
     jumpTo: (center, zoom) => mapRef.current?.easeTo({ center, zoom, duration: 300 }),
@@ -591,11 +595,20 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
           'circle-stroke-color': ['match', ['get', 'kind'], 'node', '#16A34A', '#2563EB'] } });
       map.addImage('sim-car', vehicleImage(), { pixelRatio: 2 });
       map.addSource('sim-vehicles', { type: 'geojson', data: vehicleFeatures(vehiclesRef.current) });
-      map.addLayer({ id: 'sim-vehicles', type: 'symbol', source: 'sim-vehicles', layout: {
+      map.addLayer({ id: 'sim-vehicles', type: 'symbol', source: 'sim-vehicles', maxzoom: CAR_MODEL_MINZOOM, layout: {
         'icon-image': 'sim-car', 'icon-rotate': ['get', 'angle'], 'icon-rotation-alignment': 'map',
         'icon-pitch-alignment': 'map', 'icon-allow-overlap': true, 'icon-ignore-placement': true,
         'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.42, 16, 0.7, 20, 1],
       } });
+      map.addSource('sim-car-models', { type: 'geojson', data: vehicleModels(map.getZoom() >= CAR_MODEL_MINZOOM ? vehiclesRef.current : []) });
+      map.addLayer({ id: 'sim-car-models', type: 'fill-extrusion', source: 'sim-car-models', minzoom: CAR_MODEL_MINZOOM,
+        paint: { 'fill-extrusion-color': ['get', 'color'], 'fill-extrusion-base': ['get', 'base'],
+          'fill-extrusion-height': ['get', 'height'], 'fill-extrusion-opacity': 1 } });
+      // Rebuild on zoom even while playback is paused; skip hidden geometry during overview playback.
+      map.on('zoomend', () => {
+        (map.getSource('sim-car-models') as GeoJSONSource).setData(
+          vehicleModels(map.getZoom() >= CAR_MODEL_MINZOOM ? vehiclesRef.current : []));
+      });
       setReady(true);
     });
 
