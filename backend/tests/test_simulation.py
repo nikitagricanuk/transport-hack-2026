@@ -93,3 +93,47 @@ def test_sumo_runs_each_selected_kind_on_roads_it_may_use():
     assert {f["kind"]: f["placed"] for f in response["fleet"]} == {"car": 2, "bus": 1, "tram": 1}
     # the tram stays on its track, north of the road
     assert all(car[2] > 52.2805 for frame in response["frames"] for car in frame["vehicles"] if car[4] == "tram")
+
+
+def test_ru_speed_limits_are_written_for_sumo():
+    from xml.etree import ElementTree as ET
+    from app.simulation import apply_ru_speeds
+    osm = b"""<osm version="0.6"><node id="1" lon="104" lat="52"/><node id="2" lon="104.01" lat="52"/>
+    <way id="1"><nd ref="1"/><nd ref="2"/><tag k="highway" v="residential"/></way>
+    <way id="2"><nd ref="1"/><nd ref="2"/><tag k="highway" v="living_street"/></way>
+    <way id="3"><nd ref="1"/><nd ref="2"/><tag k="highway" v="primary"/><tag k="maxspeed" v="RU:urban"/></way>
+    <way id="4"><nd ref="1"/><nd ref="2"/><tag k="highway" v="motorway"/></way></osm>"""
+    root = ET.fromstring(apply_ru_speeds(osm))
+    speeds = {w.get("id"): next(t.get("v") for t in w.findall("tag") if t.get("k") == "maxspeed") for w in root.iter("way")}
+    assert speeds == {"1": "60", "2": "20", "3": "60", "4": "110"}
+
+
+@pytest.mark.skipif(not all(find_sumo_binary(n) for n in ("sumo", "netconvert")), reason="SUMO not installed")
+def test_signal_runs_the_editor_program_and_report_splits_kinds_and_phases():
+    from fastapi.testclient import TestClient
+    from app import main
+    c = TestClient(main.app)
+    osm = b"""<osm version="0.6">
+    <node id="1" lon="104.270" lat="52.280"/><node id="2" lon="104.280" lat="52.280"><tag k="highway" v="traffic_signals"/></node>
+    <node id="3" lon="104.290" lat="52.280"/><node id="4" lon="104.280" lat="52.274"/><node id="5" lon="104.280" lat="52.286"/>
+    <way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="primary"/><tag k="name" v="Main"/></way>
+    <way id="11"><nd ref="4"/><nd ref="2"/><nd ref="5"/><tag k="highway" v="residential"/><tag k="name" v="Cross"/></way>
+    </osm>"""
+    did = c.post("/api/documents", files={"file": ("t.osm", osm, "application/xml")}).json()["doc_id"]
+    prog = [{"name": "Главное", "green_s": 30, "moves": ["main"]},
+            {"name": "Стрелка", "green_s": 6, "moves": ["main_left"]},
+            {"name": "Второстепенное", "green_s": 20, "moves": ["cross"]}]
+    assert c.post(f"/api/documents/{did}/signals/2", json={"program": prog}).status_code == 200
+    r = c.post(f"/api/documents/{did}/simulation/sumo", params={"vehicles": 20, "fleet": "car:20,bus:4"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["signals"] and body["signals"][0]["applied"]
+    assert body["rules"]
+    rep = body["report"]
+    assert {k["kind"] for k in rep["kinds"]} == {"car", "bus"}
+    sg = rep["signals"][0]
+    assert sg["cycle_s"] == 30 + 6 + 20 + 3 * 5 and [p["name"] for p in sg["phases"]] == ["Главное", "Стрелка", "Второстепенное"]
+    assert set(sg["phases"][0]["passed"]) == {"car", "bus"}
+    only_bus = c.get(f"/api/documents/{did}/simulation/report.json", params={"kinds": "bus"}).json()
+    assert [k["kind"] for k in only_bus["kinds"]] == ["bus"] and only_bus["summary"]["vehicles"] <= 4
+    assert c.get(f"/api/documents/{did}/simulation/report.json", params={"kinds": "plane"}).status_code == 400

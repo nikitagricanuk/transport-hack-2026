@@ -7,12 +7,14 @@ import gzip
 import io
 import math
 import random
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 from threading import BoundedSemaphore
 from xml.etree import ElementTree as ET
 
+from .norms import default_limit, speed_kmh
 from .sumo_check import _ascii_tmp_root, _netconvert_env, find_sumo_binary
 
 FILE_LIMIT = 20 * 1024 * 1024
@@ -275,6 +277,190 @@ def _routes(net: Path, fleet: dict[str, int]) -> tuple[ET.Element, dict[str, int
     return routes, placed
 
 
+# ------------------------------------------------------------ ПДД РФ
+# netconvert options that make the network follow the Russian rules as far as the graph tells:
+# lanes, turn arrows and per-lane access from OSM; yellow 3 s and all-red 2 s between phases
+# (ГОСТ Р 52289-2019); at an unregulated junction of equal roads the vehicle on the right goes
+# first (ПДД 13.11, SUMO right_before_left) for urban speeds; no U-turns at junctions except at
+# dead ends (ПДД 8.11 limits them, OSM rarely says where they are allowed).
+RU_NETCONVERT = [
+    "--osm.turn-lanes", "true", "--osm.lane-access", "true",
+    "--tls.yellow.time", "3", "--tls.allred.time", "2",
+    "--junctions.right-before-left.speed-threshold", "22.3",
+    "--no-turnarounds.except-deadend", "true",
+]
+RULES = [
+    "Правостороннее движение; разрешённая скорость — тег maxspeed, иначе 60 км/ч в населённом пункте, "
+    "20 км/ч в жилой зоне и на дворовых проездах, 110 км/ч на автомагистрали (ПДД 10.2, 10.3).",
+    "Число полос, стрелки turn:lanes, запреты поворотов, односторонние улицы и доступ по видам транспорта — из графа.",
+    "Нерегулируемые перекрёстки: главная дорога по классу; равнозначные — «помеха справа» (ПДД 13.11).",
+    "Светофоры работают по программам редактора: фазы, стрелки (дополнительные секции), жёлтый 3 с и "
+    "все красные 2 с (ГОСТ Р 52289-2019). Поворот налево на основной зелёный — уступая встречным (ПДД 13.4).",
+    "Без разворотов на перекрёстках, кроме тупиков.",
+]
+
+
+def apply_ru_speeds(osm: bytes) -> bytes:
+    """Write the speed limit that applies under the Russian rules onto every road without one.
+
+    SUMO would otherwise take its own defaults per class (50 km/h on a residential street);
+    RU:urban and the other shorthands become numbers it understands.
+    """
+    root = ET.fromstring(osm)
+    for way in root.iter("way"):
+        tags = {t.get("k"): t for t in way.findall("tag")}
+        hw = tags.get("highway")
+        if hw is None:
+            continue
+        cls = hw.get("v", "")
+        current = tags.get("maxspeed")
+        kmh = speed_kmh(current.get("v")) if current is not None else None
+        if kmh is None:
+            kmh = 110 if cls.removesuffix("_link") == "motorway" else default_limit(cls)
+        if current is None:
+            ET.SubElement(way, "tag", k="maxspeed", v=str(kmh))
+        else:
+            current.set("v", str(kmh))
+    return ET.tostring(root, encoding="utf-8")
+
+
+def _utm(lat: float, lon: float, zone: int) -> tuple[float, float]:
+    """WGS84 → UTM easting/northing (northern hemisphere), as netconvert projects OSM."""
+    a, f, k0 = 6378137.0, 1 / 298.257223563, 0.9996
+    e2 = f * (2 - f)
+    ep2 = e2 / (1 - e2)
+    phi, lam = math.radians(lat), math.radians(lon)
+    lam0 = math.radians(zone * 6 - 183)
+    n = a / math.sqrt(1 - e2 * math.sin(phi) ** 2)
+    t, c = math.tan(phi) ** 2, ep2 * math.cos(phi) ** 2
+    aa = math.cos(phi) * (lam - lam0)
+    m = a * ((1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * phi
+             - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * math.sin(2 * phi)
+             + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * math.sin(4 * phi)
+             - (35 * e2 ** 3 / 3072) * math.sin(6 * phi))
+    x = k0 * n * (aa + (1 - t + c) * aa ** 3 / 6 + (5 - 18 * t + t * t + 72 * c - 58 * ep2) * aa ** 5 / 120) + 500000.0
+    y = k0 * (m + n * math.tan(phi) * (aa * aa / 2 + (5 - t + 9 * c + 4 * c * c) * aa ** 4 / 24
+                                        + (61 - 58 * t + t * t + 600 * c - 330 * ep2) * aa ** 6 / 720))
+    return x, y
+
+
+def _net_xy(root: ET.Element):
+    """lat/lon → network coordinates, or None when the network is not a UTM projection."""
+    loc = root.find("location")
+    if loc is None:
+        return None
+    zone = re.search(r"\+zone=(\d+)", loc.get("projParameter", ""))
+    if not zone or "+south" in loc.get("projParameter", ""):
+        return None
+    ox, oy = map(float, loc.get("netOffset", "0,0").split(","))
+    z = int(zone.group(1))
+
+    def to_xy(lat: float, lon: float) -> tuple[float, float]:
+        x, y = _utm(lat, lon, z)
+        return x + ox, y + oy
+    return to_xy
+
+
+SIGNAL_MATCH_M = 60.0   # a SUMO traffic light this close to an editor signal runs its plan
+
+
+def _angle_diff(a: float, b: float) -> float:
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
+def signal_programs(net: Path, signals: list[dict]) -> tuple[ET.Element | None, list[dict]]:
+    """SUMO programs that run the editor's signal plans.
+
+    ``signals``: per signal node of the exported file — ``node_id``, ``axis`` (bearing of the
+    main direction, degrees) and ``phases`` [{green_s, moves}]. Every link of the matching SUMO
+    traffic light gets its group from the bearing of the lane it comes from (within 45° of the
+    axis — main, else cross) and its turn from the connection: a phase releasing the group
+    gives through and right turns «G» and a left turn «g» (it yields to oncoming traffic); an
+    arrow of the group's turn gives that turn «G» on its own. Each phase is followed by 3 s of
+    yellow and 2 s of all-red for the links that stop. The traffic light runs the program from
+    t = 0, so the report can tell the phase at any moment.
+    """
+    if not signals:
+        return None, []
+    root = ET.parse(net).getroot()
+    by_node = {int(sg["node_id"]): sg for sg in signals}
+    lanes: dict[str, list[tuple[float, float]]] = {}
+    for edge in root.findall("edge"):
+        for lane in edge.findall("lane"):
+            pts = [tuple(map(float, p.split(","))) for p in lane.get("shape", "").split()]
+            lanes[lane.attrib["id"]] = pts
+    links: dict[str, dict[int, tuple[str, str]]] = {}   # tl -> link index -> (from lane, dir)
+    for c in root.findall("connection"):
+        tl = c.get("tl")
+        if tl is None or c.get("linkIndex") is None:
+            continue
+        links.setdefault(tl, {})[int(c.attrib["linkIndex"])] = (f"{c.attrib['from']}_{c.attrib['fromLane']}", c.get("dir", "s"))
+    # where each traffic light stands: the junction its controlled lanes lead into
+    edge_to = {e.attrib["id"]: e.get("to") for e in root.findall("edge")}
+    junction_xy = {j.attrib["id"]: (float(j.get("x", 0)), float(j.get("y", 0))) for j in root.findall("junction")}
+    tl_xy: dict[str, tuple[float, float]] = {}
+    for c in root.findall("connection"):
+        if c.get("tl") and c.get("tl") not in tl_xy and edge_to.get(c.attrib["from"]) in junction_xy:
+            tl_xy[c.attrib["tl"]] = junction_xy[edge_to[c.attrib["from"]]]
+    to_xy = _net_xy(root)
+    sig_xy = {int(sg["node_id"]): to_xy(sg["lat"], sg["lon"]) for sg in signals
+              if to_xy and "lat" in sg} if to_xy else {}
+    out = ET.Element("additional")
+    applied: list[dict] = []
+    for tl in root.findall("tlLogic"):
+        tid = tl.attrib["id"]
+        if tid not in links:
+            continue
+        # the editor signal on this junction (its id is in the SUMO id), else the nearest one
+        nodes = [int(x) for x in re.findall(r"\d+", tid) if int(x) in by_node]
+        if not nodes and tid in tl_xy and sig_xy:
+            tx, ty = tl_xy[tid]
+            near = sorted((math.hypot(x - tx, y - ty), nid) for nid, (x, y) in sig_xy.items())
+            nodes = [nid for d, nid in near if d <= SIGNAL_MATCH_M]
+        if not nodes:
+            continue
+        sg = by_node[nodes[0]]
+        axis = float(sg["axis"])
+        n_links = max(links[tid]) + 1
+        group_turn: list[tuple[str, str]] = []
+        for i in range(n_links):
+            lane_id, d = links[tid].get(i, ("", "s"))
+            pts = lanes.get(lane_id, [])
+            group = "cross"
+            if len(pts) >= 2:
+                (x0, y0), (x1, y1) = pts[-2], pts[-1]
+                outward = (math.degrees(math.atan2(x0 - x1, y0 - y1)) + 360) % 360   # from the junction back up the lane
+                if _angle_diff(outward, axis) <= 45 or _angle_diff(outward, axis + 180) <= 45:
+                    group = "main"
+            turn = "left" if d in ("l", "L", "t") else "right" if d in ("r", "R") else "through"
+            group_turn.append((group, turn))
+
+        def state(moves: set[str]) -> str:
+            chars = []
+            for group, turn in group_turn:
+                if turn != "through" and f"{group}_{turn}" in moves:
+                    chars.append("G")
+                elif group in moves:
+                    chars.append("g" if turn == "left" else "G")
+                else:
+                    chars.append("r")
+            return "".join(chars)
+
+        phases = sg["phases"]
+        states = [state(set(p["moves"])) for p in phases]
+        logic = ET.SubElement(out, "tlLogic", id=tid, type="static", programID="uds", offset="0")
+        for i, p in enumerate(phases):
+            cur, nxt = states[i], states[(i + 1) % len(states)]
+            ET.SubElement(logic, "phase", duration=str(int(p["green_s"])), state=cur)
+            yellow = "".join("y" if c in "Gg" and n == "r" else c for c, n in zip(cur, nxt))
+            red = "".join("r" if c in "Gg" and n == "r" else c for c, n in zip(cur, nxt))
+            ET.SubElement(logic, "phase", duration="3", state=yellow)
+            ET.SubElement(logic, "phase", duration="2", state=red)
+        applied += [{"node_id": nid, "tl": tid, "links": n_links, "program_of": sg["node_id"]} for nid in nodes]
+    return (out if len(out) else None), applied
+
+
 def _run(binary: str, args: list[str], workdir: Path, stage: str, timeout: int) -> None:
     try:
         result = subprocess.run([binary, *args], cwd=workdir, env=_netconvert_env(), timeout=timeout,
@@ -289,8 +475,10 @@ def _run(binary: str, args: list[str], workdir: Path, stage: str, timeout: int) 
         raise SimulationError(f"{stage}: SUMO завершился с ошибкой.{hint}")
 
 
-def run_sumo(osm: bytes, vehicles: int, fleet: dict[str, int] | None = None) -> dict:
-    """``fleet``: vehicles per kind (see FLEET); without it, ``vehicles`` passenger cars."""
+def run_sumo(osm: bytes, vehicles: int, fleet: dict[str, int] | None = None,
+             signals: list[dict] | None = None) -> dict:
+    """``fleet``: vehicles per kind (see FLEET); without it, ``vehicles`` passenger cars.
+    ``signals``: the editor's signal plans (see ``signal_programs``) that SUMO should run."""
     fleet = fleet or {"car": vehicles}
     netconvert, sumo = find_sumo_binary("netconvert"), find_sumo_binary("sumo")
     if not netconvert or not sumo:
@@ -300,14 +488,20 @@ def run_sumo(osm: bytes, vehicles: int, fleet: dict[str, int] | None = None) -> 
     try:
         with tempfile.TemporaryDirectory(dir=_ascii_tmp_root()) as tmp:
             workdir = Path(tmp)
-            (workdir / "input.osm").write_bytes(osm)
+            (workdir / "input.osm").write_bytes(apply_ru_speeds(osm))
             _run(netconvert, ["--osm-files", "input.osm", "-o", "map.net.xml", "--geometry.remove",
                               "--junctions.join", "--tls.guess-signals", "--keep-edges.by-vclass",
-                              ",".join(FLEET[k]["vClass"] for k in fleet)],
+                              ",".join(FLEET[k]["vClass"] for k in fleet), *RU_NETCONVERT,
+                              *(["--osm.bike-access", "true"] if "bicycle" in fleet else [])],
                  workdir, "Построение сети", 45)
             routes, placed = _routes(workdir / "map.net.xml", fleet)
             ET.ElementTree(routes).write(workdir / "cars.rou.xml")
-            _run(sumo, ["-n", "map.net.xml", "-r", "cars.rou.xml", "--end", "90", "--step-length", "0.5",
+            programs, applied = signal_programs(workdir / "map.net.xml", signals or [])
+            extra: list[str] = []
+            if programs is not None:
+                ET.ElementTree(programs).write(workdir / "uds.tll.xml")
+                extra = ["-a", "uds.tll.xml"]
+            _run(sumo, ["-n", "map.net.xml", "-r", "cars.rou.xml", *extra, "--end", "90", "--step-length", "0.5",
                         "--fcd-output", "cars.xml", "--fcd-output.geo", "true", "--precision.geo", "7",
                         "--no-step-log", "true", "--ignore-route-errors", "true"], workdir, "Прогон", 25)
             frames: dict[float, list[Vehicle]] = {}
@@ -325,6 +519,9 @@ def run_sumo(osm: bytes, vehicles: int, fleet: dict[str, int] | None = None) -> 
             return {"frames": [{"time": time, "vehicles": cars} for time, cars in frames.items()],
                     "fleet": [{"kind": k, "label": FLEET[k]["label"], "requested": n, "placed": placed.get(k, 0)}
                               for k, n in fleet.items()],
-                    "warnings": [f"Нет путей для: {', '.join(missing)}"] if missing else []}
+                    "warnings": [f"Нет путей для: {', '.join(missing)}"] if missing else [],
+                    "rules": RULES,
+                    "signals": [{**sg, "applied": any(a["node_id"] == sg["node_id"] for a in applied)}
+                                for sg in (signals or [])]}
     finally:
         _SUMO_SLOT.release()

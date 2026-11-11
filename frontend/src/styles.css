@@ -542,3 +542,9 @@ input[type="checkbox"]:disabled { cursor: default; }
 @media (max-width: 700px) { .sim-layout { flex-direction: column; } .sim-fleet { border-right: 0; padding-right: 0; } }
 .sim-main > p { max-width: 520px; }
 .sim-fleet .link { color: #1d4ed8; }
+.simulation-report .sim-kinds, .sim-signals table { margin-top: 8px; font-size: 12px; }
+.sim-signals { margin-top: 8px; font-size: 12px; }
+.sim-signals caption { text-align: left; font-weight: 600; padding: 4px 0; }
+.sim-report-kinds { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.sim-report-kinds label { display: flex; gap: 4px; align-items: center; }
+.sim-rules ul { margin: 4px 0 0 16px; padding: 0; } .sim-rules { max-width: 520px; }
