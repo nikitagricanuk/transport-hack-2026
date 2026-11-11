@@ -8,6 +8,7 @@ export type CollabMessage =
   | { type: 'leave'; id: string }
   | { type: 'presence'; peer: Peer }
   | { type: 'patch'; rev: number; by: string | null; [k: string]: unknown }
+  | { type: 'rename'; filename: string }
   | { type: 'load' };
 
 export interface Presence {

@@ -83,6 +83,8 @@ const json = (body: unknown): RequestInit => ({
 });
 
 /** Edits answer with a patch of the touched map features instead of the whole map. */
+export type DocumentSummary = { doc_id: string; filename: string; updated_at: number; peers: { id: string; name: string; color: string }[] };
+
 export type OpResponse = Omit<DocState, 'geo'> & {
   geo?: Geo;
   patch?: GeoPatch | null;
@@ -148,6 +150,10 @@ export const api = {
     request<{ adapters: AdapterComparison }>(`/api/documents/${docId}/elements/way/${wayId}`, { signal })
       .then(({ adapters }) => adapters),
   health: () => request<{ ok: boolean; version: string; netconvert: boolean }>('/api/health'),
+  documents: () => request<DocumentSummary[]>('/api/documents'),
+  newDocument: (name: string) => request<DocState>('/api/documents/new', json({ name })),
+  renameDocument: (id: string, name: string) => request<{ doc_id: string; filename: string }>(`/api/documents/${encodeURIComponent(id)}/rename`, json({ name })),
+  openSharedSample: (name: string) => request<DocState>(`/api/workspace/samples/${encodeURIComponent(name)}/open`, { method: 'POST' }),
   samples: () => request<{ name: string; size: number }[]>('/api/samples'),
   openSample: (name: string) => request<DocState>(`/api/samples/${encodeURIComponent(name)}/open`, { method: 'POST' }),
   upload: (file: File) => {
