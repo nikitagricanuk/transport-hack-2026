@@ -88,7 +88,8 @@ class Session:
     segments_cache: tuple | None = None
     chain_cache: tuple | None = None
     load_base_cache: tuple | None = None
-    simulation: dict[str, Any] | None = None  # metrics of the last simulation run, for the report export
+    simulation: dict[str, Any] | None = None
+    simulation_input: tuple | None = None   # (recording, meta) of the last run  # metrics of the last simulation run, for the report export
 
 
 SESSIONS: dict[str, Session] = {}
@@ -949,9 +950,34 @@ def _with_report(s: Session, recording: dict, engine: str, **extra: Any) -> dict
     with s.lock:
         meta = {"engine": engine, "filename": s.filename, "generated": time.strftime("%Y-%m-%d %H:%M"), **extra}
         s.simulation = sim_report.compute(s.doc, _rows(s), recording, meta)
+        s.simulation_input = (recording, meta)   # kept to re-measure only the chosen vehicle kinds
         rep = s.simulation
     return {**recording, "report": {"summary": rep["summary"], "roads": rep["roads"][:10],
-                                    "junctions": rep["junctions"][:5]}}
+                                    "junctions": rep["junctions"][:5], "kinds": rep["kinds"],
+                                    "signals": rep["signals"]}}
+
+
+def _sumo_signals(s: Session) -> list[dict[str, Any]]:
+    """Every signal's plan in the ids of the exported file, for SUMO to run and the report to read."""
+    nmap = s.doc.export_idmap()["node"]
+    index = s.doc.node_way_index()
+    timing = {nid: cfg for nid, cfg in s.signal_timing.items() if nid in s.doc.nodes}
+    out = []
+    for nid, n in s.doc.nodes.items():
+        if not signal_plans.is_signal(n.tags):
+            continue
+        ways = [s.doc.ways[w] for w in index.get(nid, []) if w in s.doc.ways]
+        arms = signal_plans.approaches(s.doc, nid, ways)
+        if len(arms) < 2:
+            continue
+        main = next((a for a in arms if a["group"] == "main"), arms[0])
+        names = sorted({a["name"] for a in arms if a["name"]})
+        out.append({"node_id": nmap.get(nid, nid), "editor_id": nid, "lat": n.lat, "lon": n.lon,
+                    "name": " / ".join(names) or f"узел {nid}", "axis": main["bearing"],
+                    "custom": nid in timing,
+                    "phases": [{"name": p["name"], "green_s": p["green_s"], "moves": p["moves"]}
+                               for p in signal_plans.program(timing.get(nid))]})
+    return out
 
 
 @app.post("/api/documents/{doc_id}/simulation/sumo")
@@ -961,9 +987,10 @@ def simulate_sumo(doc_id: str, vehicles: int = Query(60, ge=1, le=200),
     s = _session(doc_id)
     with s.lock:
         xml = _export_xml(s)
+        plans = _sumo_signals(s)
     try:
         chosen = parse_fleet(fleet, vehicles)
-        recording = run_sumo(xml, vehicles, chosen)
+        recording = run_sumo(xml, vehicles, chosen, plans)
     except SimulationError as e:
         raise HTTPException(e.status, str(e)) from e
     return _with_report(s, recording, "sumo", vehicles_requested=sum(chosen.values()))
@@ -993,11 +1020,21 @@ def import_webots(doc_id: str, recording: UploadFile) -> dict:
 
 
 @app.get("/api/documents/{doc_id}/simulation/report.{fmt}")
-def simulation_report(doc_id: str, fmt: Literal["xlsx", "pdf", "docx", "csv", "json"]) -> Response:
+def simulation_report(doc_id: str, fmt: Literal["xlsx", "pdf", "docx", "csv", "json"],
+                      kinds: Annotated[str | None, Query(max_length=120,
+                                                         description="только эти виды: bus,tram")] = None) -> Response:
     s = _session(doc_id)
     with s.lock:
         rep = s.simulation
         stem = _safe_filename(s.filename).removesuffix(".osm")
+        chosen = {k.strip() for k in kinds.split(",") if k.strip()} if kinds else set()
+        if rep is not None and chosen:
+            unknown = chosen - set(sim_report.KIND_RU)
+            if unknown:
+                raise HTTPException(400, f"неизвестный вид транспорта: {', '.join(sorted(unknown))}")
+            recording, meta = s.simulation_input
+            rep = sim_report.compute(s.doc, _rows(s), recording, meta, kinds=chosen)
+            stem += "_" + "_".join(sorted(chosen))
     if rep is None:
         raise HTTPException(404, "Сначала запустите симуляцию или загрузите запись.")
     build, media = sim_report.BUILDERS[fmt]

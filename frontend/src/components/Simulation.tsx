@@ -157,6 +157,10 @@ export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHa
     {error && <p className="bad" role="alert">{error}</p>}
     {recording?.fleet && <p className="small">{recording.fleet.map((f) => `${f.label}: ${f.placed}${f.placed < f.requested ? ` из ${f.requested}` : ''}`).join(' · ')}</p>}
     {recording?.warnings?.map((w) => <p key={w} className="bad small">{w}</p>)}
+    {recording?.rules && <details className="small sim-rules">
+      <summary>Правила движения (ПДД РФ) · светофоров по программам редактора: {recording.signals?.filter((s) => s.applied).length ?? 0} из {recording.signals?.length ?? 0}</summary>
+      <ul>{recording.rules.map((r) => <li key={r}>{r}</li>)}</ul>
+    </details>}
     {recording && <div className="simulation-playback">
       <button className="btn" disabled={!duration} onClick={() => {
         if (!playing && clock.current >= duration) seek(0);
@@ -205,9 +209,14 @@ export function SimulationSummary({ docId, report }: { docId: string; report: Si
     ['Макс. очередь', `${s.max_queue} авт`],
     ['Выбросы CO₂', `${num(s.co2_kg, 2)} кг`],
   ];
+  const kinds = report.kinds ?? [];
+  // the report can be exported for some vehicle kinds only; all are chosen at first
+  const [only, setOnly] = useState<string[]>([]);
+  const chosen = only.length ? only : kinds.map((k) => k.kind);
   const save = (kind: SimulationReportFormat) => {
     setError(null);
-    downloadFile(api.simulationReportUrl(docId, kind), `simulation_report.${kind}`)
+    const subset = chosen.length && chosen.length < kinds.length ? chosen : [];
+    downloadFile(api.simulationReportUrl(docId, kind, subset), `simulation_report${subset.length ? `_${subset.join('_')}` : ''}.${kind}`)
       .catch((e: Error) => setError(e.message));
   };
   return <div className="simulation-report" aria-label="Отчёт о симуляции">
@@ -220,8 +229,29 @@ export function SimulationSummary({ docId, report }: { docId: string; report: Si
         <td>{r.name || `#${r.id}`}</td><td>{num(r.intensity)}</td><td>{num(r.capacity)}</td>
         <td>{num(r.load, 2)}</td><td>{r.los}</td></tr>)}</tbody>
     </table>}
+    {kinds.length > 0 && <table className="sim-kinds">
+      <thead><tr><th>Вид</th><th>Машин</th><th title="Средняя скорость">V, км/ч</th><th title="Время ожидания на машину">Ожид., с</th>
+        <th title="Ожидание у светофоров на машину">У светоф., с</th><th>CO₂, кг</th></tr></thead>
+      <tbody>{kinds.map((k) => <tr key={k.kind}><td>{k.label}</td><td>{k.vehicles}</td><td>{num(k.speed_kmh, 1)}</td>
+        <td>{num(k.delay_s, 1)}</td><td>{num(k.signal_wait_s, 1)}</td><td>{num(k.co2_kg, 2)}</td></tr>)}</tbody>
+    </table>}
+    {(report.signals?.length ?? 0) > 0 && <details className="sim-signals">
+      <summary>Светофоры по фазам ({report.signals!.length})</summary>
+      {report.signals!.map((sg) => <table key={sg.id}>
+        <caption>{sg.name} · цикл {sg.cycle_s} с{sg.custom ? ' · программа задана' : ''}</caption>
+        <thead><tr><th>Фаза</th><th>Зел., с</th>{kinds.map((k) => <th key={k.kind} title={`${k.label}: проехало / ожидание, с`}>{k.label}</th>)}</tr></thead>
+        <tbody>{sg.phases.map((p) => <tr key={p.name}><td title={p.moves}>{p.name}</td><td>{p.green_s}</td>
+          {kinds.map((k) => <td key={k.kind}>{p.passed[k.kind] ?? 0} / {num(p.waited_s[k.kind] ?? 0)}</td>)}</tr>)}</tbody>
+      </table>)}
+      <p className="muted small">В ячейке: проехало машин в фазу / суммарное ожидание у светофора, с. Фаза — зелёный, жёлтый 3 с и все красные 2 с.</p>
+    </details>}
+    {kinds.length > 1 && <div className="sim-report-kinds" role="group" aria-label="Виды транспорта в отчёте">
+      <span className="muted small">В отчёт:</span>
+      {kinds.map((k) => <label key={k.kind} className="small"><input type="checkbox" checked={chosen.includes(k.kind)}
+        onChange={() => setOnly(chosen.includes(k.kind) ? chosen.filter((x) => x !== k.kind) : [...chosen, k.kind])} />{k.label}</label>)}
+    </div>}
     <div className="simulation-export">
-      <span className="muted small">Скачать отчёт:</span>
+      <span className="muted small">Скачать отчёт{chosen.length && chosen.length < kinds.length ? ` (${kinds.filter((k) => chosen.includes(k.kind)).map((k) => k.label).join(', ')})` : ''}:</span>
       {FORMATS.map(([kind, label]) => <button key={kind} className="btn" onClick={() => save(kind)}>{label}</button>)}
     </div>
     {error && <p className="bad" role="alert">{error}</p>}

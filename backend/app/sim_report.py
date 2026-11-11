@@ -32,6 +32,23 @@ CAR_SPACE_M = 7.5      # length of a car plus the gap in a standing queue
 CO2_IDLE_GS = 0.6      # g/s at idle: about 0.9 l/h of petrol
 
 ENGINE_RU = {"sumo": "SUMO", "matsim": "MATSim", "webots": "Webots"}
+KIND_RU = {"car": "Легковые", "bus": "Автобусы", "tram": "Трамваи", "truck": "Грузовые",
+           "motorcycle": "Мотоциклы", "bicycle": "Велосипеды"}
+# CO2 relative to a passenger car at the same speed: diesel bus and lorry burn about 3–4 times
+# more, a motorcycle about half; trams (electric) and bicycles emit nothing on the street.
+# Assumption for the comparison of kinds, not a measurement.
+KIND_CO2 = {"car": 1.0, "bus": 3.5, "truck": 3.0, "motorcycle": 0.5, "tram": 0.0, "bicycle": 0.0}
+SIGNAL_PASS_M = 25.0   # a vehicle within this distance of a signal node is crossing the junction
+KIND_COLS = [
+    ("label", "Вид транспорта"), ("vehicles", "Машин"), ("completed", "Завершили поездку"),
+    ("avg_trip_s", "Среднее время поездки, с"), ("speed_kmh", "Средняя скорость, км/ч"),
+    ("delay_s", "Время ожидания на машину, с"), ("stopped_s", "Простой на машину, с"),
+    ("signal_wait_s", "Ожидание у светофоров на машину, с"), ("signal_passes", "Проездов светофоров"),
+    ("veh_km", "Пробег, авт·км"), ("co2_kg", "CO₂, кг"),
+]
+PHASE_COLS = [
+    ("signal", "Светофор"), ("phase", "Фаза"), ("green_s", "Зелёный, с"), ("moves", "Разрешённые движения"),
+]
 
 
 def co2_g_per_km(kmh: float) -> float:
@@ -54,7 +71,7 @@ JUNCTION_COLS = [
     ("stopped_vehicles", "Машин стояло"), ("stopped_s", "Суммарный простой, с"),
 ]
 TRIP_COLS = [
-    ("id", "Машина"), ("completed", "Доехала"), ("depart_s", "Въезд, с"), ("arrive_s", "Выезд, с"),
+    ("id", "Машина"), ("kind", "Вид"), ("completed", "Доехала"), ("depart_s", "Въезд, с"), ("arrive_s", "Выезд, с"),
     ("trip_s", "Время поездки, с"), ("distance_m", "Путь, м"), ("speed_kmh", "Средняя скорость, км/ч"),
     ("delay_s", "Время ожидания (задержка), с"), ("stopped_s", "Время простоя, с"), ("co2_g", "CO₂, г"),
 ]
@@ -93,14 +110,16 @@ METHOD = [
     ("Выбросы CO₂", f"E = Σ e(v) · d + {CO2_IDLE_GS} г/с · t_простоя",
      "e(v) = 110 + 2100 / v г/км — средний бензиновый автомобиль Евро-5, приближение кривой COPERT 5"),
 ]
+KIND_NOTE = ("Выбросы CO₂ по видам: относительно легкового автомобиля автобус ×3,5, грузовой ×3, "
+             "мотоцикл ×0,5; трамвай и велосипед на улице не выбрасывают — допущение для сравнения видов.")
 ASSUMPTIONS = (
     "Показатели измерены по траекториям симуляции: каждая позиция машины привязана к ближайшей "
     f"дороге OSM в пределах {SNAP_M:.0f} м с учётом направления движения. Интенсивность приведена к часу "
     "по окну наблюдения, поэтому при коротком прогоне она чувствительна к числу машин в сценарии. "
     "Пропускная способность — модель редактора (полосы, класс дороги, светофоры), не измерение. "
     "Поездка считается завершённой, если машина покинула сеть до конца окна. "
-    "Выбросы CO₂ — оценка для легкового автомобиля, а не измерение."
-)
+    "Выбросы CO₂ — оценка, а не измерение. "
+) + KIND_NOTE
 
 
 # ------------------------------------------------------------------ matching
@@ -181,7 +200,25 @@ class _Junctions:
 
 
 # ------------------------------------------------------------------ metrics
-def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+def _phase_at(phases: list[dict[str, Any]], t: float) -> int:
+    """Index of the phase running at ``t`` (the program starts at t = 0); its yellow and
+    all-red belong to it."""
+    cycle = sum(p["green_s"] + 5 for p in phases) or 1
+    pos = t % cycle
+    for i, p in enumerate(phases):
+        pos -= p["green_s"] + 5
+        if pos < 0:
+            return i
+    return len(phases) - 1
+
+
+def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, Any], meta: dict[str, Any],
+            kinds: set[str] | None = None) -> dict[str, Any]:
+    """``kinds``: report only these vehicle kinds (car, bus, tram…); None — all of them."""
+    if kinds:
+        recording = {**recording, "frames": [{**f, "vehicles": [v for v in f["vehicles"]
+                                                                if (v[4] if len(v) > 4 else "car") in kinds]}
+                                             for f in recording["frames"]]}
     by_id = {r["id"]: r for r in rows if r["id"] in doc.ways}
     snap = _Snapper(doc, set(by_id))
     junctions = _Junctions(doc, set(by_id), snap)
@@ -206,6 +243,15 @@ def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, A
     width = duration / buckets
     series = [{"cars": 0.0, "d": 0.0, "t": 0.0, "stopped": 0.0} for _ in range(buckets)]
 
+    # signals the engine ran with known programs (SUMO runs the editor's plans from t = 0)
+    sig_list = []
+    for sg in recording.get("signals") or []:
+        if not sg.get("applied") or not sg.get("phases") or "lat" not in sg:
+            continue
+        sx, sy = snap.proj.to_xy(sg["lat"], sg["lon"])
+        sig_list.append({**sg, "x": sx, "y": sy, "inside": set(),
+                         "passed": [Counter() for _ in sg["phases"]], "waited": [Counter() for _ in sg["phases"]]})
+
     def road(wid: int) -> dict[str, Any]:
         return roads.setdefault(wid, {"cars": set(), "out": set(), "occ": 0.0, "d": 0.0, "t": 0.0, "enter": {},
                                       "stay": [], "delay": 0.0, "stopped": 0.0, "max_queue": 0, "co2": 0.0})
@@ -220,11 +266,13 @@ def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, A
         series[b]["cars"] += n_cars * dt
         queue_road: Counter[int] = Counter()
         queue_junction: Counter[int] = Counter()
-        for car, lon, lat, angle, *_kind in frame["vehicles"]:
+        for car, lon, lat, angle, *rest in frame["vehicles"]:
+            kind = rest[0] if rest else "car"
             samples += 1
             x, y = snap.proj.to_xy(lat, lon)
             wid = snap.match(x, y, angle)
-            v = cars.setdefault(car, {"first": t, "last": t, "d": 0.0, "t": 0.0, "delay": 0.0, "stopped": 0.0, "co2": 0.0})
+            v = cars.setdefault(car, {"first": t, "last": t, "d": 0.0, "t": 0.0, "delay": 0.0, "stopped": 0.0,
+                                      "co2": 0.0, "kind": kind, "sig_wait": 0.0, "sig_pass": 0})
             v["last"] = t
             prev = last.get(car)
             if prev and t - prev[0] > MAX_GAP_S:
@@ -242,7 +290,7 @@ def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, A
                 standing = speed < STOP_MS
                 free = by_id[wid]["speed"] if wid is not None else (by_id[prev[1]]["speed"] if prev[1] is not None else 50)
                 delay = max(0.0, gap - d / (free / 3.6)) if free else 0.0
-                co2 = CO2_IDLE_GS * gap if standing else co2_g_per_km(speed * 3.6) * d / 1000
+                co2 = (CO2_IDLE_GS * gap if standing else co2_g_per_km(speed * 3.6) * d / 1000) * KIND_CO2.get(kind, 1.0)
                 v["d"] += d
                 v["t"] += gap
                 v["delay"] += delay
@@ -274,6 +322,19 @@ def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, A
                     left["out"].add(car)
                     if car in left["enter"]:
                         left["stay"].append(prev[0] - left["enter"].pop(car))
+            for si, sg in enumerate(sig_list):
+                dist = math.hypot(x - sg["x"], y - sg["y"])
+                if dist <= SIGNAL_PASS_M and car not in sg["inside"]:
+                    sg["inside"].add(car)
+                    ph = _phase_at(sg["phases"], t - t_start)
+                    sg["passed"][ph][kind] += 1
+                    v["sig_pass"] += 1
+                elif dist > SIGNAL_PASS_M * 2:
+                    sg["inside"].discard(car)
+                if prev and dist <= JUNCTION_M and math.hypot(x - prev[2], y - prev[3]) / max(t - prev[0], 1e-9) < STOP_MS:
+                    ph = _phase_at(sg["phases"], t - t_start)
+                    sg["waited"][ph][kind] += t - prev[0]
+                    v["sig_wait"] += t - prev[0]
             last[car] = (t, wid, x, y)
         for wid, n in queue_road.items():
             roads[wid]["max_queue"] = max(roads[wid]["max_queue"], n)
@@ -318,9 +379,11 @@ def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, A
     tail = max(MAX_GAP_S, 2 * step)
     trip_rows = []
     for car, v in cars.items():
+        # (kind is kept on the car for the per-kind section)
         done = v["last"] < t_end - tail + 1e-9 and t_end - t_start > tail
         trip_rows.append({
-            "id": car, "completed": "да" if done else "нет", "depart_s": round(v["first"] - t_start, 1),
+            "id": car, "kind": KIND_RU.get(v["kind"], v["kind"]), "completed": "да" if done else "нет",
+            "depart_s": round(v["first"] - t_start, 1),
             "arrive_s": round(v["last"] - t_start, 1) if done else None, "trip_s": round(v["last"] - v["first"], 1),
             "distance_m": round(v["d"]), "speed_kmh": round(v["d"] / v["t"] * 3.6, 1) if v["t"] else None,
             "delay_s": round(v["delay"], 1), "stopped_s": round(v["stopped"], 1), "co2_g": round(v["co2"], 1),
@@ -363,12 +426,47 @@ def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, A
         "matched_share": round(matched / samples, 3) if samples else 0,
         "by_los": by_los,
     }
+    # ---- by vehicle kind
+    kind_rows = []
+    for kind in sorted({v["kind"] for v in cars.values()}, key=lambda k: list(KIND_RU).index(k) if k in KIND_RU else 99):
+        vs = [(car, v) for car, v in cars.items() if v["kind"] == kind]
+        done = [r for r in trip_rows if r["completed"] == "да" and cars[r["id"]]["kind"] == kind]
+        d, tt, n = sum(v["d"] for _, v in vs), sum(v["t"] for _, v in vs), len(vs) or 1
+        kind_rows.append({
+            "kind": kind, "label": KIND_RU.get(kind, kind), "vehicles": len(vs), "completed": len(done),
+            "avg_trip_s": round(sum(r["trip_s"] for r in done) / len(done), 1) if done else None,
+            "speed_kmh": round(d / tt * 3.6, 1) if tt else None,
+            "delay_s": round(sum(v["delay"] for _, v in vs) / n, 1),
+            "stopped_s": round(sum(v["stopped"] for _, v in vs) / n, 1),
+            "signal_wait_s": round(sum(v["sig_wait"] for _, v in vs) / n, 1),
+            "signal_passes": sum(v["sig_pass"] for _, v in vs),
+            "veh_km": round(d / 1000, 2), "co2_kg": round(sum(v["co2"] for _, v in vs) / 1000, 2),
+        })
+    present = [k["kind"] for k in kind_rows]
+
+    # ---- signal phases: who crossed and who waited in each phase, by kind
+    from .signals import MOVES
+    signal_rows = []
+    for sg in sig_list:
+        phases = []
+        for i, p in enumerate(sg["phases"]):
+            phases.append({"name": p["name"], "green_s": p["green_s"],
+                           "moves": ", ".join(MOVES.get(m, m) for m in p["moves"]),
+                           "passed": {k: sg["passed"][i].get(k, 0) for k in present},
+                           "waited_s": {k: round(sg["waited"][i].get(k, 0.0), 1) for k in present}})
+        signal_rows.append({"id": sg.get("editor_id", sg["node_id"]), "name": sg["name"],
+                            "cycle_s": sum(p["green_s"] + 5 for p in sg["phases"]),
+                            "custom": sg.get("custom", False), "phases": phases})
+
     timeline = [{"t": round(i * width, 1), "on_network": round(s["cars"] / width, 1),
                  "speed_kmh": round(s["d"] / s["t"] * 3.6, 1) if s["t"] else None,
                  "stopped_share": round(s["stopped"] / s["t"], 3) if s["t"] else None}
                 for i, s in enumerate(series)]
-    return {"title": "Отчёт о симуляции движения", "meta": meta, "summary": summary,
-            "roads": road_rows, "junctions": junction_rows, "trips": trip_rows, "timeline": timeline}
+    return {"title": "Отчёт о симуляции движения" + (f" — {', '.join(KIND_RU.get(k, k) for k in sorted(kinds))}" if kinds else ""),
+            "meta": meta, "summary": summary,
+            "roads": road_rows, "junctions": junction_rows, "trips": trip_rows, "timeline": timeline,
+            "kinds": kind_rows, "signals": signal_rows, "rules": recording.get("rules", []),
+            "filter": [KIND_RU.get(k, k) for k in sorted(kinds)] if kinds else None}
 
 
 # ------------------------------------------------------------------ exports
@@ -379,6 +477,23 @@ def _fmt(v: Any) -> Any:
 def _summary_rows(rep: dict[str, Any]) -> list[list[Any]]:
     s = rep["summary"]
     return [[label, f"{round(s[k] * 100)} %" if k in PERCENT else _fmt(s[k])] for k, label in SUMMARY_RU]
+
+
+def _kind_table(rep: dict[str, Any]) -> tuple[list[str], list[list[Any]]]:
+    return [h for _, h in KIND_COLS], [[_fmt(r[k]) for k, _ in KIND_COLS] for r in rep.get("kinds", [])]
+
+
+def _phase_table(rep: dict[str, Any]) -> tuple[list[str], list[list[Any]]]:
+    """One row per signal phase: vehicles that crossed in it and the time they waited, by kind."""
+    kinds = [(k["kind"], k["label"]) for k in rep.get("kinds", [])]
+    headers = [h for _, h in PHASE_COLS] + [f"{label}: проехало" for _, label in kinds] \
+        + [f"{label}: ожидание, с" for _, label in kinds]
+    rows = []
+    for sg in rep.get("signals", []):
+        for ph in sg["phases"]:
+            rows.append([f"{sg['name']} (цикл {sg['cycle_s']} с)", ph["name"], ph["green_s"], ph["moves"]]
+                        + [ph["passed"].get(k, 0) for k, _ in kinds] + [ph["waited_s"].get(k, 0) for k, _ in kinds])
+    return headers, rows
 
 
 def build_json(rep: dict[str, Any]) -> bytes:
@@ -397,6 +512,13 @@ def build_csv(rep: dict[str, Any]) -> bytes:
     w.writerow([rep["title"]])
     for label, value in _summary_rows(rep):
         w.writerow([label, cell(value)])
+    for title, (headers, rows) in (("Виды транспорта", _kind_table(rep)), ("Светофоры по фазам", _phase_table(rep))):
+        if rows:
+            w.writerow([])
+            w.writerow([title])
+            w.writerow(headers)
+            for r in rows:
+                w.writerow([cell(v) for v in r])
     for title, cols, rows in (("Дороги", ROAD_COLS, rep["roads"]), ("Перекрёстки", JUNCTION_COLS, rep["junctions"]),
                               ("Поездки", TRIP_COLS, rep["trips"])):
         w.writerow([])
@@ -450,6 +572,22 @@ def build_xlsx(rep: dict[str, Any]) -> bytes:
     ch.add_data(Reference(ws, min_col=2, min_row=los_top, max_row=los_top + 6), titles_from_data=True)
     ch.set_categories(Reference(ws, min_col=1, min_row=los_top + 1, max_row=los_top + 6))
     ws.add_chart(ch, "D4")
+
+    headers, rows = _kind_table(rep)
+    if rows:
+        ws = wb.create_sheet("Виды транспорта")
+        end = table(ws, 1, headers, rows)
+        widths(ws, [16, 8, 12, 14, 14, 14, 14, 16, 12, 12, 10])
+        ch = bar("Средняя скорость и ожидание по видам", horizontal=False)
+        ch.add_data(Reference(ws, min_col=5, max_col=6, min_row=1, max_row=end), titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=2, max_row=end))
+        ws.add_chart(ch, "A" + str(end + 3))
+    headers, rows = _phase_table(rep)
+    if rows:
+        ws = wb.create_sheet("Светофоры по фазам")
+        table(ws, 1, headers, rows)
+        widths(ws, [34, 22, 10, 40] + [14] * (len(headers) - 4))
+        ws.freeze_panes = "C2"
 
     ws = wb.create_sheet("Дороги")
     roads = rep["roads"]
@@ -560,6 +698,18 @@ def _charts(rep: dict[str, Any]) -> dict[str, io.BytesIO]:
         out["queues"] = _png(fig)
         plt.close(fig)
 
+    kinds = rep.get("kinds") or []
+    if len(kinds) > 1:
+        names = [k["label"] for k in kinds]
+        fig, ax, ys = hbar(names, 0.45 * len(kinds) + 1)
+        ax.barh([y - 0.2 for y in ys], [k["speed_kmh"] or 0 for k in kinds], height=0.4, color=blue, label="Скорость, км/ч")
+        ax.barh([y + 0.2 for y in ys], [k["delay_s"] for k in kinds], height=0.4, color=orange, label="Ожидание на машину, с")
+        ax.set_yticks(ys, names)
+        ax.invert_yaxis()
+        ax.legend(frameon=False)
+        out["kinds"] = _png(fig)
+        plt.close(fig)
+
     tl = rep["timeline"]
     if tl:
         fig, ax = plt.subplots(figsize=(7, 2.8))
@@ -602,7 +752,19 @@ def _intro(rep: dict[str, Any]) -> str:
 def _sections(rep: dict[str, Any]) -> list[tuple[str, list[str], list[list[Any]], list[str], str | None]]:
     """(heading, table headers, table rows, chart keys, note) shared by Word and PDF."""
     more = len(rep["roads"]) - 25
-    return [
+    kh, kr = _kind_table(rep)
+    ph, pr = _phase_table(rep)
+    rules = rep.get("rules") or []
+    head = []
+    if kr:
+        head.append(("Виды транспорта", kh, kr, ["kinds"], None))
+    if pr:
+        head.append(("Светофоры: проезд и ожидание по фазам и видам транспорта", ph, pr, [],
+                     "Фаза включает свой зелёный, жёлтый 3 с и все красные 2 с. «Проехало» — машины, въехавшие "
+                     f"в пределы {SIGNAL_PASS_M:.0f} м от светофора в эту фазу; «ожидание» — время стоянки в {JUNCTION_M:.0f} м."))
+    if rules:
+        head.append(("Правила движения в симуляции", [], [], [], " ".join(rules)))
+    return head + [
         ("2. Интенсивность, пропускная способность и загрузка", [h for _, h in _SHORT], _rows(rep["roads"], _SHORT, 25),
          ["flow", "load"], f"…и ещё {more} дорог. Полный список — в Excel или CSV." if more > 0 else None),
         ("3. Очереди у перекрёстков", [h for _, h in _JSHORT], _rows(rep["junctions"], _JSHORT, 15), ["queues"],

@@ -252,8 +252,9 @@ export const api = {
   changes: (docId: string) => request<ChangesResult>(`/api/documents/${docId}/changes`),
   report: (docId: string) => request<ReportData>(`/api/documents/${docId}/report`),
   reportUrl: (docId: string, kind: 'xlsx' | 'docx' | 'pdf') => `/api/documents/${docId}/report.${kind}`,
-  simulationReportUrl: (docId: string, kind: SimulationReportFormat) =>
-    `/api/documents/${docId}/simulation/report.${kind}`,
+  /** `kinds`: only these vehicle kinds (car, bus, tram…); empty — all of them */
+  simulationReportUrl: (docId: string, kind: SimulationReportFormat, kinds: string[] = []) =>
+    `/api/documents/${docId}/simulation/report.${kind}${kinds.length ? `?kinds=${kinds.join(',')}` : ''}`,
   objectReportUrl: (docId: string, kind: string, id: number, fmt: 'xlsx' | 'pdf') =>
     `/api/documents/${docId}/objects/${kind}/${id}/report.${fmt}`,
   setClosure: (docId: string, wayId: number, closed: boolean, alternative = 0) =>

@@ -174,6 +174,10 @@ export interface SimulationRecording {
   /** SUMO run: how many of each kind were requested and placed on the network */
   fleet?: { kind: string; label: string; requested: number; placed: number }[];
   warnings?: string[];
+  /** traffic rules the SUMO network was built with */
+  rules?: string[];
+  /** editor signals and whether SUMO runs their program */
+  signals?: { node_id: number; name: string; applied: boolean }[];
   /** metrics measured on the run; the full report is exported from the server */
   report?: SimulationReport;
 }
@@ -191,6 +195,13 @@ export interface SimulationReport {
   roads: { id: number; name: string; intensity: number; throughput: number; capacity: number; load: number;
     los: string; speed_kmh: number | null; max_queue: number }[];
   junctions: { id: number; name: string; signals: string; max_queue: number; max_queue_m: number }[];
+  /** per vehicle kind */
+  kinds?: { kind: string; label: string; vehicles: number; completed: number; avg_trip_s: number | null;
+    speed_kmh: number | null; delay_s: number; stopped_s: number; signal_wait_s: number; signal_passes: number;
+    veh_km: number; co2_kg: number }[];
+  /** signals with the editor's programs: who crossed and who waited in each phase, by kind */
+  signals?: { id: number; name: string; cycle_s: number; custom: boolean;
+    phases: { name: string; green_s: number; moves: string; passed: Record<string, number>; waited_s: Record<string, number> }[] }[];
 }
 
 export interface SumoResult {
