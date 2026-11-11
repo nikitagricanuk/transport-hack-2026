@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react';
-import { api } from '../api';
-import type { SimulationRecording } from '../types';
+import { api, downloadFile, type SimulationReportFormat } from '../api';
+import type { SimulationRecording, SimulationReport } from '../types';
 import { makeSampler } from '../utils/simulation';
 import type { MapHandle } from './MapView';
 
@@ -131,5 +131,54 @@ export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHa
         if (car) map.current?.flyTo(car[1], car[2], 17);
       }}>К машинам</button>
     </div>}
+    {recording?.report && <SimulationSummary docId={docId} report={recording.report} />}
   </section>;
+}
+
+const FORMATS: [SimulationReportFormat, string][] = [
+  ['xlsx', 'Excel'], ['pdf', 'PDF'], ['docx', 'Word'], ['csv', 'CSV'], ['json', 'JSON'],
+];
+
+const num = (v: number | null, digits = 0) => v === null ? '—'
+  : v.toLocaleString('ru-RU', { maximumFractionDigits: digits });
+const pct = (v: number) => `${Math.round(v * 100)} %`;
+
+/** Key metrics of the last run and the report export in every format. */
+export function SimulationSummary({ docId, report }: { docId: string; report: SimulationReport }) {
+  const [error, setError] = useState<string | null>(null);
+  const s = report.summary;
+  const tiles: [string, string][] = [
+    ['Интенсивность ΣN', `${num(s.intensity_total)} авт/ч`],
+    ['Пропущено ΣQ', `${num(s.throughput_total)} авт/ч`],
+    ['Загрузка Z, средн. / макс.', `${num(s.avg_load, 2)} / ${num(s.max_load, 2)}`],
+    ['Средняя скорость', `${num(s.avg_speed_kmh, 1)} км/ч`],
+    ['Машин в сети', `${num(s.avg_on_network, 1)} (макс. ${s.max_on_network})`],
+    ['Завершённых поездок', `${s.completed} из ${s.vehicles} (${pct(s.completed_share)})`],
+    ['Время поездки', s.avg_trip_s === null ? '—' : `${num(s.avg_trip_s, 1)} с`],
+    ['Время ожидания', `${num(s.avg_delay_s, 1)} с на машину`],
+    ['Время простоя', `${num(s.avg_stopped_s, 1)} с (${pct(s.stopped_share)})`],
+    ['Макс. очередь', `${s.max_queue} авт`],
+    ['Выбросы CO₂', `${num(s.co2_kg, 2)} кг`],
+  ];
+  const save = (kind: SimulationReportFormat) => {
+    setError(null);
+    downloadFile(api.simulationReportUrl(docId, kind), `simulation_report.${kind}`)
+      .catch((e: Error) => setError(e.message));
+  };
+  return <div className="simulation-report" aria-label="Отчёт о симуляции">
+    <h3>Отчёт о симуляции · {s.engine}, {num(s.duration_s)} с</h3>
+    <dl>{tiles.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>
+    {report.roads.length > 0 && <table>
+      <thead><tr><th>Дорога</th><th title="Интенсивность">N, авт/ч</th><th title="Пропускная способность">P, авт/ч</th>
+        <th title="Коэффициент загрузки N / P">Z</th><th>LOS</th></tr></thead>
+      <tbody>{report.roads.slice(0, 5).map((r) => <tr key={r.id} className={r.load >= 0.9 ? 'bad' : undefined}>
+        <td>{r.name || `#${r.id}`}</td><td>{num(r.intensity)}</td><td>{num(r.capacity)}</td>
+        <td>{num(r.load, 2)}</td><td>{r.los}</td></tr>)}</tbody>
+    </table>}
+    <div className="simulation-export">
+      <span className="muted small">Скачать отчёт:</span>
+      {FORMATS.map(([kind, label]) => <button key={kind} className="btn" onClick={() => save(kind)}>{label}</button>)}
+    </div>
+    {error && <p className="bad" role="alert">{error}</p>}
+  </div>;
 }

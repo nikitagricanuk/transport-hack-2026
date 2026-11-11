@@ -92,6 +92,8 @@ export type OpResponse = Omit<DocState, 'geo'> & {
   results?: { id?: number; warnings?: string[] }[];
 };
 
+export type SimulationReportFormat = 'xlsx' | 'pdf' | 'docx' | 'csv' | 'json';
+
 /**
  * Download a file through fetch and save it only when the server answered with it.
  * A plain <a href download> saves whatever comes back, so an error JSON ended up
@@ -209,6 +211,8 @@ export const api = {
   changes: (docId: string) => request<ChangesResult>(`/api/documents/${docId}/changes`),
   report: (docId: string) => request<ReportData>(`/api/documents/${docId}/report`),
   reportUrl: (docId: string, kind: 'xlsx' | 'docx' | 'pdf') => `/api/documents/${docId}/report.${kind}`,
+  simulationReportUrl: (docId: string, kind: SimulationReportFormat) =>
+    `/api/documents/${docId}/simulation/report.${kind}`,
   objectReportUrl: (docId: string, kind: string, id: number, fmt: 'xlsx' | 'pdf') =>
     `/api/documents/${docId}/objects/${kind}/${id}/report.${fmt}`,
   setClosure: (docId: string, wayId: number, closed: boolean, alternative = 0) =>
