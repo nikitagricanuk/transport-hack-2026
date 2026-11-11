@@ -174,6 +174,23 @@ export interface SimulationRecording {
   /** SUMO run: how many of each kind were requested and placed on the network */
   fleet?: { kind: string; label: string; requested: number; placed: number }[];
   warnings?: string[];
+  /** metrics measured on the run; the full report is exported from the server */
+  report?: SimulationReport;
+}
+
+export interface SimulationReport {
+  summary: {
+    engine: string; duration_s: number; vehicles: number; avg_on_network: number; max_on_network: number;
+    completed: number; completed_share: number; avg_trip_s: number | null; avg_time_in_network_s: number;
+    avg_speed_kmh: number | null; avg_delay_s: number; avg_stopped_s: number; stopped_share: number;
+    roads_used: number; intensity_total: number; throughput_total: number; network_throughput: number;
+    avg_load: number; max_load: number; congested: number; overloaded: number;
+    max_queue: number; queued_junctions: number; veh_km: number; veh_hours: number;
+    co2_kg: number; co2_g_per_km: number | null; matched_share: number;
+  };
+  roads: { id: number; name: string; intensity: number; throughput: number; capacity: number; load: number;
+    los: string; speed_kmh: number | null; max_queue: number }[];
+  junctions: { id: number; name: string; signals: string; max_queue: number; max_queue_m: number }[];
 }
 
 export interface SumoResult {

@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, report
+from . import __version__, report, sim_report
 from .collab import HUB, Peer, clean_presence
 from . import fix_all, fix_preview
 from .analysis import METHOD
@@ -88,6 +88,7 @@ class Session:
     segments_cache: tuple | None = None
     chain_cache: tuple | None = None
     load_base_cache: tuple | None = None
+    simulation: dict[str, Any] | None = None  # metrics of the last simulation run, for the report export
 
 
 SESSIONS: dict[str, Session] = {}
@@ -890,6 +891,16 @@ def check_sumo(doc_id: str) -> dict[str, Any]:
     return run_netconvert(xml)
 
 
+def _with_report(s: Session, recording: dict, engine: str, **extra: Any) -> dict:
+    """Measure the run on the current roads and keep the metrics for the report export."""
+    with s.lock:
+        meta = {"engine": engine, "filename": s.filename, "generated": time.strftime("%Y-%m-%d %H:%M"), **extra}
+        s.simulation = sim_report.compute(s.doc, _rows(s), recording, meta)
+        rep = s.simulation
+    return {**recording, "report": {"summary": rep["summary"], "roads": rep["roads"][:10],
+                                    "junctions": rep["junctions"][:5]}}
+
+
 @app.post("/api/documents/{doc_id}/simulation/sumo")
 def simulate_sumo(doc_id: str, vehicles: int = Query(60, ge=1, le=200),
                   fleet: Annotated[str | None, Query(max_length=200,
@@ -898,30 +909,47 @@ def simulate_sumo(doc_id: str, vehicles: int = Query(60, ge=1, le=200),
     with s.lock:
         xml = _export_xml(s)
     try:
-        return run_sumo(xml, vehicles, parse_fleet(fleet, vehicles))
+        chosen = parse_fleet(fleet, vehicles)
+        recording = run_sumo(xml, vehicles, chosen)
     except SimulationError as e:
         raise HTTPException(e.status, str(e)) from e
+    return _with_report(s, recording, "sumo", vehicles_requested=sum(chosen.values()))
 
 
 @app.post("/api/documents/{doc_id}/simulation/matsim")
 def import_matsim(doc_id: str, network: UploadFile, events: UploadFile,
                   crs: str = Query("EPSG:4326", pattern=r"^[Ee][Pp][Ss][Gg]:[0-9]{1,8}$"),
                   start: int | None = Query(None, ge=0, le=604800)) -> dict:
-    _session(doc_id)
+    s = _session(doc_id)
     try:
-        return read_matsim(unpack_recording(network.file.read(FILE_LIMIT + 1)),
-                           unpack_recording(events.file.read(FILE_LIMIT + 1)), crs, start)
+        recording = read_matsim(unpack_recording(network.file.read(FILE_LIMIT + 1)),
+                                unpack_recording(events.file.read(FILE_LIMIT + 1)), crs, start)
     except SimulationError as e:
         raise HTTPException(e.status, str(e)) from e
+    return _with_report(s, recording, "matsim")
 
 
 @app.post("/api/documents/{doc_id}/simulation/webots")
 def import_webots(doc_id: str, recording: UploadFile) -> dict:
-    _session(doc_id)
+    s = _session(doc_id)
     try:
-        return read_webots(unpack_recording(recording.file.read(FILE_LIMIT + 1)))
+        frames = read_webots(unpack_recording(recording.file.read(FILE_LIMIT + 1)))
     except SimulationError as e:
         raise HTTPException(e.status, str(e)) from e
+    return _with_report(s, frames, "webots")
+
+
+@app.get("/api/documents/{doc_id}/simulation/report.{fmt}")
+def simulation_report(doc_id: str, fmt: Literal["xlsx", "pdf", "docx", "csv", "json"]) -> Response:
+    s = _session(doc_id)
+    with s.lock:
+        rep = s.simulation
+        stem = _safe_filename(s.filename).removesuffix(".osm")
+    if rep is None:
+        raise HTTPException(404, "Сначала запустите симуляцию или загрузите запись.")
+    build, media = sim_report.BUILDERS[fmt]
+    return Response(content=build(rep), media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="simulation_{stem}.{fmt}"'})
 
 
 @app.post("/api/documents/{doc_id}/check/organizer")
