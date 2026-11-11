@@ -220,7 +220,7 @@ def compute(doc: OsmDocument, rows: list[dict[str, Any]], recording: dict[str, A
         series[b]["cars"] += n_cars * dt
         queue_road: Counter[int] = Counter()
         queue_junction: Counter[int] = Counter()
-        for car, lon, lat, angle in frame["vehicles"]:
+        for car, lon, lat, angle, *_kind in frame["vehicles"]:
             samples += 1
             x, y = snap.proj.to_xy(lat, lon)
             wid = snap.match(x, y, angle)

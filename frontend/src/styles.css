@@ -523,3 +523,22 @@ input[type="checkbox"]:disabled { cursor: default; }
   .workspace-document-info { flex-basis: 65%; }
   .workspace-toolbar input { width: 100%; }
 }
+
+/* tool hint: folds into an «i» button */
+.map-hint { display: flex; align-items: flex-start; gap: 10px; }
+.map-hint-fold { pointer-events: auto; flex: none; width: 20px; height: 20px; padding: 0; border: 1px solid #374151; border-radius: 5px; background: #1f2937; color: #e5e7eb; font-size: 14px; line-height: 16px; cursor: pointer; }
+.map-hint-fold:hover { background: #374151; }
+.map-hint-icon { position: absolute; z-index: 1; top: 12px; left: 12px; width: 28px; height: 28px; padding: 0; border-radius: 50%; border: 1px solid #374151; background: #111827; color: #93c5fd; font: italic 700 15px/26px Georgia, serif; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.map-hint-icon:hover { background: #1f2937; color: #bfdbfe; }
+
+/* simulation: vehicle kinds on the left */
+.sim-layout { display: flex; gap: 14px; align-items: flex-start; }
+.sim-main { min-width: 0; }
+.sim-fleet { display: flex; flex-direction: column; gap: 5px; min-width: 170px; padding-right: 12px; border-right: 1px solid #cbd5e1; }
+.sim-kind { display: flex; align-items: center; gap: 6px; }
+.sim-kind-btn { flex: 1; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: #f8fafc; color: #111827; font-size: 12px; cursor: pointer; text-align: left; }
+.sim-kind-btn[aria-pressed=true] { background: #dbeafe; border-color: #2563eb; color: #1e3a8a; font-weight: 600; }
+.simulation-panel .sim-kind input[type=number] { width: 58px; }
+@media (max-width: 700px) { .sim-layout { flex-direction: column; } .sim-fleet { border-right: 0; padding-right: 0; } }
+.sim-main > p { max-width: 520px; }
+.sim-fleet .link { color: #1d4ed8; }

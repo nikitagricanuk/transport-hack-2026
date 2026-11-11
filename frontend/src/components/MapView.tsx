@@ -152,6 +152,33 @@ function arrowImage(color = '#3F4652'): ImageData {
   return ctx.getImageData(0, 0, s, s);
 }
 
+/** Top-down icon of a bus, tram, truck or two-wheeler: a rounded body of its proportions. */
+const KIND_ICON: Record<string, { w: number; h: number; color: string }> = {
+  bus: { w: 26, h: 96, color: '#E8A33D' }, tram: { w: 26, h: 150, color: '#D94141' },
+  truck: { w: 26, h: 76, color: '#6B7280' }, motorcycle: { w: 12, h: 26, color: '#7C3AED' },
+  bicycle: { w: 10, h: 24, color: '#16A34A' },
+};
+function kindImage(kind: string): ImageData {
+  const { w, h, color } = KIND_ICON[kind];
+  const canvas = document.createElement('canvas');
+  canvas.width = w + 4;
+  canvas.height = h + 4;
+  const ctx = canvas.getContext('2d')!;
+  ctx.beginPath();
+  ctx.roundRect(2, 2, w, h, Math.min(6, w / 3));
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = '#0F172A';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  if (w > 20) {
+    ctx.fillStyle = '#1E293B';
+    ctx.fillRect(6, 8, w - 8, 8);   // windscreen
+    if (kind === 'tram') for (const y of [h / 3, (2 * h) / 3]) ctx.fillRect(2, y, w, 2);   // articulation
+  }
+  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+}
+
 function vehicleImage(): ImageData {
   const canvas = document.createElement('canvas');
   canvas.width = 28;
@@ -180,8 +207,9 @@ function vehicleImage(): ImageData {
 
 const vehicleFeatures = (vehicles: SimVehicle[]): FeatureCollection<Point> => ({
   type: 'FeatureCollection',
-  features: vehicles.map(([id, lon, lat, angle]) => ({
-    type: 'Feature', id, geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { angle },
+  features: vehicles.map(([id, lon, lat, angle, kind]) => ({
+    type: 'Feature', id, geometry: { type: 'Point', coordinates: [lon, lat] },
+    properties: { angle, icon: kind && kind in KIND_ICON ? `sim-${kind}` : 'sim-car' },
   })),
 });
 
@@ -594,9 +622,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'circle-radius': 9, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-width': 3,
           'circle-stroke-color': ['match', ['get', 'kind'], 'node', '#16A34A', '#2563EB'] } });
       map.addImage('sim-car', vehicleImage(), { pixelRatio: 2 });
+      for (const kind of Object.keys(KIND_ICON)) map.addImage(`sim-${kind}`, kindImage(kind), { pixelRatio: 2 });
       map.addSource('sim-vehicles', { type: 'geojson', data: vehicleFeatures(vehiclesRef.current) });
       map.addLayer({ id: 'sim-vehicles', type: 'symbol', source: 'sim-vehicles', maxzoom: CAR_MODEL_MINZOOM, layout: {
-        'icon-image': 'sim-car', 'icon-rotate': ['get', 'angle'], 'icon-rotation-alignment': 'map',
+        'icon-image': ['get', 'icon'], 'icon-rotate': ['get', 'angle'], 'icon-rotation-alignment': 'map',
         'icon-pitch-alignment': 'map', 'icon-allow-overlap': true, 'icon-ignore-placement': true,
         'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.42, 16, 0.7, 20, 1],
       } });

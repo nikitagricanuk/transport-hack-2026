@@ -22,7 +22,7 @@ MAX_VEHICLES = 500
 MAX_FRAMES = 3600
 _SUMO_SLOT = BoundedSemaphore()
 
-Vehicle = tuple[str, float, float, float]
+Vehicle = tuple  # (id, lon, lat, angle) or (id, lon, lat, angle, kind)
 
 
 class SimulationError(ValueError):
@@ -181,40 +181,98 @@ def read_matsim(network: bytes, events: bytes, crs: str, start: int | None) -> d
     return _recording(frames)
 
 
-def _passenger_routes(net: Path, target: int) -> ET.Element:
-    """Generate seeded demo demand using SUMO's legal passenger lane connections."""
+# Vehicle kinds the editor can simulate: SUMO vehicle class and vType attributes.
+# Lengths and speeds are typical values for the vehicle class, not calibrated.
+FLEET = {
+    "car": {"label": "Легковые", "vClass": "passenger", "length": "4.5", "maxSpeed": "33"},
+    "bus": {"label": "Автобусы", "vClass": "bus", "length": "12", "maxSpeed": "22", "guiShape": "bus"},
+    "tram": {"label": "Трамваи", "vClass": "tram", "length": "26", "maxSpeed": "19", "guiShape": "rail/railcar"},
+    "truck": {"label": "Грузовые", "vClass": "truck", "length": "9", "maxSpeed": "25", "guiShape": "truck"},
+    "motorcycle": {"label": "Мотоциклы", "vClass": "motorcycle", "length": "2.2", "maxSpeed": "33"},
+    "bicycle": {"label": "Велосипеды", "vClass": "bicycle", "length": "1.8", "maxSpeed": "6", "guiShape": "bicycle"},
+}
+MAX_FLEET = 300
+
+
+def parse_fleet(value: str | None, vehicles: int) -> dict[str, int]:
+    """«car:40,bus:10» → {"car": 40, "bus": 10}; without it, ``vehicles`` cars as before."""
+    if not value:
+        return {"car": vehicles}
+    fleet: dict[str, int] = {}
+    for part in value.split(","):
+        kind, _, count = part.partition(":")
+        kind = kind.strip()
+        if kind not in FLEET:
+            raise SimulationError(f"Неизвестный вид транспорта: {kind}", 400)
+        try:
+            n = int(count)
+        except ValueError as e:
+            raise SimulationError(f"Количество для «{FLEET[kind]['label']}» должно быть числом", 400) from e
+        if n < 0 or n > 200:
+            raise SimulationError("Количество одного вида — от 0 до 200", 400)
+        if n:
+            fleet[kind] = fleet.get(kind, 0) + n
+    if not fleet:
+        raise SimulationError("Выберите хотя бы один вид транспорта", 400)
+    if sum(fleet.values()) > MAX_FLEET:
+        raise SimulationError(f"Всего не больше {MAX_FLEET} машин за прогон", 400)
+    return fleet
+
+
+def _allows(lane: ET.Element, vclass: str) -> bool:
+    allow, disallow = lane.get("allow"), lane.get("disallow", "")
+    if vclass in disallow.split() or "all" in disallow.split():
+        return False
+    return allow is None or allow == "all" or vclass in allow.split()
+
+
+def _routes(net: Path, fleet: dict[str, int]) -> tuple[ET.Element, dict[str, int]]:
+    """Seeded demand for every requested kind over the lanes SUMO lets that class use.
+
+    Each vehicle starts on a random edge open to its class and follows legal lane
+    connections for up to 24 edges, so every kind spreads over all the roads (or
+    tracks) where it may drive. Returns the routes and how many of each were placed.
+    """
     root = ET.parse(net).getroot()
-    passenger: dict[str, set[str]] = {}
-    for edge in root.findall("edge"):
-        if edge.get("function") is not None:
-            continue
-        passenger[edge.attrib["id"]] = {lane.attrib["index"] for lane in edge.findall("lane")
-                                      if ("passenger" in lane.get("allow", "passenger").split()
-                                          or lane.get("allow") == "all")
-                                      and not {"passenger", "all"}.intersection(lane.get("disallow", "").split())}
-    adjacency: dict[str, set[str]] = {}
-    for connection in root.findall("connection"):
-        a, b = connection.attrib["from"], connection.attrib["to"]
-        if (connection.get("fromLane") in passenger.get(a, ())
-                and connection.get("toLane") in passenger.get(b, ())):
-            adjacency.setdefault(a, set()).add(b)
-    candidates = sorted(edge for edge, lanes in passenger.items() if lanes)
-    if not candidates:
-        raise SimulationError("SUMO не нашёл дорог, доступных легковым машинам.")
     rng = random.Random(42)
     routes = ET.Element("routes")
-    for i in range(target):
-        route = [rng.choice(candidates)]
-        for _ in range(24):
-            options = sorted(adjacency.get(route[-1], set()).difference(route))
-            if not options:
-                break
-            route.append(rng.choice(options))
-        vehicle = ET.SubElement(routes, "vehicle", id=f"car-{i + 1}", depart=f"{i % 15}",
-                                departLane="best", departPos="random_free")
-        ET.SubElement(vehicle, "route", edges=" ".join(route))
-    routes[:] = sorted(routes, key=lambda vehicle: int(vehicle.attrib["depart"]))
-    return routes
+    for kind in fleet:
+        ET.SubElement(routes, "vType", id=kind, **{k: v for k, v in FLEET[kind].items() if k != "label"})
+    placed: dict[str, int] = {}
+    vehicles: list[ET.Element] = []
+    for kind, count in fleet.items():
+        vclass = FLEET[kind]["vClass"]
+        lanes: dict[str, set[str]] = {}
+        for edge in root.findall("edge"):
+            if edge.get("function") is not None:
+                continue
+            lanes[edge.attrib["id"]] = {lane.attrib["index"] for lane in edge.findall("lane") if _allows(lane, vclass)}
+        adjacency: dict[str, set[str]] = {}
+        for c in root.findall("connection"):
+            a, b = c.attrib["from"], c.attrib["to"]
+            if c.get("fromLane") in lanes.get(a, ()) and c.get("toLane") in lanes.get(b, ()):
+                adjacency.setdefault(a, set()).add(b)
+        candidates = sorted(e for e, ls in lanes.items() if ls)
+        placed[kind] = 0
+        if not candidates:
+            continue
+        for i in range(count):
+            route = [rng.choice(candidates)]
+            for _ in range(24):
+                options = sorted(adjacency.get(route[-1], set()).difference(route))
+                if not options:
+                    break
+                route.append(rng.choice(options))
+            v = ET.Element("vehicle", id=f"{kind}-{i + 1}", type=kind, depart=f"{i % 15}",
+                           departLane="best", departPos="random_free")
+            ET.SubElement(v, "route", edges=" ".join(route))
+            vehicles.append(v)
+            placed[kind] += 1
+    if not vehicles:
+        raise SimulationError("В сети нет дорог, по которым могут ехать выбранные виды транспорта.")
+    vehicles.sort(key=lambda v: (int(v.attrib["depart"]), v.attrib["id"]))
+    routes.extend(vehicles)
+    return routes, placed
 
 
 def _run(binary: str, args: list[str], workdir: Path, stage: str, timeout: int) -> None:
@@ -231,7 +289,9 @@ def _run(binary: str, args: list[str], workdir: Path, stage: str, timeout: int) 
         raise SimulationError(f"{stage}: SUMO завершился с ошибкой.{hint}")
 
 
-def run_sumo(osm: bytes, vehicles: int) -> dict:
+def run_sumo(osm: bytes, vehicles: int, fleet: dict[str, int] | None = None) -> dict:
+    """``fleet``: vehicles per kind (see FLEET); without it, ``vehicles`` passenger cars."""
+    fleet = fleet or {"car": vehicles}
     netconvert, sumo = find_sumo_binary("netconvert"), find_sumo_binary("sumo")
     if not netconvert or not sumo:
         raise SimulationError("SUMO недоступен. Нужны sumo и netconvert на сервере.", 503)
@@ -242,9 +302,11 @@ def run_sumo(osm: bytes, vehicles: int) -> dict:
             workdir = Path(tmp)
             (workdir / "input.osm").write_bytes(osm)
             _run(netconvert, ["--osm-files", "input.osm", "-o", "map.net.xml", "--geometry.remove",
-                              "--junctions.join", "--tls.guess-signals", "--keep-edges.by-vclass", "passenger"],
+                              "--junctions.join", "--tls.guess-signals", "--keep-edges.by-vclass",
+                              ",".join(FLEET[k]["vClass"] for k in fleet)],
                  workdir, "Построение сети", 45)
-            ET.ElementTree(_passenger_routes(workdir / "map.net.xml", vehicles)).write(workdir / "cars.rou.xml")
+            routes, placed = _routes(workdir / "map.net.xml", fleet)
+            ET.ElementTree(routes).write(workdir / "cars.rou.xml")
             _run(sumo, ["-n", "map.net.xml", "-r", "cars.rou.xml", "--end", "90", "--step-length", "0.5",
                         "--fcd-output", "cars.xml", "--fcd-output.geo", "true", "--precision.geo", "7",
                         "--no-step-log", "true", "--ignore-route-errors", "true"], workdir, "Прогон", 25)
@@ -255,9 +317,14 @@ def run_sumo(osm: bytes, vehicles: int) -> dict:
                 frames[time] = []
                 for car in step.findall("vehicle"):
                     a = car.attrib
-                    _append(frames, time, (a["id"], *_point(a["x"], a["y"]), _number(a["angle"]) % 360))
+                    _append(frames, time, (a["id"], *_point(a["x"], a["y"]), _number(a["angle"]) % 360,
+                                           a.get("type", "car")))
             if not any(frames.values()):
                 raise SimulationError("SUMO не смог выпустить машины на этой сети.")
-            return {"frames": [{"time": time, "vehicles": cars} for time, cars in frames.items()]}
+            missing = [FLEET[k]["label"] for k, n in fleet.items() if not placed.get(k)]
+            return {"frames": [{"time": time, "vehicles": cars} for time, cars in frames.items()],
+                    "fleet": [{"kind": k, "label": FLEET[k]["label"], "requested": n, "placed": placed.get(k, 0)}
+                              for k, n in fleet.items()],
+                    "warnings": [f"Нет путей для: {', '.join(missing)}"] if missing else []}
     finally:
         _SUMO_SLOT.release()

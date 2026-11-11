@@ -6,8 +6,28 @@ import type { MapHandle } from './MapView';
 
 type Engine = 'sumo' | 'matsim' | 'webots';
 
+/** Vehicle kinds of a SUMO run; each drives only where its class may (a tram on tram tracks). */
+const KINDS = [
+  { kind: 'car', label: 'Легковые', icon: '🚗', def: 40 },
+  { kind: 'bus', label: 'Автобусы', icon: '🚌', def: 8 },
+  { kind: 'tram', label: 'Трамваи', icon: '🚋', def: 4 },
+  { kind: 'truck', label: 'Грузовые', icon: '🚚', def: 6 },
+  { kind: 'motorcycle', label: 'Мотоциклы', icon: '🏍', def: 4 },
+  { kind: 'bicycle', label: 'Велосипеды', icon: '🚲', def: 6 },
+] as const;
+const MAX_TOTAL = 300;
+
 export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHandle> }) {
   const [engine, setEngine] = useState<Engine>('sumo');
+  // chosen kinds and their counts; legkovye are on by default
+  const [fleet, setFleet] = useState<Record<string, number>>({ car: 60 });
+  const total = Object.values(fleet).reduce((a, b) => a + b, 0);
+  const toggle = (kind: string, def: number) => setFleet((f) => {
+    const next = { ...f };
+    if (kind in next) delete next[kind]; else next[kind] = def;
+    return next;
+  });
+  const allOn = KINDS.every((k) => k.kind in fleet);
   const [recording, setRecording] = useState<SimulationRecording | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +91,11 @@ export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHa
     for (const [name, value] of body) {
       if (typeof value === 'string' && value.trim()) params.set(name, value.trim());
     }
+    if (engine === 'sumo') {
+      if (!total) { setError('Выберите хотя бы один вид транспорта'); return; }
+      params.set('fleet', Object.entries(fleet).map(([k, n]) => `${k}:${n}`).join(','));
+      params.set('vehicles', String(Math.max(1, Math.min(200, total))));
+    }
     reset();
     const controller = new AbortController();
     pending.current = controller;
@@ -89,6 +114,23 @@ export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHa
   };
 
   return <section className="simulation-panel" aria-label="Управление симуляцией">
+   <div className="sim-layout">
+    {engine === 'sumo' && <div className="sim-fleet" role="group" aria-label="Виды транспорта">
+      <div className="row between"><b className="small">Транспорт</b>
+        <button type="button" className="link small" onClick={() => setFleet(allOn ? {} : Object.fromEntries(KINDS.map((k) => [k.kind, fleet[k.kind] ?? k.def])))}>
+          {allOn ? 'снять все' : 'выбрать все'}</button></div>
+      {KINDS.map((k) => {
+        const on = k.kind in fleet;
+        return <div key={k.kind} className={`sim-kind${on ? ' on' : ''}`}>
+          <button type="button" className="sim-kind-btn" aria-pressed={on} onClick={() => toggle(k.kind, k.def)}>
+            <span aria-hidden="true">{k.icon}</span>{k.label}</button>
+          {on && <input type="number" min={1} max={200} value={fleet[k.kind]} aria-label={`Количество: ${k.label}`}
+            onChange={(e) => setFleet((f) => ({ ...f, [k.kind]: Math.max(1, Math.min(200, Number(e.target.value) || 1)) }))} />}
+        </div>;
+      })}
+      <span className={`small ${total > MAX_TOTAL ? 'bad' : 'muted'}`}>Всего {total}{total > MAX_TOTAL ? ` — не больше ${MAX_TOTAL}` : ''}</span>
+    </div>}
+    <div className="sim-main">
     <form key={engine} onSubmit={load}>
       <label>Источник
         <select value={engine} onChange={(e) => { reset(); setEngine(e.target.value as Engine); }}>
@@ -97,7 +139,6 @@ export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHa
           <option value="webots">Webots · запись</option>
         </select>
       </label>
-      {engine === 'sumo' && <label>Машин <input name="vehicles" type="number" min="1" max="200" defaultValue="60" required /></label>}
       {engine === 'matsim' && <>
         <label>Сеть <input name="network" type="file" accept=".xml,.gz" required /></label>
         <label>События <input name="events" type="file" accept=".xml,.gz" required /></label>
@@ -105,15 +146,17 @@ export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHa
         <label>Начало, с <input name="start" type="number" min="0" max="604800" placeholder="Авто" /></label>
       </>}
       {engine === 'webots' && <label>Траектории <input name="recording" type="file" accept=".csv,.gz" required /></label>}
-      <button className="btn primary" type="submit" disabled={busy}>{engine === 'sumo' ? 'Запустить' : 'Загрузить'}</button>
+      <button className="btn primary" type="submit" disabled={busy || (engine === 'sumo' && (!total || total > MAX_TOTAL))}>{engine === 'sumo' ? 'Запустить' : 'Загрузить'}</button>
     </form>
     <p className="muted small">
-      {engine === 'sumo' ? '90 секунд демонстрационного трафика по текущей дорожной сети.'
+      {engine === 'sumo' ? '90 секунд движения выбранного транспорта по текущей сети: каждый вид едет по всем дорогам, где ему разрешено (трамвай — по путям, автобус — по проезжей части).'
         : engine === 'matsim' ? 'Сеть и события одного прогона. На карте отображаются до 120 секунд движения.'
           : 'CSV из контроллера: time,id,lon,lat,angle. Координаты WGS84, угол от севера.'}
     </p>
     {busy && <p role="status">{engine === 'sumo' ? 'SUMO строит сеть и рассчитывает движение…' : 'Читаем траектории…'}</p>}
     {error && <p className="bad" role="alert">{error}</p>}
+    {recording?.fleet && <p className="small">{recording.fleet.map((f) => `${f.label}: ${f.placed}${f.placed < f.requested ? ` из ${f.requested}` : ''}`).join(' · ')}</p>}
+    {recording?.warnings?.map((w) => <p key={w} className="bad small">{w}</p>)}
     {recording && <div className="simulation-playback">
       <button className="btn" disabled={!duration} onClick={() => {
         if (!playing && clock.current >= duration) seek(0);
@@ -132,6 +175,8 @@ export function Simulation({ docId, map }: { docId: string; map: RefObject<MapHa
       }}>К машинам</button>
     </div>}
     {recording?.report && <SimulationSummary docId={docId} report={recording.report} />}
+    </div>
+   </div>
   </section>;
 }
 

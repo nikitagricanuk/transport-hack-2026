@@ -68,3 +68,28 @@ def test_sumo_runs_on_uploaded_road_and_returns_geographic_motion():
     positions = [car[1] for frame in response["frames"] for car in frame["vehicles"] if car[0] == "car-1"]
     assert all(104.279 < lon < 104.291 for lon in positions)
     assert len(set(positions)) > 2
+
+
+def test_fleet_parsing():
+    from app.simulation import parse_fleet
+    assert parse_fleet(None, 7) == {"car": 7}
+    assert parse_fleet("car:5,bus:2,tram:0", 0) == {"car": 5, "bus": 2}
+    for bad in ("plane:3", "car:x", "car:500", "car:0", "car:200,bus:200"):
+        with pytest.raises(Exception):
+            parse_fleet(bad, 0)
+
+
+@pytest.mark.skipif(not all(find_sumo_binary(n) for n in ("sumo", "netconvert")), reason="SUMO not installed")
+def test_sumo_runs_each_selected_kind_on_roads_it_may_use():
+    doc_id = _document(b"""<osm version="0.6">
+    <node id="1" lon="104.28" lat="52.28"/><node id="2" lon="104.29" lat="52.28"/>
+    <node id="3" lon="104.28" lat="52.281"/><node id="4" lon="104.29" lat="52.281"/>
+    <way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="residential"/></way>
+    <way id="11"><nd ref="3"/><nd ref="4"/><tag k="railway" v="tram"/></way>
+    </osm>""")
+    response = simulate_sumo(doc_id, 1, "car:2,bus:1,tram:1")
+    kinds = {car[4] for frame in response["frames"] for car in frame["vehicles"]}
+    assert kinds == {"car", "bus", "tram"}
+    assert {f["kind"]: f["placed"] for f in response["fleet"]} == {"car": 2, "bus": 1, "tram": 1}
+    # the tram stays on its track, north of the road
+    assert all(car[2] > 52.2805 for frame in response["frames"] for car in frame["vehicles"] if car[4] == "tram")
