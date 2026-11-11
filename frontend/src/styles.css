@@ -452,3 +452,20 @@ input[type="checkbox"]:disabled { cursor: default; }
 .vehicle-mix input[type=number] { width: 64px; }
 .vehicle-mix input.custom { border-color: #f59e0b; }
 .legend-row { flex-wrap: wrap; }
+.toast { transition: opacity .6s ease, transform .6s ease; }
+.toast.leaving { opacity: 0; transform: translateY(-6px); }
+.layer-group > summary { display: flex; align-items: center; gap: 4px; cursor: pointer; list-style: none; }
+.layer-group > summary::-webkit-details-marker { display: none; }
+.layer-group > summary::before { content: '▸'; color: var(--muted); font-size: 11px; width: 10px; }
+.layer-group[open] > summary::before { content: '▾'; }
+.layer-group > summary .layer { flex: 1; }
+.layer-subs { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 6px 30px; }
+.sub-count { margin-right: 6px; }
+.has-tip { cursor: help; }
+.phase-bar .ph.arrow { background: #0e7490; color: #ecfeff; }
+.phase-table input[type=number] { width: 52px; }
+.phase-table .phase-name { width: 100%; min-width: 90px; }
+.move-chips { display: flex; flex-wrap: wrap; gap: 3px; }
+.chip-btn { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
+.chip-btn[aria-pressed=true] { background: #14532d; border-color: #16a34a; color: #dcfce7; }
+.row.wrap { flex-wrap: wrap; }

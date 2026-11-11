@@ -1,6 +1,6 @@
 import type { PtResult, PtRoute } from './components/PtTools';
 import type { AnalysisResult } from './utils/networkAnalysis';
-import type { StopsAnalysis, VehicleMixInput,
+import type { SignalPhase, StopsAnalysis, VehicleMixInput,
   ChangesResult, Comparison, DocState, FixPreview, Geo, GeoPatch, LoadState, Op, OrganizerResult, ReportData, RouteDetail,
   SignalPlan, StopInfo, SumoResult, OdMatrix, Task, TaskCriterion, TaskResult,
   SimulationRecording, ValidationResult,
@@ -220,7 +220,7 @@ export const api = {
   setRouteFrequency: (docId: string, routeId: number, vehiclesPerHour: number | null) =>
     request<RouteDetail>(`/api/documents/${docId}/transit/routes/${routeId}`, json({ vehicles_per_hour: vehiclesPerHour })),
   signal: (docId: string, nodeId: number) => request<SignalPlan>(`/api/documents/${docId}/signals/${nodeId}`),
-  setSignal: (docId: string, nodeId: number, body: { green_main_s?: number; green_cross_s?: number; cycle?: number; main_share?: number; optimize?: boolean; reset?: boolean }) =>
+  setSignal: (docId: string, nodeId: number, body: { green_main_s?: number; green_cross_s?: number; cycle?: number; main_share?: number; optimize?: boolean; reset?: boolean; program?: SignalPhase[] }) =>
     request<SignalPlan>(`/api/documents/${docId}/signals/${nodeId}`, json(body)),
   exportUrl: (docId: string, filename: string) =>
     `/api/documents/${docId}/export?filename=${encodeURIComponent(filename)}`,

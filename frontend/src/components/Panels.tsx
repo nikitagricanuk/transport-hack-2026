@@ -4,7 +4,7 @@ import type { DrawGroup } from './MapView';
 import { HistoryList } from './Extras';
 import type { Kind } from '../types';
 import type { Fix, HistoryInfo, Issue, LayerVisibility, Tool, ValidationResult } from '../types';
-import { SUBGROUPS, ISSUE_FILTERS, type IssueFilterKey, type IssueFilters, allOn, issueVisible } from '../utils/layers';
+import { SUBGROUPS, ISSUE_FILTERS, subtypesOf, toggleGroup, toggleSubtype, type IssueFilterKey, type IssueFilters, allOn, issueVisible } from '../utils/layers';
 import { TEMPLATES, type RoadTemplate } from '../utils/osm';
 
 // ------------------------------------------------------------------ tools
@@ -55,7 +55,8 @@ const LAYERS: { key: Exclude<keyof LayerVisibility,'roadsSub'>; name: string; sw
   { key: 'signals', name: 'Светофоры', sw: '#16A34A' },
   { key: 'crossings', name: 'Пеш. переходы', sw: '#F8FAFC' },
   { key: 'stops', name: 'Остановки', sw: '#2563EB' },
-  { key: 'buildings', name: 'Здания и зоны', sw: '#C9C5BC' },
+  { key: 'buildings', name: 'Здания', sw: '#C9C5BC' },
+  { key: 'zones', name: 'Зоны (газоны, парки, территории)', sw: '#9CCB86' },
   { key: 'issues', name: 'Ошибки графа', sw: '#EA580C' },
 ];
 
@@ -79,17 +80,33 @@ export function LayersPanel({ layers, onLayers, onSelectAll, baseOpacity, onBase
         <button type="button" className="btn small" onClick={onSelectAll}>{allOn(layers) ? 'Снять всё' : 'Выбрать всё'}</button>
       </div>
       <div className="layer-list">
-        {LAYERS.map((l) => (
-          <label key={l.key} className="layer">
-            <input type="checkbox" checked={layers[l.key]} onChange={() => onLayers({ ...layers, [l.key]: !layers[l.key] })} />
-            <span className="sw" style={{ background: l.sw }} aria-hidden="true" />
-            <span>{l.name}</span>
-          </label>
-        ))}
+        {LAYERS.map((l) => {
+          const group = l.key === 'roads' || l.key === 'paths' ? l.key : null;
+          const row = (
+            <label className="layer">
+              <input type="checkbox" checked={layers[l.key] !== false}
+                onChange={() => onLayers(group ? toggleGroup(layers, group) : { ...layers, [l.key]: layers[l.key] === false })} />
+              <span className="sw" style={{ background: l.sw }} aria-hidden="true" />
+              <span>{l.name}</span>
+            </label>
+          );
+          if (!group) return <div key={l.key}>{row}</div>;
+          const subs = SUBGROUPS.filter(([k]) => subtypesOf(group).includes(k));
+          const on = subs.filter(([k]) => layers[group] && (layers.roadsSub?.[k] ?? true)).length;
+          return (
+            <details key={l.key} className="layer-group">
+              <summary aria-label={`Подтипы: ${l.name}`}>{row}<span className="muted small sub-count">{on}/{subs.length}</span></summary>
+              <div className="layer-subs">
+                {subs.map(([k, label]) => (
+                  <label className="check" key={k}>
+                    <input type="checkbox" checked={layers[group] && (layers.roadsSub?.[k] ?? true)} onChange={() => onLayers(toggleSubtype(layers, group, k))} />{label}
+                  </label>
+                ))}
+              </div>
+            </details>
+          );
+        })}
       </div>
-      {(['roads','paths'] as const).map(group=><details className="m14" key={group}><summary>{group==='roads'?'Типы дорог':'Типы пешеходных зон'}</summary>
-        {SUBGROUPS.filter(([k])=>group==='paths'?['footway','path','steps','pedestrian','cycleway','track'].includes(k):!['footway','path','steps','pedestrian','cycleway','track'].includes(k)).map(([k,label])=><label className="check" key={k}><input type="checkbox" checked={layers.roadsSub?.[k]??true} onChange={()=>onLayers({...layers,roadsSub:{...layers.roadsSub,[k]:!(layers.roadsSub?.[k]??true)}})} />{label}</label>)}
-      </details>)}
       <div className="card stack10 m14">
         <div className="row between"><b>Подложка</b><span className="mono muted small">{baseOpacity} %</span></div>
         <label className="small muted stack4">Прозрачность

@@ -25,6 +25,7 @@ export const DEFAULT_LAYERS: LayerVisibility = {
   crossings: true,
   stops: true,
   buildings: true,
+  zones: true,
   issues: false,
 };
 
@@ -52,6 +53,7 @@ export function allLayersOn(): LayerVisibility {
     crossings: true,
     stops: true,
     buildings: true,
+    zones: true,
     issues: true,
   };
 }
@@ -95,6 +97,25 @@ export function applyLayerChange(
 
 export function issueVisible(filters: IssueFilters, category: string): boolean {
   return ISSUE_FILTERS.some((item) => item.key === category && filters[item.key]);
+}
+
+/** Road and pedestrian subtypes shown as drop-down lists under their layer. */
+export const PATH_SUBTYPES = ['footway', 'path', 'steps', 'pedestrian', 'cycleway', 'track'];
+export const subtypesOf = (group: 'roads' | 'paths'): string[] =>
+  SUBGROUPS.map(([k]) => k as string).filter((k) => PATH_SUBTYPES.includes(k) === (group === 'paths'));
+
+/** The group checkbox switches every subtype with it. */
+export function toggleGroup(layers: LayerVisibility, group: 'roads' | 'paths'): LayerVisibility {
+  const on = !layers[group];
+  return { ...layers, [group]: on, roadsSub: { ...layers.roadsSub, ...Object.fromEntries(subtypesOf(group).map((k) => [k, on])) } };
+}
+
+/** A subtype switch: the group is on while at least one of its subtypes is. */
+export function toggleSubtype(layers: LayerVisibility, group: 'roads' | 'paths', key: string): LayerVisibility {
+  const was = layers[group] ? layers.roadsSub?.[key] ?? true : false;
+  const base = layers[group] ? { ...layers.roadsSub } : { ...layers.roadsSub, ...Object.fromEntries(subtypesOf(group).map((k) => [k, false])) };
+  const roadsSub = { ...base, [key]: !was };
+  return { ...layers, roadsSub, [group]: subtypesOf(group).some((k) => roadsSub[k] ?? true) };
 }
 
 export const SUBGROUPS = [

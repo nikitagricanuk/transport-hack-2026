@@ -462,7 +462,7 @@ def explain(row: dict[str, Any], doc: OsmDocument, signal: dict[str, Any] | None
     if signal:
         s, g, cyc = signal["sat_flow"], signal["green_s"], signal["cycle_s"]
         cap = n * s * g / cyc
-        steps.append({"name": "Светофор на подходе", "formula": "g / C",
+        steps.append({"name": "Светофор на подходе", "formula": "g / C" + (" (g — с учётом дополнительных секций)" if signal.get("arrows") else ""),
                       "substitution": f"{g} с / {cyc} с ({'план задан вручную' if signal['custom'] else 'план по умолчанию'}, "
                                       f"фаза {'главного' if signal['group'] == 'main' else 'пересекающего'} направления, "
                                       f"узел {signal['node_id']})",

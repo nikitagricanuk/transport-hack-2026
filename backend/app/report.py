@@ -25,6 +25,39 @@ LOAD_COLS = [
 ]
 
 
+
+# Russian names of OSM road classes (SP 42.13330.2016, table 11.1; GOST R 52398-2005)
+HIGHWAY_RU_FULL = {
+    "motorway": "Автомагистраль", "trunk": "Скоростная автомобильная дорога",
+    "primary": "Магистральная улица общегородского значения", "secondary": "Магистральная улица районного значения",
+    "tertiary": "Улица местного значения", "residential": "Жилая улица", "unclassified": "Прочая автомобильная дорога",
+    "living_street": "Жилая зона", "service": "Служебный проезд", "road": "Дорога неизвестного класса",
+    "motorway_link": "Съезд автомагистрали", "trunk_link": "Съезд скоростной дороги",
+    "primary_link": "Съезд магистральной улицы", "secondary_link": "Съезд районной улицы", "tertiary_link": "Съезд местной улицы",
+    "pedestrian": "Пешеходная улица", "footway": "Тротуар", "path": "Дорожка", "cycleway": "Велодорожка",
+    "steps": "Лестница", "track": "Грунтовая дорога",
+}
+KIND_RU = {"node": "Узел", "way": "Линия", "relation": "Отношение"}
+
+
+def highway_label(highway: str) -> str:
+    """«Магистральная улица районного значения (secondary)»."""
+    ru = HIGHWAY_RU_FULL.get(highway)
+    return f"{ru} ({highway})" if ru else highway or "—"
+
+
+def kind_label(kind: str, tags: dict[str, str]) -> str:
+    """The object type in Russian with the OSM element in brackets: «Дорога (way)»."""
+    if kind == "way" and "highway" in tags:
+        return "Дорога (way)"
+    if kind == "way" and "building" in tags:
+        return "Здание (way)"
+    if kind == "node" and tags.get("highway") == "traffic_signals":
+        return "Светофор (node)"
+    if kind == "node" and (tags.get("highway") == "bus_stop" or tags.get("public_transport") in {"platform", "stop_position"}):
+        return "Остановка (node)"
+    return f"{KIND_RU.get(kind, kind)} ({kind})"
+
 def issue_matrix(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for cat, label in CAT_RU.items():

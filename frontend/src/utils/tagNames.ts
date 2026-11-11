@@ -17,7 +17,7 @@ export const KEY_RU: Record<string, string> = {
   'traffic_signals:sound': 'Звуковой сигнал', button_operated: 'Вызывная кнопка',
   access: 'Доступ', motor_vehicle: 'Моторный транспорт', motorcar: 'Легковые', vehicle: 'Транспорт',
   psv: 'Общественный транспорт', bus: 'Автобусы', trolleybus: 'Троллейбусы', tram: 'Трамваи', hgv: 'Грузовики',
-  foot: 'Пешеходы', bicycle: 'Велосипеды', horse: 'Лошади', motorcycle: 'Мотоциклы', moped: 'Мопеды',
+  foot: 'Пешеходы', bicycle: 'Велосипеды', horse: 'Гужевые повозки / всадники', motorcycle: 'Мотоциклы', moped: 'Мопеды',
   wheelchair: 'Доступно на коляске', sidewalk: 'Тротуар', 'sidewalk:both': 'Тротуар с обеих сторон',
   'sidewalk:left': 'Тротуар слева', 'sidewalk:right': 'Тротуар справа', lit: 'Освещение',
   overtaking: 'Обгон', priority_road: 'Главная дорога', 'parking:lane:both': 'Парковка вдоль дороги',
