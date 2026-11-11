@@ -7,7 +7,7 @@ import { toggleSelection } from './utils/selection';
 import type { FeatureCollection } from 'geojson';
 import type { PickedPoint, RouteQuery } from './utils/networkAnalysis';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { USER_NAME, api, downloadFile, type OpResponse } from './api';
+import { USER_NAME, api, downloadFile, rememberRecentDocument, type OpResponse } from './api';
 import MapView, { type DrawGroup, type MapHandle, type RouteOverlay } from './components/MapView';
 import { routeColour } from './components/Transit';
 import Inspector from './components/Inspector';
@@ -247,10 +247,7 @@ export default function App() {
     }
     setMapDiff(null);
     setDoc(d);
-    try {
-      const recent: string[] = JSON.parse(localStorage.getItem('uds-recent-documents') || '[]');
-      localStorage.setItem('uds-recent-documents', JSON.stringify([d.doc_id, ...recent.filter(id => id !== d.doc_id)].slice(0, 30)));
-    } catch { /* storage unavailable */ }
+    rememberRecentDocument(d);
     setSelection(null);
     setValidation(null);
     scheduleValidate(d.doc_id);
