@@ -79,14 +79,15 @@ def install_mcp(app, data_dir):
         return JSONResponse({"error": code, "error_description": description}, status_code=status,
                             headers={"Cache-Control": "no-store"})
 
-    def page(title, content, status=200):
+    def page(title, content, status=200, redirect_origin=""):
+        form_action = "'self'" + (" " + redirect_origin if redirect_origin else "")
         return HTMLResponse(f'''<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{title} · УДС</title>
 <style>body{{font:16px system-ui;background:#edf2f6;color:#152638;margin:0;padding:8vh 20px}}
 main{{max-width:540px;margin:auto;background:white;padding:32px;border-radius:16px;box-shadow:0 8px 40px #14263818}}
 h1{{font-size:26px}}code{{overflow-wrap:anywhere}}button,a.button{{padding:12px 20px;border:0;border-radius:8px;background:#1666ad;color:white;cursor:pointer;font:inherit}}button[value=deny]{{background:#e5ebf0;color:#152638}}p{{line-height:1.6}}</style>
 <main><small>РЕДАКТОР УДС · MCP</small><h1>{title}</h1>{content}</main></html>''', status_code=status,
-                            headers={"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", "X-Content-Type-Options": "nosniff"})
+                            headers={"Cache-Control": "no-store", "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; form-action {form_action}; frame-ancestors 'none'; base-uri 'none'", "X-Content-Type-Options": "nosniff"})
 
     @app.get("/.well-known/oauth-protected-resource/mcp", include_in_schema=False)
     @app.get("/.well-known/oauth-protected-resource", include_in_schema=False)
@@ -149,12 +150,14 @@ h1{{font-size:26px}}code{{overflow-wrap:anywhere}}button,a.button{{padding:12px 
         ticket = secrets.token_urlsafe(32)
         csrf = secrets.token_urlsafe(32)
         store.put("consent", digest(ticket), {"params": params, "csrf": digest(csrf)}, 600)
+        redirect = urlsplit(params["redirect_uri"])
+        redirect_origin = redirect.scheme + "://" + quote(redirect.netloc, safe=":[]-.")
         response = page("Connect your AI assistant", f'''<p><strong>{html.escape(client['client_name'])}</strong> is requesting access to this shared workspace.</p>
 <p>Allow it to read, create, edit, export and delete documents, run analyses, and change scenarios. Changes appear live in the editor and supported edits can be undone.</p>
 <p>This MVP has no user accounts. Approval grants access to <strong>all shared documents</strong> in this app. Approve only a client you trust.</p>
 <p>Return address: <code>{html.escape(params['redirect_uri'])}</code></p>
 <form method="post" action="/oauth/authorize"><input type="hidden" name="ticket" value="{ticket}"><input type="hidden" name="csrf" value="{csrf}">
-<button name="decision" value="allow">Allow access</button> <button name="decision" value="deny">Cancel</button></form>''')
+<button name="decision" value="allow">Allow access</button> <button name="decision" value="deny">Cancel</button></form>''', redirect_origin=redirect_origin)
         response.set_cookie("uds_oauth_consent", csrf, max_age=600, httponly=True, secure=base(request).startswith("https:"), samesite="lax", path="/oauth/authorize")
         return response
 

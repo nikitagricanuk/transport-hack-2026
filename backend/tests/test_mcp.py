@@ -35,6 +35,7 @@ def authorize(client, client_id, decision="allow", **kwargs):
         "response_type": "code", "code_challenge": CHALLENGE, "code_challenge_method": "S256",
         "resource": RESOURCE, "state": "opaque-state", **kwargs})
     assert response.status_code == 200, response.text
+    assert "form-action 'self' https://claude.ai" in response.headers["content-security-policy"]
     fields = {k: re.search(f'name="{k}" value="([^"]+)"', response.text)[1] for k in ("ticket", "csrf")}
     return client.post("/oauth/authorize", data={**fields, "decision": decision}, follow_redirects=False)
 
