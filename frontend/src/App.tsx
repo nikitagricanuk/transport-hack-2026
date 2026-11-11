@@ -243,6 +243,10 @@ export default function App() {
     }
     setMapDiff(null);
     setDoc(d);
+    try {
+      const recent: string[] = JSON.parse(localStorage.getItem('uds-recent-documents') || '[]');
+      localStorage.setItem('uds-recent-documents', JSON.stringify([d.doc_id, ...recent.filter(id => id !== d.doc_id)].slice(0, 30)));
+    } catch { /* storage unavailable */ }
     setSelection(null);
     setValidation(null);
     scheduleValidate(d.doc_id);
@@ -255,7 +259,7 @@ export default function App() {
     let saved: { doc_id?: string; team?: string } = {};
     try { saved = raw ? JSON.parse(raw) : {}; } catch { saved = {}; }
     if (saved.team) setTeam(saved.team);
-    const target = shared || saved.doc_id;
+    const target = shared;
     if (!target) { setBooting(false); return; }
     api.restore(target)
       .then((d) => { loadDoc(d); setError(null); })
@@ -492,6 +496,8 @@ export default function App() {
         setNotice(`${last.author ?? 'Участник'}: ${last.label}${last.refs[0]?.name ? ` — ${last.refs[0].name}` : ''}`);
         flash(last.refs);
       }
+    } else if (m.type === 'rename') {
+      setDoc(current => current ? { ...current, filename: m.filename } : current);
     } else if (m.type === 'load') {
       const id = docIdRef.current;
       if (id) api.load(id).then(setLoad).catch(() => undefined);
@@ -825,10 +831,7 @@ export default function App() {
   };
 
   const closeDocument = () => {
-    const closingId = doc?.doc_id;
     localStorage.removeItem(STORAGE_KEY);
-    // others may still be editing this document: then leave it, do not delete it
-    if (closingId && peerList.length === 0) api.discardDraft(closingId).catch(() => undefined);
     try {
       window.history.replaceState(null, '', location.pathname);
     } catch {
@@ -858,7 +861,7 @@ export default function App() {
     return (
       <>
         {versionNotice}
-        <StartScreen onLoaded={loadDoc} />
+        <StartScreen onLoaded={loadDoc} initialError={error} />
       </>
     );
   }
@@ -883,8 +886,8 @@ export default function App() {
           {changes > 0 && <><span className="dot" aria-hidden="true" /><span className="muted">изменено объектов: {changes}</span></>}
         </div>
         <button className="btn ghost" onClick={closeDocument}
-          title={peerList.length ? 'Выйти из документа (он останется у коллег)' : 'Закрыть документ и удалить черновик'}>
-          Открыть другой
+          title="Вернуться к документам — все правки сохранены">
+          ← Документы
         </button>
         <div className="row gap2">
           <button className="icon-btn" aria-label="Отменить" title={`Отменить${doc.history.undo_label ? ': ' + doc.history.undo_label : ''} · Ctrl+Z`}
