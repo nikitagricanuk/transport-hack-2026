@@ -47,9 +47,48 @@ ANALYTICS_ASSUMPTIONS = (
     "При отсутствии данных учёта объём оценивается по классу дороги. "
     "Пропускная способность на полосу, доля спроса и запасные скорости — допущения сценария. "
     "Задержки рассчитаны по функции BPR с коэффициентами 0,15 и 4. "
-    "Приведение грузовых ×2 и автобусов ×2,5, множители времени суток и погоды — допущения, не измерения. "
+    "Коэффициенты приведения типов транспорта (СП 34.13330.2021, табл. 5.3; велосипед 0,3 — допущение), множители времени суток и погоды — допущения, не измерения. "
     "Уровень обслуживания определяется по коэффициенту загрузки из таблицы 1 ОДМ 218.2.020-2012."
 )
+# Vehicle mix: passenger-car equivalents. Motor vehicles follow SP 34.13330.2021, table 5.3 (approximate
+# classes); the bicycle value is an assumption for cycling in the carriageway. All of them are editable.
+VEHICLE_TYPES = [
+    {"key": "car", "label": "Легковые", "pcu": 1.0, "source": "СП 34.13330.2021, табл. 5.3"},
+    {"key": "moto", "label": "Мотоциклы и мопеды", "pcu": 0.5, "source": "СП 34.13330.2021, табл. 5.3"},
+    {"key": "bicycle", "label": "Велосипеды и СИМ на проезжей части", "pcu": 0.3, "source": "допущение"},
+    {"key": "van", "label": "Лёгкие грузовые до 2 т", "pcu": 1.5, "source": "СП 34.13330.2021, табл. 5.3"},
+    {"key": "truck", "label": "Грузовые", "pcu": 2.0, "source": "СП 34.13330.2021, табл. 5.3 (≈6 т)"},
+    {"key": "bus", "label": "Автобусы вне маршрутов OSM", "pcu": 2.5, "source": "СП 34.13330.2021, табл. 5.3"},
+]
+VEHICLE_KEYS = {v["key"] for v in VEHICLE_TYPES}
+
+
+def vehicle_mix(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Shares and car equivalents of every vehicle type; cars take what the others leave.
+
+    Older documents stored only truck_share and bus_share; they are read as the same mix."""
+    stored = dict(settings.get("vehicle_mix") or {})
+    if not stored:
+        if settings.get("truck_share"):
+            stored["truck"] = {"share": settings["truck_share"]}
+        if settings.get("bus_share"):
+            stored["bus"] = {"share": settings["bus_share"]}
+    out = []
+    for v in VEHICLE_TYPES:
+        cfg = stored.get(v["key"], {})
+        pcu = float(cfg.get("pcu", v["pcu"]))
+        out.append({**v, "share": float(cfg.get("share", 0.0)), "pcu": pcu, "default_pcu": v["pcu"],
+                    "custom_pcu": pcu != v["pcu"]})
+    others = sum(v["share"] for v in out if v["key"] != "car")
+    out[0]["share"] = max(0.0, 1.0 - others)
+    return out
+
+
+def pcu_factor(settings: dict[str, Any]) -> float:
+    """p = sum(share_i * pcu_i): vehicles per hour times p gives passenger cars per hour."""
+    return sum(v["share"] * v["pcu"] for v in vehicle_mix(settings))
+
+
 HIGHWAY_RU = {
     "motorway": "Автомагистраль", "trunk": "Скоростная", "primary": "Магистральная", "secondary": "Районная",
     "tertiary": "Местная", "unclassified": "Прочая", "residential": "Жилая улица", "living_street": "Жилая зона",
@@ -319,9 +358,7 @@ def scenario_rows(rows, doc, settings):
     from .norms import road_category
     demand = {'morning':1, 'day':.65, 'evening':1.1, 'night':.15}[settings.get('time_of_day','morning')]
     weather = {'dry':1, 'rain':.85, 'snow':.65}[settings.get('weather','dry')]
-    truck = settings.get('truck_share', 0)
-    bus = settings.get('bus_share', 0)
-    pcu = 1 - truck - bus + 2 * truck + 2.5 * bus
+    pcu = pcu_factor(settings)
     for r in rows:
         r['category'] = road_category(doc.ways[r['id']].tags)
         r['capacity'] *= weather
@@ -410,7 +447,7 @@ def _num(x: float, digits: int = 0) -> str:
 
 
 def explain(row: dict[str, Any], doc: OsmDocument, signal: dict[str, Any] | None,
-            multiplier: float) -> dict[str, Any]:
+            multiplier: float, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Every number of one road's load row with the formula and the values put into it."""
     row = {**row, "volume": round(row["volume"]), "capacity": round(row["capacity"]),
            "base_volume": round(row["base_volume"]), "vc": round(row["vc"], 3),
@@ -450,9 +487,25 @@ def explain(row: dict[str, Any], doc: OsmDocument, signal: dict[str, Any] | None
         base_src = f"нет данных учёта: оценка по классу, c_исх · {_num(share, 2)}"
     steps.append({"name": "Базовая интенсивность", "formula": "q_баз", "substitution": base_src,
                   "value": row["base_volume"], "unit": "авт./ч"})
-    steps.append({"name": "Интенсивность", "formula": "q = q_баз · k + q_ОТ",
+    settings = settings or {}
+    mix = vehicle_mix(settings)
+    p = sum(v["share"] * v["pcu"] for v in mix)
+    d = {'morning': 1, 'day': .65, 'evening': 1.1, 'night': .15}[settings.get('time_of_day', 'morning')]
+    raw = row["base_volume"] * multiplier + row.get("transit_pcu", 0)
+    steps.append({"name": "Интенсивность", "formula": "q₀ = q_баз · k + q_ОТ",
                   "substitution": f"{_num(row['base_volume'])} · {_num(multiplier, 2)} + {_num(row.get('transit_pcu', 0))}",
-                  "value": row["volume"], "unit": "авт./ч"})
+                  "value": round(raw), "unit": "авт./ч"})
+    used = [v for v in mix if v["share"] > 0]
+    steps.append({"name": "Коэффициент приведения состава", "formula": "p = Σ доля_i · K_i",
+                  "substitution": " + ".join(f"{_num(v['share'], 2)} · {_num(v['pcu'], 1)}" for v in used)
+                                  + f" ({', '.join(v['label'].lower() for v in used)})",
+                  "value": round(p, 3), "unit": "",
+                  "source": "K_i — СП 34.13330.2021, табл. 5.3; велосипед — допущение"})
+    if abs(d - 1) > 1e-9 or abs(p - 1) > 1e-9 or abs(raw - row["volume"]) > 1:
+        steps.append({"name": "Приведённая интенсивность", "formula": "q = q₀ · d · p",
+                      "substitution": f"{_num(raw)} · {_num(d, 2)} · {_num(p, 3)} (d — время суток)"
+                                      + ("; учтено перекрытие" if row.get("closed") or row.get("detour_volume") else ""),
+                      "value": row["volume"], "unit": "прив. авт./ч"})
     steps.append({"name": "Коэффициент загрузки", "formula": "z = q / c",
                   "substitution": f"{_num(row['volume'])} / {_num(row['capacity'])}", "value": row["vc"], "unit": ""})
     steps.append({"name": "Уровень обслуживания", "formula": "по z", "substitution": "ОДМ 218.2.020-2012, табл. 1",

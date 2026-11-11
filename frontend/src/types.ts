@@ -254,8 +254,54 @@ export interface SnapshotMeta {
   summary: LoadSummary;
 }
 
+export interface VehicleType {
+  key: string;
+  label: string;
+  /** share of the flow, 0..1; cars take what the others leave */
+  share: number;
+  /** passenger-car equivalent */
+  pcu: number;
+  default_pcu: number;
+  custom_pcu: boolean;
+  source: string;
+}
+
+export type VehicleMixInput = Record<string, { share: number; pcu?: number }>;
+
+export interface StopLoad {
+  id: number; nodes: number[]; name: string; coord: [number, number]; routes: string[];
+  vehicles_per_hour: number; capacity_per_hour: number; residents: number; demand_per_hour: number;
+  load: number; level: 'низкая' | 'средняя' | 'высокая' | 'нет маршрутов';
+}
+
+export interface StopAdvice {
+  kind: 'gap' | 'overload' | 'no_routes' | 'spacing' | 'district';
+  severity: 'warning' | 'info';
+  title: string; text: string;
+  coord?: [number, number]; node_id?: number; way_id?: number | null;
+}
+
+export interface StopsAnalysis {
+  summary: {
+    stops: number; stop_nodes: number; routes: number; residents: number; covered: number; uncovered: number;
+    coverage: number | null; buildings: number; uncovered_buildings: number; by_level: Record<string, number>;
+  };
+  stops: StopLoad[];
+  gaps: { residents: number; buildings: number; coord: [number, number]; nearest_stop_m: number | null; road_id: number | null; road_name: string }[];
+  districts: { id: number; name: string; residents: number; uncovered: number; coverage: number; buildings: number }[];
+  spacing: { route: string; a: string; b: string; distance_m: number; kind: 'close' | 'far' }[];
+  advice: StopAdvice[];
+  features: import('geojson').FeatureCollection;
+  params: { radius_m: number; trips_per_resident: number; peak_share: number };
+  assumptions: string[];
+  sources: { label: string; url?: string }[];
+}
+
 export interface LoadState {
-  settings?: {time_of_day?:string;weather?:string;truck_share?:number;bus_share?:number};
+  settings?: {time_of_day?:string;weather?:string;truck_share?:number;bus_share?:number;vehicle_mix?:VehicleMixInput};
+  vehicle_mix?: VehicleType[];
+  /** p = sum of share x car equivalent */
+  pcu_factor?: number;
   segments?: {id:number;ways:number[];name:string;vc:number;los:Los;length_m:number;category:string}[];
   multiplier: number;
   rows: LoadRow[];

@@ -1,5 +1,6 @@
 import type { PtRoute } from './PtTools';
 import { PtTools } from './PtTools';
+import { StopsTools } from './StopsTools';
 import { useEffect, useMemo, useState } from 'react';
 import type { FeatureCollection } from 'geojson';
 import { api } from '../api';
@@ -14,9 +15,11 @@ export interface AnalysisProps {
   onOverlay: (data: FeatureCollection) => void;
   onFix: (issue: Issue, fix: Fix, probe?: RouteQuery) => void;
   onShowRoad: (id: number) => void;
+  onShowNode?: (id: number) => void;
+  onFlyTo?: (lon: number, lat: number) => void;
 }
-export function AnalysisTools({ docId, rev, picked, onPick, onOverlay, onFix, onShowRoad }: AnalysisProps) {
-  const [tab, setTab] = useState<'route' | 'catchment' | 'isochrone' | 'pt'>('route');
+export function AnalysisTools({ docId, rev, picked, onPick, onOverlay, onFix, onShowRoad, onShowNode, onFlyTo }: AnalysisProps) {
+  const [tab, setTab] = useState<'route' | 'catchment' | 'isochrone' | 'pt' | 'stops'>('route');
   const [mode, setMode] = useState<'car' | 'walk'>('car');
   const [metric, setMetric] = useState<'time' | 'length'>('time');
   const [waiting, setWaiting] = useState<'a' | 'b' | 'stops' | null>(null);
@@ -63,7 +66,7 @@ export function AnalysisTools({ docId, rev, picked, onPick, onOverlay, onFix, on
   useEffect(() => {
     let alive = true;
     setResult(null); setError('');
-    if (tab === 'pt') { setBusy(false); return; }
+    if (tab === 'pt' || tab === 'stops') { setBusy(false); return; }
     if (tab === 'route' ? !a || !b : tab === 'isochrone' ? !a : !setA.length && !setB.length) { setBusy(false); return; }
     setBusy(true);
     const timer = setTimeout(() => {
@@ -74,14 +77,15 @@ export function AnalysisTools({ docId, rev, picked, onPick, onOverlay, onFix, on
     }, 200);
     return () => { alive = false; clearTimeout(timer); };
   }, [docId,rev,query,tab]);
-  useEffect(() => { if (tab !== 'pt') onOverlay(analysisOverlay(result,a,b)); }, [result,a,b,onOverlay,tab]);
+  useEffect(() => { if (tab !== 'pt' && tab !== 'stops') onOverlay(analysisOverlay(result,a,b)); }, [result,a,b,onOverlay,tab]);
   const probe = tab === 'route' && a && b ? { from:a, to:b, mode, metric, walk_kmh:walk, use_closures:closures, compare:null } : undefined;
   return <section className="stack10 analysis-tools" aria-label="Анализ сети">
     <div className="row gap8" role="tablist" aria-label="Инструменты анализа">
-      {([['route','Маршрут'],['catchment','Доступность ОП'],['isochrone','Изохроны'],['pt','Доступность на ОТ']] as const).map(([id,label]) =>
+      {([['route','Маршрут'],['catchment','Доступность ОП'],['isochrone','Изохроны'],['pt','Доступность на ОТ'],['stops','Остановки']] as const).map(([id,label]) =>
         <button className="btn small" role="tab" aria-selected={tab === id} key={id} onClick={() => { setTab(id); arm(null); }}>{label}</button>)}
     </div>
-    {tab === 'pt' ? <PtTools docId={docId} rev={rev} picked={picked} onPick={onPick} onOverlay={onOverlay} onFix={onFix} onShowRoad={onShowRoad} /> : <>
+    {tab === 'stops' ? <StopsTools docId={docId} rev={rev} onOverlay={onOverlay} onShowRoad={onShowRoad} onShowNode={onShowNode} onFlyTo={onFlyTo} />
+    : tab === 'pt' ? <PtTools docId={docId} rev={rev} picked={picked} onPick={onPick} onOverlay={onOverlay} onFix={onFix} onShowRoad={onShowRoad} /> : <>
     <p className="muted small">Анализ не изменяет граф. Исправления открываются для проверки в режиме редактирования.</p>
     {tab !== 'catchment' && <>
       <label>Способ движения <select value={mode} onChange={e => setMode(e.target.value as typeof mode)}><option value="car">Авто</option><option value="walk">Пешком</option></select></label>

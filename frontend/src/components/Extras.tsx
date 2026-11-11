@@ -6,6 +6,7 @@ import { api } from '../api';
 import type { HistoryEntry, Kind, LoadState, OdMatrix, Selection, Task, TaskCriterion, TaskResult } from '../types';
 import { fmt } from '../utils/geom';
 import { AnalyticsAssumptions, Bars, LOS_COLOR } from './Analysis';
+import { VehicleMix } from './VehicleMix';
 
 // --------------------------------------------------------- intensity presets
 export const INTENSITY_PRESETS: { name: string; multiplier: number; hint: string }[] = [
@@ -93,11 +94,10 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
           <b>Сценарий спроса</b>
           <IntensityPresets current={load.multiplier} onPick={onMultiplier} />
           <AnalyticsAssumptions />
-          <p className="small muted">Состав потока: легковые ×1, грузовые ×2, автобусы ×2,5 — допущения. Время суток: утро ×1, день ×0,65, вечер ×1,1, ночь ×0,15; ёмкость: сухо ×1, дождь ×0,85, снег ×0,65 — допущения.</p>
+          <p className="small muted">Время суток: утро ×1, день ×0,65, вечер ×1,1, ночь ×0,15; ёмкость: сухо ×1, дождь ×0,85, снег ×0,65 — допущения.</p>
           <label>Время суток<select value={load.settings?.time_of_day ?? 'morning'} onChange={e=>setScenario({time_of_day:e.target.value})}>{[['morning','Утро'],['day','День'],['evening','Вечер'],['night','Ночь']].map(([v,t])=><option key={v} value={v}>{t}</option>)}</select></label>
           <label>Погода<select value={load.settings?.weather ?? 'dry'} onChange={e=>setScenario({weather:e.target.value})}>{[['dry','Сухо'],['rain','Дождь'],['snow','Снег']].map(([v,t])=><option key={v} value={v}>{t}</option>)}</select></label>
-          <label>Доля грузовых, %<input type="number" min={0} max={100} defaultValue={(load.settings?.truck_share ?? 0)*100} onBlur={e=>setScenario({truck_share:+e.target.value/100})} /></label>
-          <label>Доля автобусов, %<input type="number" min={0} max={100} defaultValue={(load.settings?.bus_share ?? 0)*100} onBlur={e=>setScenario({bus_share:+e.target.value/100})} /></label>
+          {load.vehicle_mix && <VehicleMix mix={load.vehicle_mix} onChange={vehicle_mix=>setScenario({vehicle_mix})} />}
           {scenarioError && <p className="bad">{scenarioError}</p>}
           <label>Категория<select value={category} onChange={e=>setCategory(e.target.value)}><option value="">Все</option>{['IА','IБ','IВ','II','III','IV','V'].map(c=><option key={c}>{c}</option>)}</select></label>
           <p className="small muted">Соответствие OSM → категория — допущение, переопределяется uds:category. Термины: ГОСТ Р 52398-2005; городские улицы — СП 42.13330.2016, табл. 11.1. z участка = максимум между перекрёстками.</p>
