@@ -119,6 +119,7 @@ export default function EditorMenus({
             >
               Руководство пользователя
             </button>
+            <a role="menuitem" className="menu-item" href="/mcp/connect" target="_blank" rel="noreferrer" onClick={() => setMenu(null)}>Подключить ИИ через MCP</a>
           </div>
         )}
       </div>

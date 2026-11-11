@@ -9,6 +9,9 @@ services:
     image: transport-hack:local
     ports:
       - "127.0.0.1:8000:8000"
+    environment:
+      # Canonical external origin for OAuth discovery behind a reverse proxy.
+      UDS_PUBLIC_URL: ${UDS_PUBLIC_URL:-http://localhost:8000}
     volumes:
       # :Z relabels the directory for this container on SELinux (RHEL).
       # Docker Desktop and hosts without SELinux accept the flag.

@@ -43,6 +43,7 @@ from .analysis import (
 from .edits import History, OpError, apply_op, apply_ops
 from .geojson import geo_patch, to_geojson, vertices
 from .organizer import OrganizerError, credentials, upload_osm
+from .mcp_server import install_mcp
 from .osm_model import OsmDocument, clone
 from .sumo_check import find_netconvert, run_netconvert
 from .simulation import FILE_LIMIT, SimulationError, read_matsim, read_webots, run_sumo, unpack_recording
@@ -1485,6 +1486,9 @@ async def collaborate(ws: WebSocket, doc_id: str, client: str = "", name: str = 
     finally:
         task.cancel()
         HUB.leave(doc_id, peer.id)
+
+
+install_mcp(app, DATA_DIR)
 
 # --------------------------------------------------------- static frontend
 if STATIC_DIR.is_dir():

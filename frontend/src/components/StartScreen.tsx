@@ -86,7 +86,7 @@ export default function StartScreen({ onLoaded, initialError }: { onLoaded: (d: 
           {!rows.length && <div className="workspace-empty"><h3>{loading ? 'Загрузка документов…' : query ? 'Ничего не найдено' : tab === 'recent' ? 'Здесь появятся недавно открытые карты' : 'Начните с первой карты'}</h3><p className="muted">{query ? 'Попробуйте другое название.' : 'Откройте готовую карту выше, загрузите .osm или создайте документ.'}</p></div>}
         </div>
       </section>
-      <footer className="workspace-footer muted small">Редактирование дорожной сети · Аналитика · Совместная работа</footer>
+      <footer className="workspace-footer muted small"><a href="/mcp/connect" target="_blank" rel="noreferrer">Подключить ИИ через MCP</a> · Редактирование дорожной сети · Аналитика · Совместная работа</footer>
     </div>
   </main>;
 }

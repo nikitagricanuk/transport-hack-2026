@@ -6,6 +6,9 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/mcp': { target: 'http://127.0.0.1:8000' },
+      '/oauth': { target: 'http://127.0.0.1:8000' },
+      '/.well-known': { target: 'http://127.0.0.1:8000' },
       '/api': { target: 'http://127.0.0.1:8000', ws: true },
     },
   },
