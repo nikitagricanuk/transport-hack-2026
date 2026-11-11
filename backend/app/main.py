@@ -531,8 +531,7 @@ def _document_row(doc_id: str, filename: str, updated_at: float = 0.0) -> dict[s
     }
 
 
-@app.get("/api/documents")
-def list_documents() -> Response:
+def lobby_rows() -> list[dict[str, Any]]:
     """Lobby index: only preloaded shared samples. Private uploads stay off the list."""
     rows: dict[str, dict[str, Any]] = {}
     for name, path in _sample_files().items():
@@ -557,7 +556,12 @@ def list_documents() -> Response:
             rows[did] = _document_row(did, filename, float(updated))
         except (OSError, ValueError, TypeError, AttributeError):
             continue
-    return _json(sorted(rows.values(), key=lambda row: row["updated_at"], reverse=True))
+    return sorted(rows.values(), key=lambda row: row["updated_at"], reverse=True)
+
+
+@app.get("/api/documents")
+def list_documents() -> Response:
+    return _json(lobby_rows())
 
 
 @app.post("/api/documents/new")

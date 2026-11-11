@@ -237,7 +237,7 @@ h1{{font-size:26px}}code{{overflow-wrap:anywhere}}button,a.button{{padding:12px 
         return [r for r in app.routes if isinstance(r, APIRoute) and r.path.startswith("/api/")]
 
     tools = [
-        {"name": "list_documents", "description": "List open and saved shared documents. Use doc_id for API calls.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+        {"name": "list_documents", "description": "List shared sample rooms (same as the app lobby). Private projects are not listed; ask the user for their doc_id or create one with import_osm. Use doc_id for API calls.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
         {"name": "api_schema", "description": "Discover every editor API endpoint and edit operation with argument signatures. Optionally filter paths by substring. Read before calling editor_api.", "inputSchema": {"type": "object", "properties": {"path_filter": {"type": "string"}}, "additionalProperties": False}},
         {"name": "editor_api", "description": "Call any documented editor API using its local path, method, query and JSON body. Supports all editing, batching, undo/redo, validation, scenarios, signals, transit, analysis and exports. Uses normal app persistence and live collaboration. No external URLs. Binary exports return base64; XML exports return text.", "inputSchema": {"type": "object", "properties": {"method": {"type": "string", "enum": ["GET", "POST", "DELETE"]}, "path": {"type": "string"}, "query": {"type": "object"}, "body": {"type": "object"}, "files": {"type": "object", "description": "Multipart uploads: map field names to objects with filename and base64 strings. Omit body when uploading."}}, "required": ["method", "path"], "additionalProperties": False}},
         {"name": "import_osm", "description": "Create a document from OSM XML text. For bundled files use POST /api/samples/{name}/open instead.", "inputSchema": {"type": "object", "properties": {"filename": {"type": "string"}, "xml": {"type": "string"}}, "required": ["xml"], "additionalProperties": False}},
@@ -247,8 +247,7 @@ h1{{font-size:26px}}code{{overflow-wrap:anywhere}}button,a.button{{padding:12px 
         from . import main
         from .edits import OPS
         if name == "list_documents":
-            ids = sorted(set(main.SESSIONS) | set(main._draft_ids()))
-            return [{"doc_id": sid, "filename": main._session(sid).filename} for sid in ids]
+            return [{"doc_id": r["doc_id"], "filename": r["filename"]} for r in main.lobby_rows()]
         if name == "api_schema":
             schema = app.openapi()
             paths = {p: v for p, v in schema["paths"].items() if p.startswith("/api/") and args.get("path_filter", "") in p}
@@ -327,7 +326,7 @@ h1{{font-size:26px}}code{{overflow-wrap:anywhere}}button,a.button{{padding:12px 
         if method == "initialize":
             result = {"protocolVersion": params.get("protocolVersion") if params.get("protocolVersion") in VERSIONS else VERSIONS[0],
                       "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "uds-editor", "version": main_version()},
-                      "instructions": "Shared transport editor. Discover documents with list_documents, then api_schema. Use batch for atomic edits. All edits autosave and broadcast to the app. Never invent edit-operation arguments."}
+                      "instructions": "Shared transport editor. Discover shared documents with list_documents (private ones need a doc_id from the user), then api_schema. Use batch for atomic edits. All edits autosave and broadcast to the app. Never invent edit-operation arguments."}
         elif method == "ping":
             result = {}
         elif method == "tools/list":
