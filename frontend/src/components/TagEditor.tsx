@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Tags } from '../types';
 import { KEY_SUGGESTIONS, VALUE_SUGGESTIONS } from '../utils/osm';
 import { choicesFor, keyRu, valueRu } from '../utils/tagNames';
@@ -20,7 +20,17 @@ export default function TagEditor({ tags, onChange }: Props) {
   const [newVal, setNewVal] = useState('');
   const [draft, setDraft] = useState<Tags>(tags);
   const [raw, setRaw] = useState<Set<string>>(new Set());
+  const inputs = useRef<Record<string, HTMLInputElement | null>>({});
+  const pendingFocus = useRef<string | null>(null);
   useEffect(() => setDraft(tags), [tags]);
+  useLayoutEffect(() => {
+    const k = pendingFocus.current;
+    if (k && inputs.current[k]) {
+      inputs.current[k]!.focus();
+      inputs.current[k]!.select();
+      pendingFocus.current = null;
+    }
+  }, [raw]);
 
   const commit = (k: string) => {
     if (draft[k] !== tags[k]) onChange({ [k]: draft[k] === '' ? null : draft[k] });
@@ -32,11 +42,16 @@ export default function TagEditor({ tags, onChange }: Props) {
     setNewKey('');
     setNewVal('');
   };
-  const toggleRaw = (k: string) => setRaw((prev) => {
-    const next = new Set(prev);
-    if (next.has(k)) next.delete(k); else next.add(k);
-    return next;
-  });
+  const editValue = (k: string) => {
+    const input = inputs.current[k];
+    if (input) {
+      input.focus();
+      input.select();
+      return;
+    }
+    pendingFocus.current = k;
+    setRaw((prev) => new Set([...prev, k]));
+  };
 
   return (
     <div className="tags">
@@ -62,6 +77,7 @@ export default function TagEditor({ tags, onChange }: Props) {
               </select>
             ) : (
               <input
+                ref={(input) => { inputs.current[k] = input; }}
                 aria-label={`Значение: ${ru ?? k}`}
                 value={draft[k] ?? ''}
                 list={`osm-values-${k}`}
@@ -75,7 +91,7 @@ export default function TagEditor({ tags, onChange }: Props) {
               {(VALUE_SUGGESTIONS[k] ?? []).map((v) => <option key={v} value={v} label={valueRu(k, v) ?? undefined} />)}
             </datalist>
             <button className="icon-btn" aria-label={`Редактировать значение ${k} как текст`}
-              title={raw.has(k) ? 'Выбор из списка' : 'Ввести значение вручную'} onClick={() => toggleRaw(k)}>✎</button>
+              title="Ввести значение вручную" onClick={() => editValue(k)}>✎</button>
             <button className="icon-btn" aria-label={`Удалить тег ${k}`} title="Удалить тег" onClick={() => onChange({ [k]: null })}>×</button>
           </div>
         );
