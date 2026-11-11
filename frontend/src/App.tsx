@@ -18,6 +18,7 @@ import StartScreen from './components/StartScreen';
 import { FixReview, type FixReviewState } from './components/FixReview';
 import { OrganizerReport, SumoReport } from './components/CheckResults';
 import { Simulation } from './components/Simulation';
+import { MapHint } from './components/MapHint';
 import { FixAllDialog } from './components/FixAll';
 import { IssueDetails } from './components/IssueDetails';
 import { MenuBar, Splitter, useLayout } from './components/WindowLayout';
@@ -991,7 +992,7 @@ export default function App() {
               onOp={onMapOp} onHint={setHint} onCursor={onCursor} wayById={wayById} />
             {mode !== 'simulation' && analysisOverlay.features.some(f=>f.properties?.mock) && <div className="analysis-legend">Интервалы без OSM interval — условные (mock); скорость ОТ и ожидание — допущения</div>}
             {mode === 'simulation' ? <Simulation key={`${doc.doc_id}:${doc.rev}`} docId={doc.doc_id} map={mapRef} />
-              : <div className="map-hint">{hint ?? TOOL_HINTS[tool]}</div>}
+              : <MapHint text={hint ?? TOOL_HINTS[tool]} />}
             {issueInfo && !fixReview && (
               <IssueDetails issue={issueInfo} onClose={() => setIssueInfo(null)}
                 onFix={(f) => onFix(issueInfo, f)} onShowRef={(kind, id) => showElement(kind, id)}

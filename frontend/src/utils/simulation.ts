@@ -22,11 +22,11 @@ export function makeSampler(recording: SimulationRecording): (time: number) => S
     if (span > 2) return time - frame.time < 1 ? frame.vehicles : [];
     const ratio = Math.max(0, Math.min(1, (time - frame.time) / span));
     return frame.vehicles.map((car) => {
-      const [id, lon, lat, angle] = car;
+      const [id, lon, lat, angle, kind] = car;
       const target = next.byId.get(id);
       if (!target) return car;
       return [id, lon + turn(lon, target[1]) * ratio, lat + (target[2] - lat) * ratio,
-        angle + turn(angle, target[3]) * ratio];
+        angle + turn(angle, target[3]) * ratio, kind];
     });
   };
 }

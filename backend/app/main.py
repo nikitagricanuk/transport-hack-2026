@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -46,7 +46,7 @@ from .organizer import OrganizerError, credentials, upload_osm
 from .mcp_server import install_mcp
 from .osm_model import OsmDocument, clone
 from .sumo_check import find_netconvert, run_netconvert
-from .simulation import FILE_LIMIT, SimulationError, read_matsim, read_webots, run_sumo, unpack_recording
+from .simulation import FILE_LIMIT, SimulationError, parse_fleet, read_matsim, read_webots, run_sumo, unpack_recording
 from .validation import validate
 
 DATA_DIR = Path(os.environ.get("UDS_DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
@@ -891,12 +891,14 @@ def check_sumo(doc_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/documents/{doc_id}/simulation/sumo")
-def simulate_sumo(doc_id: str, vehicles: int = Query(60, ge=1, le=200)) -> dict:
+def simulate_sumo(doc_id: str, vehicles: int = Query(60, ge=1, le=200),
+                  fleet: Annotated[str | None, Query(max_length=200,
+                                                     description="виды и количество: car:40,bus:10,tram:4")] = None) -> dict:
     s = _session(doc_id)
     with s.lock:
         xml = _export_xml(s)
     try:
-        return run_sumo(xml, vehicles)
+        return run_sumo(xml, vehicles, parse_fleet(fleet, vehicles))
     except SimulationError as e:
         raise HTTPException(e.status, str(e)) from e
 

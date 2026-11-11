@@ -167,9 +167,13 @@ export interface CheckGroup {
 }
 
 /** Seconds, WGS84 longitude/latitude, and heading clockwise from north. */
-export type SimVehicle = [id: string, lon: number, lat: number, angle: number];
+/** kind: car, bus, tram, truck, motorcycle, bicycle (SUMO runs); recordings may omit it */
+export type SimVehicle = [id: string, lon: number, lat: number, angle: number, kind?: string];
 export interface SimulationRecording {
   frames: { time: number; vehicles: SimVehicle[] }[];
+  /** SUMO run: how many of each kind were requested and placed on the network */
+  fleet?: { kind: string; label: string; requested: number; placed: number }[];
+  warnings?: string[];
 }
 
 export interface SumoResult {
