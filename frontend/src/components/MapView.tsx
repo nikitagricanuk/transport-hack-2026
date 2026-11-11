@@ -72,6 +72,8 @@ interface Props {
   layers: LayerVisibility;
   baseOpacity: number;
   issues: Issue[];
+  /** a graph error point on the map: a click shows its details, a double click goes to it */
+  onIssuePick?: (issueId: string, go: boolean) => void;
   /** analytics mode: roads without a load colour are plain white instead of their class colour */
   analytics?: boolean;
   /** v/c per way id: roads are coloured by congestion while set */
@@ -98,6 +100,19 @@ type DraftPoint = { lon: number; lat: number; id?: number; way_id?: number };
 
 const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] };
 const HIT_PX = 6;
+/** Snapping reaches a little further than a click hit, so a road can be led onto another one. */
+const SNAP_PX = 12;
+
+/** Vertical level of a way: bridges and tunnels are other grades, never joined by snapping. */
+export function gradeOf(tags: Record<string, string>): number {
+  const layer = Number.parseInt(tags.layer ?? '', 10);
+  if (Number.isFinite(layer)) return layer;
+  if (tags.bridge && tags.bridge !== 'no') return 1;
+  if (tags.tunnel && tags.tunnel !== 'no') return -1;
+  return 0;
+}
+
+type Snap = { lon: number; lat: number; nodeId?: number; wayId?: number };
 
 /** Width by lane count, highway class and zoom. `extra` px is added at every stop.
  * MapLibre only accepts ['zoom'] as the input of a top-level interpolate, so the
@@ -180,6 +195,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
 
   const draft = useRef<DraftPoint[]>([]);
   const mergeFirst = useRef<number | null>(null);
+  const snapRef = useRef<{ snapAt: (e: MapMouseEvent) => Snap; showSnap: (s: Snap | null) => void } | null>(null);
   // building whose corners are editable: a click selects a building as a whole,
   // a double click switches it to vertex editing until the selection changes
   const vertexEdit = useRef<number | null>(null);
@@ -368,7 +384,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       map.addImage('stop-square', { width: 16, height: 16, data: new Uint8Array(Array.from({ length: 16 * 16 }, () => [37, 99, 235, 255]).flat()) });
       map.addImage('arrow', arrowImage(), { pixelRatio: 2 });
       map.addImage('arrow-white', arrowImage('#F8FAFC'), { pixelRatio: 2 });
-      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'drag', 'cmp-before', 'cmp-after',
+      for (const id of ['areas', 'ways', 'nodes', 'issues', 'verts', 'joins', 'draft', 'snap', 'drag', 'cmp-before', 'cmp-after',
         'trees', 'bus-stop-models', 'traffic-light-models', 'analysis', 'segment-selection', 'peer-sel', 'lane-surface', 'lane-marks', 'lane-arrows', 'route-lines', 'route-stops', 'hist-hl', 'fix-preview']) {
         map.addSource(id, { type: 'geojson', data: EMPTY });
       }
@@ -573,6 +589,10 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         paint: { 'line-color': '#2563EB', 'line-width': 3, 'line-dasharray': [2, 1] } });
       map.addLayer({ id: 'draft-pts', type: 'circle', source: 'draft', filter: ['==', ['geometry-type'], 'Point'],
         paint: { 'circle-radius': 5, 'circle-color': '#2563EB', 'circle-stroke-color': '#FFFFFF', 'circle-stroke-width': 2 } });
+      // where the next click of the road tool attaches: green — an existing point, blue — a new junction on a road
+      map.addLayer({ id: 'snap-ring', type: 'circle', source: 'snap',
+        paint: { 'circle-radius': 9, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-width': 3,
+          'circle-stroke-color': ['match', ['get', 'kind'], 'node', '#16A34A', '#2563EB'] } });
       map.addImage('sim-car', vehicleImage(), { pixelRatio: 2 });
       map.addSource('sim-vehicles', { type: 'geojson', data: vehicleFeatures(vehiclesRef.current) });
       map.addLayer({ id: 'sim-vehicles', type: 'symbol', source: 'sim-vehicles', maxzoom: CAR_MODEL_MINZOOM, layout: {
@@ -884,7 +904,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       return pts.map((coordinates, n) => ({
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates },
-        properties: { severity: i.severity, id: `${i.id}-${n}` },
+        properties: { severity: i.severity, id: `${i.id}-${n}`, issue: i.id },
       }));
     });
     (map.getSource('issues') as GeoJSONSource).setData({ type: 'FeatureCollection', features: feats });
@@ -948,7 +968,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     showIf(map, ['stop-symbol', 'stop-label'], L.stops);
     showIf(map, PATH_LAYER_IDS, L.paths);
     showIf(map, ['rail'], L.rail);
-    showIf(map, ['zones-fill', 'zones-line', 'tree-canopies', 'buildings-fill', 'buildings-line', 'building-numbers'], L.buildings);
+    showIf(map, ['zones-fill', 'zones-line', 'tree-canopies'], L.zones !== false);
+    showIf(map, ['buildings-fill', 'buildings-line', 'building-numbers'], L.buildings);
     showIf(map, ['issues'], L.issues);
     const cats = [L.signals && 'signal', L.crossings && 'crossing', L.tramSignals && 'tram_signal', L.nodes && 'tagged'].filter(Boolean);
     showIf(map, ['bus-stop-shelters'], L.stops);
@@ -975,6 +996,7 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
     renderDraft();
     const map = mapRef.current;
     if (map) map.getCanvas().style.cursor = props.tool === 'select' ? '' : 'crosshair';
+    (map?.getSource('snap') as GeoJSONSource | undefined)?.setData({ type: 'FeatureCollection', features: [] });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tool]);
 
@@ -1064,6 +1086,65 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       };
     };
 
+    /** Where a road-tool click attaches. Alt — a free point. Roads on another level
+     * (bridges, tunnels, layer=*) are not snapped to, so an overpass is never joined by accident. */
+    const snapAt = (e: MapMouseEvent): Snap => {
+      const p = propsRef.current;
+      const free: Snap = { lon: e.lngLat.lng, lat: e.lngLat.lat };
+      if (e.originalEvent.altKey) return free;
+      const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
+        [e.point.x - SNAP_PX, e.point.y - SNAP_PX], [e.point.x + SNAP_PX, e.point.y + SNAP_PX]];
+      const near = map.queryRenderedFeatures(bbox, { layers: ['ways-hit'] })
+        .map((f) => p.wayById(Number(f.properties.id)))
+        .filter((w): w is WayProps => !!w && w.layer === 'road' && gradeOf(w.tags) === 0);
+      const { nodeId } = pick(e);
+      if (nodeId !== undefined) {
+        const on = p.geo?.ways.features.filter((f) => f.properties.nodes.includes(nodeId)) ?? [];
+        if (!on.length || on.some((f) => gradeOf(f.properties.tags) === 0)) {
+          const f = p.geo?.nodes.features.find((n) => n.properties.id === nodeId);
+          const v = f?.geometry.coordinates ?? findVertex(p.geo, nodeId);
+          if (v) return { lon: v[0], lat: v[1], nodeId };
+        }
+      }
+      // the nearest vertex of a nearby road (end or middle point), then the nearest point of its line
+      let best: { d: number; snap: Snap } | null = null;
+      for (const w of near) {
+        const f = p.geo?.ways.features.find((x) => x.properties.id === w.id);
+        const coords = (f?.geometry.coordinates ?? []) as number[][];
+        coords.forEach((c, i) => {
+          const q = map.project(c as [number, number]);
+          const d = Math.hypot(q.x - e.point.x, q.y - e.point.y) - 4;  // vertices win over the line nearby
+          if (d < SNAP_PX && (!best || d < best.d)) best = { d, snap: { lon: c[0], lat: c[1], nodeId: w.nodes[i] } };
+        });
+        for (let i = 0; i + 1 < coords.length; i++) {
+          const a = map.project(coords[i] as [number, number]);
+          const b = map.project(coords[i + 1] as [number, number]);
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const t = Math.max(0, Math.min(1, ((e.point.x - a.x) * dx + (e.point.y - a.y) * dy) / ((dx * dx + dy * dy) || 1)));
+          const qx = a.x + t * dx, qy = a.y + t * dy;
+          const d = Math.hypot(qx - e.point.x, qy - e.point.y);
+          if (d < SNAP_PX && (!best || d < best.d)) {
+            const ll = map.unproject([qx, qy]);
+            best = { d, snap: { lon: ll.lng, lat: ll.lat, wayId: w.id } };
+          }
+        }
+      }
+      return (best as { d: number; snap: Snap } | null)?.snap ?? free;
+    };
+    const showSnap = (s: Snap | null) => {
+      const feats: Feature[] = s && (s.nodeId !== undefined || s.wayId !== undefined)
+        ? [{ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lon, s.lat] }, properties: { kind: s.nodeId !== undefined ? 'node' : 'edge' } }]
+        : [];
+      (map.getSource('snap') as GeoJSONSource | undefined)?.setData({ type: 'FeatureCollection', features: feats });
+    };
+    snapRef.current = { snapAt, showSnap };
+
+    const issueAt = (e: MapMouseEvent): string | undefined => {
+      if (!map.getLayer('issues') || map.getLayoutProperty('issues', 'visibility') === 'none') return undefined;
+      const hit = map.queryRenderedFeatures([[e.point.x - HIT_PX, e.point.y - HIT_PX], [e.point.x + HIT_PX, e.point.y + HIT_PX]], { layers: ['issues'] });
+      return hit.length ? String(hit[0].properties.issue) : undefined;
+    };
+
     const finishDraft = (closed = false) => {
       const pts = draft.current;
       draft.current = [];
@@ -1095,6 +1176,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       const { lng, lat } = e.lngLat;
       switch (p.tool) {
         case 'select': {
+          const issue = issueAt(e);
+          if (issue) { p.onIssuePick?.(issue, false); break; }
           if (joinId !== undefined) {
             p.onOp({ op: 'separate_ways', args: { node_id: joinId } });
             break;
@@ -1161,15 +1244,12 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
           if (wayId !== undefined) p.onOp({ op: 'reverse_way', args: { id: wayId } });
           break;
         case 'way': {
-          const pt: DraftPoint = { lon: lng, lat };
-          if (nodeId !== undefined) {
-            const f = p.geo?.nodes.features.find((n) => n.properties.id === nodeId);
-            const v = f?.geometry.coordinates ?? findVertex(p.geo, nodeId);
-            if (v) { pt.lon = v[0]; pt.lat = v[1]; }
-            pt.id = nodeId;
-          } else if (wayId !== undefined && p.wayById(wayId)?.layer === 'road') {
-            pt.way_id = wayId;
-          }
+          // ends and middle points snap to an existing node; a click on the line of a road makes a
+          // junction there (the road is split at it on the server)
+          const s = snapAt(e);
+          const pt: DraftPoint = { lon: s.lon, lat: s.lat };
+          if (s.nodeId !== undefined) pt.id = s.nodeId;
+          else if (s.wayId !== undefined) pt.way_id = s.wayId;
           const prev = draft.current;
           // a click on the point just placed (a second click in place) ends the road there
           const last = prev[prev.length - 1];
@@ -1202,6 +1282,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         return;
       }
       if (p.tool !== 'select') return;
+      const issue = issueAt(e);
+      if (issue) { e.preventDefault(); p.onIssuePick?.(issue, true); return; }
       // double click on a building: edit its corners (vector mode)
       const { wayId } = pick(e);
       if (wayId === undefined || p.wayById(wayId)?.layer !== 'building') return;
@@ -1229,7 +1311,11 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
         if (!d.frame) d.frame = requestAnimationFrame(() => { d.frame = 0; drawDrag(d); });
         return;
       }
-      if (propsRef.current.tool === 'way' && draft.current.length) renderDraft([e.lngLat.lng, e.lngLat.lat]);
+      if (propsRef.current.tool === 'way' && snapRef.current) {
+        const s = snapRef.current.snapAt(e);
+        snapRef.current.showSnap(s);
+        if (draft.current.length) renderDraft([s.lon, s.lat]);
+      }
     };
 
     const onDown = (e: MapMouseEvent) => {
@@ -1286,10 +1372,14 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(props, ref) {
       e.preventDefault();
       map.dragPan.disable();
       const ids = new Set(way.nodes);
+      // a building moves alone: attached neighbours keep their shared walls (the server copies them)
+      const own = way.layer === 'building'
+        ? shapes.filter((f) => f.nodes === way.nodes || (f.nodes.some((n) => ids.has(n)) && !(p.geo?.areas.features ?? []).some((a) => a.properties.nodes === f.nodes && a.properties.layer === 'building')))
+        : shapes.filter((f) => f.nodes.some((n) => ids.has(n)));
       drag.current = {
         mode: 'way', wayId: selectedId, moved: false, startX: e.point.x, startY: e.point.y,
         lon: e.lngLat.lng, lat: e.lngLat.lat, originLon: e.lngLat.lng, originLat: e.lngLat.lat,
-        ways: shapes.filter((f) => f.nodes.some((n) => ids.has(n))).map((f) => copy(f.nodes, f.coords, (n) => ids.has(n))),
+        ways: own.map((f) => copy(f.nodes, f.coords, (n) => ids.has(n))),
         frame: 0,
       };
     };

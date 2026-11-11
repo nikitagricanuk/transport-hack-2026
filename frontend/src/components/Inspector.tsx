@@ -7,7 +7,7 @@ import AdapterPanel from './AdapterPanel';
 import TagEditor from './TagEditor';
 import { RoadLoad } from './Analysis';
 import { areaM2, fmt, lengthM } from '../utils/geom';
-import { HIGHWAY_CLASSES, ROAD_PERMISSIONS, SPEEDS, SURFACES, laneCounts, onewayMode, turnGlyphs, type OnewayMode } from '../utils/osm';
+import { HIGHWAY_CLASSES, PATH_PERMISSIONS, ROAD_PERMISSIONS, SPEEDS, SURFACES, laneCounts, onewayMode, turnGlyphs, type OnewayMode } from '../utils/osm';
 
 interface Props {
   way?: WayProps;
@@ -292,7 +292,7 @@ export function WayAttributes({ way, tags, setTags, onOp, sharedJunctions }: {
         <div className="field">
           <span>Разрешения</span>
           <div className="perm-list" role="group" aria-label="Разрешения">
-            {ROAD_PERMISSIONS.map((p) => {
+            {(way.layer === 'path' ? PATH_PERMISSIONS : ROAD_PERMISSIONS).map((p) => {
               const on = way.permissions[p.key];
               return (
                 <label key={p.key} className="check">
@@ -395,10 +395,7 @@ function NodeAttributes({ tags, setTags, stopInRoute }: { tags: Tags; stopInRout
         if (p.label !== 'Остановка' && (stopInRoute || tags.public_transport) && !window.confirm('Узел может входить в маршрут как остановка. Снять теги остановки?')) return;
         setTags(presetPatch(tags, p), `Тип узла: ${p.label}`);
       }}>{p.label}</button>)}</div></div>
-      {tags.highway === 'traffic_signals' && <label className="field">Дополнительная секция
-        <select value={tags['uds:signal:arrow'] ?? ''} onChange={(e) => setTags({ 'uds:signal:arrow': e.target.value || null })}>
-          <option value="">Обычный</option><option value="left">Стрелка налево</option><option value="right">Стрелка направо</option><option value="through">Стрелка прямо</option>
-        </select></label>}
+      {tags.highway === 'traffic_signals' && <p className="muted small">Дополнительные секции (стрелки), фазы и цикл настраиваются в «Программе светофора» ниже и учитываются в пропускной способности подходов.</p>}
       {tags['uds:signal:tram'] === 'yes' && <p className="muted small">Трамвайный светофор. Схему сигналов сверяйте с ГОСТ Р 52289-2019.</p>}
     </div>;
 }

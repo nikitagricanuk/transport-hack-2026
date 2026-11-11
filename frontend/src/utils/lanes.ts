@@ -116,7 +116,7 @@ export function buildLanes(roads: LaneRoad[], plates: LaneJunction[] = []): Lane
     }
     const anchors=[0,...display.flatMap((p,i)=>i>0&&i<display.length-1&&(used.get(p.join(','))?.size??0)>1?[i]:[]),display.length-1];
     const rounded:number[][]=[];
-    for(let i=0;i<anchors.length-1;i++){const piece=smoothLine(display.slice(anchors[i],anchors[i+1]+1));rounded.push(...(i?piece.slice(1):piece));}
+    for(let i=0;i<anchors.length-1;i++){const piece=roundCorners(display.slice(anchors[i],anchors[i+1]+1));rounded.push(...(i?piece.slice(1):piece));}
     const r={...raw,coords:rounded.length?rounded:display};
     const cuts = (r.junctions ?? []).map(j => junctionRings.get(j) ?? []).filter(ring => ring.length >= 4);
     const n = r.forward + r.backward;
@@ -360,6 +360,35 @@ export function cutAround(coords: number[][], circles: LaneJunction[]): number[]
   }
   if (cur.length >= 2) pieces.push(cur.map(toLL));
   return pieces;
+}
+
+/** Rounds each bend of the display line only right at its vertex: the arc starts and ends
+ * at most `radiusM` metres (and 40 % of the neighbouring segments) from the node, so the
+ * road never drifts away from the node it passes through. Straight runs stay as they are;
+ * both ends stay on their OSM nodes. */
+export function roundCorners(coords: number[][], radiusM = 6, steps = 6): number[][] {
+  if (coords.length < 3) return coords.map((p) => [...p]);
+  const kx = M_PER_DEG_LON_EQ * Math.cos(coords[0][1] * Math.PI / 180);
+  const m = (a: number[], b: number[]) => Math.hypot((b[0] - a[0]) * kx, (b[1] - a[1]) * M_PER_DEG_LAT);
+  const out: number[][] = [[...coords[0]]];
+  for (let i = 1; i < coords.length - 1; i++) {
+    const a = coords[i - 1], v = coords[i], b = coords[i + 1];
+    const la = m(a, v), lb = m(v, b);
+    const ux = [(v[0] - a[0]) * kx / (la || 1), (v[1] - a[1]) * M_PER_DEG_LAT / (la || 1)];
+    const uy = [(b[0] - v[0]) * kx / (lb || 1), (b[1] - v[1]) * M_PER_DEG_LAT / (lb || 1)];
+    const turn = Math.acos(Math.max(-1, Math.min(1, ux[0] * uy[0] + ux[1] * uy[1])));
+    const d = Math.min(radiusM, 0.4 * la, 0.4 * lb);
+    if (turn < 0.05 || d < 0.3) { out.push([...v]); continue; }
+    const p1 = [v[0] - ux[0] * d / kx, v[1] - ux[1] * d / M_PER_DEG_LAT];
+    const p2 = [v[0] + uy[0] * d / kx, v[1] + uy[1] * d / M_PER_DEG_LAT];
+    for (let k = 0; k <= steps; k++) {
+      const t = k / steps;
+      out.push([(1 - t) ** 2 * p1[0] + 2 * (1 - t) * t * v[0] + t * t * p2[0],
+        (1 - t) ** 2 * p1[1] + 2 * (1 - t) * t * v[1] + t * t * p2[1]]);
+    }
+  }
+  out.push([...coords[coords.length - 1]]);
+  return out;
 }
 
 /** Chaikin rounds the display line only, retaining both OSM endpoints. */

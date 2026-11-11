@@ -1,15 +1,23 @@
 import type { Op, RoadPermissions, Tags } from '../types';
 
-/** Checkbox rows in the inspector. Keys match `backend/app/access.py` `PERMISSIONS`. */
+/** Checkbox rows for carriageways. Keys match `backend/app/access.py` `PERMISSIONS`.
+ * On a road `horse` means horse-drawn carts; wheelchairs belong to sidewalks and paths. */
 export const ROAD_PERMISSIONS: { key: keyof RoadPermissions; label: string }[] = [
   { key: 'foot', label: 'Пешеходы' },
   { key: 'bicycle', label: 'Велосипедисты' },
-  { key: 'horse', label: 'Всадники' },
   { key: 'motorcycle', label: 'Мотоциклы' },
-  { key: 'hgv', label: 'Грузовики' },
-  { key: 'psv', label: 'Маршрутный транспорт' },
   { key: 'moped', label: 'Мопеды' },
+  { key: 'hgv', label: 'Грузовые автомобили' },
+  { key: 'psv', label: 'Общественный транспорт' },
+  { key: 'horse', label: 'Гужевые повозки' },
+];
+
+/** Checkbox rows for sidewalks, footways and paths. */
+export const PATH_PERMISSIONS: { key: keyof RoadPermissions; label: string }[] = [
+  { key: 'foot', label: 'Пешеходы' },
   { key: 'wheelchair', label: 'Инвалидные коляски' },
+  { key: 'bicycle', label: 'Велосипедисты' },
+  { key: 'horse', label: 'Всадники' },
 ];
 
 export const HIGHWAY_CLASSES: { value: string; label: string }[] = [

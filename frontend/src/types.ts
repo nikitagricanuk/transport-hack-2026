@@ -205,6 +205,8 @@ export interface LayerVisibility {
   crossings: boolean;
   stops: boolean;
   buildings: boolean;
+  /** lawns, parks, landuse areas: a layer of its own, apart from buildings */
+  zones: boolean;
   issues: boolean;
 }
 
@@ -457,6 +459,9 @@ export interface StopInfo {
   load_label: string;
 }
 
+/** One phase of a signal program: its green and the movements (and arrow sections) it releases. */
+export interface SignalPhase { name: string; green_s: number; moves: string[] }
+
 export interface SignalPlan {
   node_id: number;
   cycle: number;
@@ -464,7 +469,13 @@ export interface SignalPlan {
   custom: boolean;
   approaches: { way_id: number; name: string; highway: string; bearing: number; group: 'main' | 'cross';
     volume: number | null; capacity: number | null; vc: number | null }[];
-  phases: { name: string; group: 'main' | 'cross'; green_s: number; yellow_s: number; all_red_s?: number }[];
+  phases: { name: string; group: 'main' | 'cross' | 'arrow'; green_s: number; yellow_s: number; all_red_s?: number; moves: string[]; moves_ru: string[] }[];
+  /** the phases come from an edited program (with arrows), not from cycle and split */
+  program: boolean;
+  effective_green: { main: number; cross: number };
+  moves: Record<string, string>;
+  turn_share: { left: number; right: number };
+  turn_source: string;
   flow_ratio: { main: number; cross: number };
   webster: { cycle: number; main_share: number; saturated: boolean };
 }

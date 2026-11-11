@@ -26,7 +26,7 @@ from .transit import DEFAULT_LEVELS, M2_PER_PERSON, RESIDENTIAL
 M2_PER_JOB = 25.0
 PEAK_TRIP_RATE = 0.12   # car trips per resident in the peak hour
 BETA = 0.12             # gravity deterrence per minute
-INTRA_MIN = 3.0         # travel time inside one zone, minutes
+INTRA_MIN = 3.0         # travel time inside one zone, minutes (an assumption, no path is computed)
 
 
 # ------------------------------------------------------------ road graph
@@ -146,10 +146,17 @@ def apply_closures(doc: OsmDocument, rows: list[dict[str, Any]], closed: set[int
 
 
 # ------------------------------------------------------------ OD matrix
+_COMPASS = {
+    2: [["Юго-запад", "Юго-восток"], ["Северо-запад", "Северо-восток"]],
+    3: [["Юго-запад", "Юг", "Юго-восток"], ["Запад", "Центр", "Восток"], ["Северо-запад", "Север", "Северо-восток"]],
+}
+
+
 def _zone_name(ix: int, iy: int, n: int) -> str:
-    ns = ["Юг", "Центр", "Север"] if n == 3 else [str(i + 1) for i in range(n)]
-    ew = ["запад", "центр", "восток"] if n == 3 else [chr(ord("А") + i) for i in range(n)]
-    return f"{ns[iy]}-{ew[ix]}" if n == 3 else f"{ew[ix]}{ns[iy]}"
+    """Compass names for 2×2 and 3×3; a finer grid is numbered like a map sheet: А1 is north-west."""
+    if n in _COMPASS:
+        return _COMPASS[n][iy][ix]
+    return f"Зона {'АБВГДЕЖИ'[ix]}{n - iy}"
 
 
 def od_matrix(doc: OsmDocument, grid: int = 3, trip_rate: float = PEAK_TRIP_RATE, beta: float = BETA) -> dict[str, Any]:

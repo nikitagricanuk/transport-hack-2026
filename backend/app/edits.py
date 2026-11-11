@@ -286,7 +286,9 @@ def op_move_way(doc, tx, id: int, dlat: float, dlon: float):
     """Shift every node of a way by the same delta, so a building or a road moves as one object.
 
     Nodes shared with another way move too: in OSM the corner belongs to every way that uses it.
-    Every highway that uses a moved node is checked for a new same-grade crossing.
+    The exception is a building attached to other buildings: it gets its own corners first,
+    so the neighbours stay where they are. Every highway that uses a moved node is checked
+    for a new same-grade crossing.
     """
     w = _way(doc, int(id))
     dlat, dlon = float(dlat), float(dlon)
@@ -294,6 +296,8 @@ def op_move_way(doc, tx, id: int, dlat: float, dlon: float):
         raise OpError("сдвиг должен быть конечным числом")
     if abs(dlat) < 1e-12 and abs(dlon) < 1e-12:
         raise OpError("сдвиг слишком мал")
+    if "building" in w.tags:
+        _detach_shared_building_nodes(doc, tx, w)
     moved = 0
     seen: set[int] = set()
     moved_ids: list[int] = []
@@ -315,6 +319,26 @@ def op_move_way(doc, tx, id: int, dlat: float, dlon: float):
     # cross a third road, and that crossing is not on the building itself.
     warnings = _join_crossings(doc, tx, _highway_ids_touching(doc, moved_ids))
     return _with_warnings({"id": w.id, "nodes": moved}, warnings)
+
+
+def _detach_shared_building_nodes(doc: OsmDocument, tx: Transaction, w: Way) -> None:
+    """A building moved on its own leaves its neighbours in place.
+
+    Attached buildings (a common wall) share corner nodes. Moving one of them would
+    drag those corners and bend every neighbour, so the moved building gets its own
+    copies of the shared corners first. Roads and other lines keep sharing: a node
+    used by a road stays connected.
+    """
+    index = doc.node_way_index()
+    copies: dict[int, int] = {}
+    for nid in dict.fromkeys(w.nodes):
+        others = [doc.ways[x] for x in index.get(nid, []) if x != w.id and x in doc.ways]
+        if others and all("building" in o.tags or "building:part" in o.tags for o in others):
+            n = doc.nodes[nid]
+            copies[nid] = _create_node(doc, tx, n.lat, n.lon).id
+    if copies:
+        tx.touch("way", w.id)
+        w.nodes = [copies.get(ref, ref) for ref in w.nodes]
 
 
 def op_add_node(doc, tx, lat: float, lon: float, tags: dict | None = None):
@@ -342,11 +366,14 @@ def op_add_way(doc, tx, points: list[dict], tags: dict | None = None, closed: bo
         elif p.get("way_id") is not None:
             _assert_compatible_with(doc, new_tags, [_way(doc, int(p["way_id"]))])
     refs: list[int] = []
+    joined: set[int] = set()   # nodes where the new road meets an existing one
     for p in points:
         if p.get("id") is not None:
             refs.append(_node(doc, int(p["id"])).id)
+            joined.add(refs[-1])
         elif p.get("way_id") is not None:
             refs.append(_insert_on_way(doc, tx, int(p["way_id"]), float(p["lat"]), float(p["lon"]), None))
+            joined.add(refs[-1])
         else:
             refs.append(_create_node(doc, tx, float(p["lat"]), float(p["lon"])).id)
     refs = _dedupe_consecutive(refs)
@@ -361,7 +388,26 @@ def op_add_way(doc, tx, points: list[dict], tags: dict | None = None, closed: bo
     tx.touch("way", wid)
     doc.ways[wid] = Way(id=wid, nodes=refs, tags=new_tags)
     warnings = _join_crossings(doc, tx, [wid])
-    return _with_warnings({"id": wid}, warnings)
+    split = _split_at_connections(doc, tx, wid, joined) if "highway" in new_tags else []
+    return _with_warnings({"id": wid, "split": split}, warnings)
+
+
+def _split_at_connections(doc: OsmDocument, tx: Transaction, new_id: int, nodes: set[int]) -> list[int]:
+    """A road attached to the middle of another one splits that road at the shared node.
+
+    The network then has a real junction: the node is the end of every segment that meets
+    there, so each segment runs from junction to junction. Closed ways (roundabouts,
+    loops) are left whole: splitting them would not add a junction and breaks their tags.
+    """
+    created: list[int] = []
+    for nid in nodes:
+        for way in list(doc.ways.values()):
+            if way.id == new_id or "highway" not in way.tags or way.is_closed or nid not in way.nodes:
+                continue
+            idx = way.nodes.index(nid)
+            if 0 < idx < len(way.nodes) - 1 and way.nodes.count(nid) == 1:
+                created.append(_split_way_at(doc, tx, way, idx).id)
+    return created
 
 
 def op_delete(doc, tx, kind: Kind, id: int):
@@ -720,6 +766,30 @@ def _detach_endpoint(doc: OsmDocument, tx: Transaction, way: Way, nid: int, proj
     return new.id
 
 
+def _continuation(doc: OsmDocument, proj: LocalProjection, way: Way, nid: int, others: list[Way]) -> Way | None:
+    """The way that carries ``way`` straight on through ``nid`` (same class and name, within ~35°)."""
+    def away(w: Way) -> tuple[float, float] | None:
+        i = w.nodes.index(nid)
+        nb = w.nodes[i + 1] if i == 0 else w.nodes[i - 1]
+        if nb not in doc.nodes:
+            return None
+        a, b = proj.to_xy(doc.nodes[nid].lat, doc.nodes[nid].lon), proj.to_xy(doc.nodes[nb].lat, doc.nodes[nb].lon)
+        d = dist(a, b) or 1.0
+        return (b[0] - a[0]) / d, (b[1] - a[1]) / d
+    base = away(way)
+    best, best_cos = None, -0.82
+    for o in others:
+        if not _endpoint_only(o, nid) or o.tags.get("highway") != way.tags.get("highway")                 or o.tags.get("name", "") != way.tags.get("name", ""):
+            continue
+        v = away(o)
+        if base is None or v is None:
+            continue
+        c = base[0] * v[0] + base[1] * v[1]
+        if c < best_cos:
+            best, best_cos = o, c
+    return best
+
+
 def op_separate_ways(doc, tx, node_id: int):
     """Undo a shared connection: every road but one leaves the node.
 
@@ -737,9 +807,17 @@ def op_separate_ways(doc, tx, node_id: int):
     if len(ways) < 2:
         raise OpError("узел не соединяет несколько дорог")
     kept = min(ways, key=lambda w: (_endpoint_only(w, nid), w.id < 0, abs(w.id)))
-    pending = [w for w in ways if w.id != kept.id]
     proj = _proj(doc)
-    retained = _segments_of(doc, proj, kept)
+    keep_ids = {kept.id}
+    if _endpoint_only(kept, nid):
+        # a through road split at this junction: its straight continuation stays too
+        cont = _continuation(doc, proj, kept, nid, [w for w in ways if w.id != kept.id])
+        if cont is not None:
+            keep_ids.add(cont.id)
+    pending = [w for w in ways if w.id not in keep_ids]
+    if not pending:
+        raise OpError("узел соединяет только части одной дороги")
+    retained = [seg for wid in keep_ids for seg in _segments_of(doc, proj, doc.ways[wid])]
     created: list[int] = []
     detached: list[int] = []
     seen: set[int] = set()
@@ -1441,7 +1519,9 @@ def op_split_carriageways(doc, tx, way_id: int, median_m: float = 1.0):
     if direction(w.tags) != 0:
         raise OpError("дорога уже односторонняя")
     if len(w.nodes) < 3:
-        raise OpError("у дороги нет промежуточных точек: сначала добавьте узел посередине")
+        # a straight two-point road: add the middle point the carriageways are offset from
+        a, b = _node(doc, w.nodes[0]), _node(doc, w.nodes[-1])
+        _insert_on_way(doc, tx, w.id, (a.lat + b.lat) / 2, (a.lon + b.lon) / 2, None, snap_m=0.0)
     first, last = w.nodes[0], w.nodes[-1]
     restrictions = [rel for rel in doc.relations_with("way", w.id) if _is_restriction(rel.tags)]
     for rel in restrictions:

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import type { HistoryEntry, Kind, LoadState, OdMatrix, Selection, Task, TaskCriterion, TaskResult } from '../types';
 import { fmt } from '../utils/geom';
-import { AnalyticsAssumptions, Bars, LOS_COLOR } from './Analysis';
+import { AnalyticsAssumptions, Bars, LOS_COLOR, VC_TIP } from './Analysis';
 import { VehicleMix } from './VehicleMix';
 
 // --------------------------------------------------------- intensity presets
@@ -109,6 +109,7 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
         <section className="stack10">
           <b>Статистика потоков</b>
           <div className="kpis">
+            <div title={VC_TIP} className="has-tip"><b>{fmt(s.avg_vc, 2)}</b><span>средняя v/c, загрузка z ⓘ</span></div>
             <div><b>{fmt(s.veh_km)}</b><span>авт·км за час</span></div>
             <div><b>{fmt(s.veh_hours, 0)}</b><span>авт·ч в пути</span></div>
             <div><b>{fmt(s.delay_hours, 1)}</b><span>авт·ч задержки</span></div>
@@ -169,9 +170,9 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
             </select>
           </div>
           <div className="seg" role="group" aria-label="Что показать">
-            <button aria-pressed={view === 'trips'} onClick={() => setView('trips')}>Поездки/ч</button>
+            <button aria-pressed={view === 'trips'} onClick={() => setView('trips')}>Корреспонденции, поездок/ч</button>
             <button aria-pressed={view === 'shares'} onClick={() => setView('shares')}>Доли, %</button>
-            <button aria-pressed={view === 'minutes'} onClick={() => setView('minutes')}>Время, мин</button>
+            <button aria-pressed={view === 'minutes'} onClick={() => setView('minutes')}>Время в пути, мин</button>
           </div>
           {!od ? <span className="small muted">Расчёт…</span> : od.zones.length === 0 ? <span className="small muted">Нет зданий для зон.</span> : (
             <div className="od-wrap">
@@ -193,8 +194,14 @@ export function AnalyticsPanel({ docId, rev, load, onMultiplier, onShowRoad, onR
               </ResizableTable>
             </div>
           )}
-          {od && <span className="small muted">Гравитационная модель: {fmt(od.total)} поездок в час пик, жители — по этажности и квартирам,
-            рабочие места — по площади нежилых зданий, время — кратчайший путь по дорогам.</span>}
+          {od && od.zones.length > 0 && <div className="small muted stack4">
+            <span>Всего {fmt(od.total)} поездок на автомобиле в час пик.</span>
+            <span className="mono">T<sub>ij</sub> = P<sub>i</sub> · A<sub>j</sub> · e<sup>−β·t<sub>ij</sub></sup> / Σ<sub>k</sub> A<sub>k</sub> · e<sup>−β·t<sub>ik</sub></sup></span>
+            <span>P<sub>i</sub> — отправления из зоны: жители × {fmt(od.trip_rate ?? 0.12, 2)} поездки в час пик; жители — по квартирам (2,5 чел.) или жилой площади (30 м² на человека).
+              A<sub>j</sub> — притяжение зоны: рабочие места (25 м² нежилой площади на место) + 0,15 × жители (обслуживание, учёба).
+              t<sub>ij</sub> — время по кратчайшему пути по дорогам, мин; внутри зоны — 3 мин (допущение). β = {fmt(od.beta ?? 0.12, 2)} 1/мин.</span>
+            <span>Гравитационная модель с ограничением по отправлениям — классический этап распределения поездок в транспортном планировании; параметры — допущения, не калибровка по обследованию.</span>
+          </div>}
         </section>
 
         <button className="btn" onClick={onOpenTasks}>Задания и проверка</button>

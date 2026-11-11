@@ -97,6 +97,55 @@ def timing(cfg: dict[str, Any] | None) -> tuple[int, float, int, int]:
     return cycle, share, g_main, green - g_main
 
 
+# ------------------------------------------------------------ phase program
+# Movements a phase can release. A group ("main", "cross") is its whole approach: through
+# and turns. An arrow is an additional section (ГОСТ Р 52289-2019): it releases only one
+# turn of the group, while the group's main signal is red or together with it.
+MOVES = {
+    "main": "Главное направление", "cross": "Пересекающее направление",
+    "main_left": "Стрелка налево с главного", "main_right": "Стрелка направо с главного",
+    "cross_left": "Стрелка налево с пересекающего", "cross_right": "Стрелка направо с пересекающего",
+}
+# Share of an approach's flow that turns left / right: an arrow phase serves only that part.
+# Assumption for an urban junction without turn counts.
+TURN_SHARE = {"left": 0.15, "right": 0.20}
+TURN_SOURCE = "Доля поворотов налево 15 %, направо 20 % — допущение при отсутствии картограммы"
+INTERGREEN_S = YELLOW_S + ALL_RED_S   # yellow 3 s + all-red 2 s after every phase
+
+
+def program(cfg: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The phase list of a signal: the stored program, or two phases from cycle and main share."""
+    cfg = cfg or {}
+    if cfg.get("program"):
+        return [{"name": str(p.get("name") or f"Фаза {i + 1}"), "green_s": int(p["green_s"]),
+                 "moves": [m for m in p.get("moves", []) if m in MOVES]}
+                for i, p in enumerate(cfg["program"])]
+    _cycle, _share, g_main, g_cross = timing(cfg)
+    return [{"name": "Главное направление", "green_s": g_main, "moves": ["main"]},
+            {"name": "Пересекающее направление", "green_s": g_cross, "moves": ["cross"]}]
+
+
+def program_cycle(phases: list[dict[str, Any]]) -> int:
+    """C = sum of (green + yellow + all-red) over the phases."""
+    return sum(p["green_s"] + INTERGREEN_S for p in phases)
+
+
+def effective_green(phases: list[dict[str, Any]], group: str) -> float:
+    """Green time an approach of ``group`` effectively gets per cycle, s.
+
+    Its own phases count in full. A phase that only shows an arrow for one of its turns
+    counts with the share of the flow that turns there (TURN_SHARE): only those vehicles go.
+    """
+    g = 0.0
+    for p in phases:
+        moves = set(p["moves"])
+        if group in moves:
+            g += p["green_s"]
+            continue
+        g += sum(p["green_s"] * TURN_SHARE[t] for t in ("left", "right") if f"{group}_{t}" in moves)
+    return g
+
+
 def signal_approaches(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
     """For every way that approaches a signal: its green g, cycle C and saturation flow s.
 
@@ -112,10 +161,13 @@ def signal_approaches(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> 
         ways = [doc.ways[x] for x in index.get(node_id, []) if x in doc.ways and is_drivable(doc.ways[x].tags)]
         if len(ways) < 2 and not any(node_id in w.nodes[1:-1] for w in ways):
             continue   # a signal on a dead end controls nothing
-        cycle, share, g_main, g_cross = timing(settings.get(node_id))
+        phases = program(settings.get(node_id))
+        cycle = program_cycle(phases)
+        greens = {grp: effective_green(phases, grp) for grp in ("main", "cross")}
         for arm in approaches(doc, node_id, ways):
-            g = g_main if arm["group"] == "main" else g_cross
+            g = round(greens[arm["group"]], 1)
             info = {"node_id": node_id, "group": arm["group"], "green_s": g, "cycle_s": cycle,
+                    "arrows": len(phases) > 2 or any(len(p["moves"]) > 1 for p in phases),
                     "g_c": g / cycle, "sat_flow": sat_flow(arm["highway"]), "custom": node_id in settings}
             prev = out.get(arm["way_id"])
             if prev is None or info["g_c"] < prev["g_c"]:
@@ -141,8 +193,10 @@ def capacity_factors(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> d
 def plan(doc: OsmDocument, node_id: int, cfg: dict[str, Any] | None, rows: dict[int, dict[str, Any]]) -> dict[str, Any]:
     """Current two-phase plan of a signal and the Webster suggestion for it."""
     cfg = cfg or {}
-    cycle = int(cfg.get("cycle", DEFAULT_CYCLE))
-    share = float(cfg.get("main_share", 0.5))
+    prog = program(cfg)
+    cycle = program_cycle(prog)
+    g_eff = {grp: effective_green(prog, grp) for grp in ("main", "cross")}
+    share = round(g_eff["main"] / ((g_eff["main"] + g_eff["cross"]) or 1), 2)
     arms = approaches(doc, node_id)
     for a in arms:
         r = rows.get(a["way_id"])
@@ -165,15 +219,13 @@ def plan(doc: OsmDocument, node_id: int, cfg: dict[str, Any] | None, rows: dict[
     else:
         best_cycle = int(max(40, min(150, round((1.5 * LOST_TIME_S + 5) / (1 - total)))))
     best_share = round(max(MIN_SHARE, min(MAX_SHARE, y_main / total if total > 0 else 0.5)), 2)
-    green = cycle - LOST_TIME_S
-    g_main = round(green * share)
-    phases = [
-        {"name": "Главное направление", "group": "main", "green_s": g_main, "yellow_s": YELLOW_S,
-         "all_red_s": ALL_RED_S},
-        {"name": "Пересекающее направление", "group": "cross", "green_s": green - g_main, "yellow_s": YELLOW_S,
-         "all_red_s": ALL_RED_S},
-    ]
+    phases = [{**p, "group": "main" if "main" in p["moves"] else "cross" if "cross" in p["moves"] else "arrow",
+               "yellow_s": YELLOW_S, "all_red_s": ALL_RED_S,
+               "moves_ru": [MOVES[m] for m in p["moves"]]} for p in prog]
     return {
+        "program": bool(cfg.get("program")),
+        "effective_green": {k: round(v, 1) for k, v in g_eff.items()},
+        "moves": MOVES, "turn_share": TURN_SHARE, "turn_source": TURN_SOURCE,
         "node_id": node_id,
         "cycle": cycle,
         "main_share": share,
@@ -210,18 +262,22 @@ def timing_tags(doc: OsmDocument, settings: dict[int, dict[str, Any]]) -> dict[i
         n = doc.nodes.get(node_id)
         if n is None or not is_signal(n.tags):
             continue
-        cycle = int(cfg.get("cycle", DEFAULT_CYCLE))
-        share = float(cfg.get("main_share", 0.5))
-        green = cycle - LOST_TIME_S
-        g_main = round(green * share)
-        out[node_id] = {**out.get(node_id, {}),
+        prog = program(cfg)
+        cycle = program_cycle(prog)
+        g_main, g_cross = effective_green(prog, "main"), effective_green(prog, "cross")
+        share = g_main / ((g_main + g_cross) or 1)
+        tags = {
             TAG_PREFIX + "cycle": str(cycle),
             TAG_PREFIX + "main_share": f"{share:.2f}",
-            TAG_PREFIX + "green_main": str(g_main),
-            TAG_PREFIX + "green_cross": str(green - g_main),
+            TAG_PREFIX + "green_main": str(round(g_main)),
+            TAG_PREFIX + "green_cross": str(round(g_cross)),
             TAG_PREFIX + "yellow": str(YELLOW_S),
             TAG_PREFIX + "all_red": str(ALL_RED_S),
         }
+        if cfg.get("program"):
+            # green:movements per phase, e.g. 40:main,main_right;8:main_left;30:cross
+            tags[TAG_PREFIX + "program"] = ";".join(f"{p['green_s']}:{','.join(p['moves'])}" for p in prog)
+        out[node_id] = {**out.get(node_id, {}), **tags}
     return out
 
 
@@ -242,4 +298,22 @@ def timing_from_tags(doc: OsmDocument) -> dict[int, dict[str, Any]]:
             continue
         if 12 <= cycle <= 180 and 0 < share < 1:
             out[n.id] = {"cycle": cycle, "main_share": share}
+        prog = _parse_program(n.tags.get(TAG_PREFIX + "program", ""))
+        if prog:
+            out[n.id] = {"program": prog}
     return out
+
+
+def _parse_program(value: str) -> list[dict[str, Any]] | None:
+    phases = []
+    for i, part in enumerate(p for p in value.split(";") if p.strip()):
+        green, _, moves = part.partition(":")
+        try:
+            g = int(green)
+        except ValueError:
+            return None
+        ms = [m for m in moves.split(",") if m in MOVES]
+        if not ms or not 1 <= g <= 170:
+            return None
+        phases.append({"name": f"Фаза {i + 1}", "green_s": g, "moves": ms})
+    return phases if len(phases) >= 2 else None

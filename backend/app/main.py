@@ -1174,13 +1174,48 @@ def transit_stop(doc_id: str, node_id: int) -> Response:
 
 
 # ---------------------------------------------------------- signal timing
+class SignalPhase(BaseModel):
+    name: str = Field(default="", max_length=40)
+    green_s: int = Field(ge=3, le=120)
+    moves: list[Literal["main", "cross", "main_left", "main_right", "cross_left", "cross_right"]] = Field(min_length=1)
+
+
 class SignalRequest(BaseModel):
+    # the full phase list, with additional sections (arrows); replaces cycle / main share
+    program: list[SignalPhase] | None = Field(default=None, min_length=2, max_length=8)
     green_main_s: int | None = Field(default=None, ge=1, le=170)
     green_cross_s: int | None = Field(default=None, ge=1, le=170)
     cycle: int | None = Field(default=None, ge=30, le=180)
     main_share: float | None = Field(default=None, ge=0.2, le=0.8)
     optimize: bool = False
     reset: bool = False
+
+
+def _scale_program(prog: list[dict[str, Any]], cycle: int) -> list[dict[str, Any]]:
+    """Stretch the greens of a program so that it runs in ``cycle`` seconds."""
+    fixed = len(prog) * signal_plans.INTERGREEN_S
+    total = sum(p["green_s"] for p in prog) or 1
+    k = max(1, cycle - fixed) / total
+    return [{**p, "green_s": max(3, round(p["green_s"] * k))} for p in prog]
+
+
+def _webster_program(prog: list[dict[str, Any]], web: dict[str, Any]) -> list[dict[str, Any]]:
+    """Webster's cycle and split applied to a program: main and cross phases share the green,
+    arrow-only phases keep their length."""
+    arrows = sum(p["green_s"] for p in prog if not {"main", "cross"} & set(p["moves"]))
+    green = max(10, web["cycle"] - len(prog) * signal_plans.INTERGREEN_S - arrows)
+    main = [p for p in prog if "main" in p["moves"]]
+    cross = [p for p in prog if "cross" in p["moves"] and "main" not in p["moves"]]
+    budget = {"main": green * web["main_share"], "cross": green * (1 - web["main_share"])}
+    out = []
+    for p in prog:
+        group = main if p in main else cross if p in cross else None
+        if group is None:
+            out.append(dict(p))
+            continue
+        total = sum(q["green_s"] for q in group) or 1
+        out.append({**p, "green_s": max(3, round(budget["main" if group is main else "cross"] * p["green_s"] / total))})
+    return out
 
 
 def _signal_plan(s: Session, node_id: int) -> dict[str, Any]:
@@ -1207,18 +1242,33 @@ def set_signal(doc_id: str, node_id: int, req: SignalRequest, x_client_id: str |
             s.signal_timing.pop(node_id, None)
         else:
             cfg = dict(s.signal_timing.get(node_id, {"cycle": plan["cycle"], "main_share": plan["main_share"]}))
+            if req.program is not None:
+                prog = [p.model_dump() for p in req.program]
+                served = {m for p in prog for m in p["moves"]}
+                if not {"main", "cross"} <= served:
+                    raise HTTPException(400, "В программе должны быть фазы и главного, и пересекающего направления")
+                if signal_plans.program_cycle(prog) > 180:
+                    raise HTTPException(400, "Цикл не более 180 с")
+                cfg = {"program": prog}
             if req.optimize:
-                cfg.update(plan["webster"])
-                cfg.pop("saturated", None)
-            if req.cycle is not None:
+                if cfg.get("program"):
+                    cfg = {"program": _webster_program(cfg["program"], plan["webster"])}
+                else:
+                    cfg.update(plan["webster"])
+                    cfg.pop("saturated", None)
+            if req.cycle is not None and cfg.get("program"):
+                cfg = {"program": _scale_program(cfg["program"], req.cycle)}
+            elif req.cycle is not None:
                 cfg["cycle"] = req.cycle
             if req.main_share is not None:
+                cfg.pop("program", None)
                 cfg["main_share"] = round(req.main_share, 2)
             if req.green_main_s is not None or req.green_cross_s is not None:
                 gm = req.green_main_s if req.green_main_s is not None else plan['phases'][0]['green_s']
                 gc = req.green_cross_s if req.green_cross_s is not None else plan['phases'][1]['green_s']
                 if gm + gc + signal_plans.LOST_TIME_S > 180:
                     raise HTTPException(400, 'Цикл не более 180 с')
+                cfg.pop("program", None)
                 cfg.update(cycle=gm + gc + signal_plans.LOST_TIME_S, main_share=gm / (gm + gc))
             s.signal_timing[node_id] = cfg
         _save_analysis(s)
@@ -1316,18 +1366,21 @@ def _object_report(s: Session, kind: str, eid: int) -> dict[str, Any]:
     if el is None:
         raise HTTPException(404, "объект не найден")
     name = el.tags.get("name", "")
-    facts: list[list[Any]] = [["Тип", kind], ["ID", eid], ["Название", name or "—"]]
-    obj: dict[str, Any] = {"title": f"{name or kind} ({kind}/{eid})", "facts": facts, "tables": []}
+    type_label = report.kind_label(kind, el.tags)
+    facts: list[list[Any]] = [["Тип", type_label], ["ID", eid], ["Название", name or "—"]]
+    obj: dict[str, Any] = {"title": f"{name or type_label} — {kind}/{eid}", "facts": facts, "tables": []}
     if kind == "way":
         row = next((r for r in _rows(s) if r["id"] == eid), None)
         if row:
-            facts += [["Класс", row["highway"]], ["Полос", row["lanes"]], ["Длина, м", row["length_m"]],
+            facts += [["Класс", report.highway_label(row["highway"])], ["Полос", row["lanes"]], ["Длина, м", row["length_m"]],
                       ["Скорость, км/ч", row["speed"]], ["Пропускная способность, авт./ч", row["capacity"]],
                       ["Нагрузка в пик, авт./ч", row["volume"]], ["v/c", row["vc"]], ["Уровень обслуживания", row["los"]],
                       ["Время проезда свободно / с нагрузкой, с", f"{row['t0_s']} / {row['t_s']}"],
                       ["Транспорт общего пользования, лег. экв./ч", row.get("transit_pcu", 0)]]
             obj["hourly"] = [round(row["volume"] * k) for k in report.HOURLY_PROFILE]
             obj["capacity"] = row["capacity"]
+        elif el.tags.get("highway"):
+            facts.append(["Класс", report.highway_label(el.tags["highway"])])
         routes = [r for r in transit.routes(s.doc, s.transit_freq)
                   if any(m.type == "way" and m.ref == eid for m in s.doc.relations[r["id"]].members)]
         if routes:

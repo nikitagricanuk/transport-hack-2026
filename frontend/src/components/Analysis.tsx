@@ -6,6 +6,9 @@ import { useEnterKey } from '../utils/useEnterKey';
 import type { ChangesResult, Comparison, LoadRow, LoadState, Los, ReportData, ValidationResult } from '../types';
 import { fmt } from '../utils/geom';
 
+
+/** What v and c mean; shown on hover next to every v/c figure. */
+export const VC_TIP = "V — интенсивность движения, прив. авт./ч (сколько машин проходит за час); C — пропускная способность, авт./ч (сколько может пройти). v/c — коэффициент загрузки z: до 0,2 — свободно (A), 0,45 — B, 0,7 — C, 0,9 — D, до 1 — E, больше 1 — затор (F). ОДМ 218.2.020-2012, табл. 1.";
 export function AnalyticsAssumptions() {
   return <details className="card small">
     <summary>Допущения и источники</summary>
@@ -156,7 +159,7 @@ function ComparisonView({ c, onShowRoad }: { c: Comparison; onShowRoad: (id: num
         <tbody>
           {Object.entries(TOTALS_RU).map(([k, [label, digits, lower]]) => c.totals[k] && (
             <tr key={k}>
-              <td>{label}</td>
+              <td title={['avg_vc', 'congested_km', 'overloaded'].includes(k) ? VC_TIP : undefined}>{label}</td>
               <td className="mono">{fmt(c.totals[k].before, digits)}</td>
               <td className="mono">{fmt(c.totals[k].after, digits)}</td>
               <td className="mono"><Delta before={c.totals[k].before} after={c.totals[k].after} digits={digits} lowerBetter={lower} /></td>
@@ -221,8 +224,8 @@ export function RoadLoad({ row, onSet, docId, rev }: {
         {typed !== null && !typedOk && <span className="bad">от 0 до 20 000</span>}
       </label>
       <div className="row between small">
-        <span className="mono">{fmt(val)} авт./ч {row.custom ? '(введено вручную)' : '(нет данных учёта)'}</span>
-        <span className="mono muted">пропускная способность {fmt(row.capacity)} авт./ч · v/c {fmt(vc, 2)}</span>
+        <span className="mono has-tip" title={VC_TIP}>V — {fmt(val)} авт./ч {row.custom ? '(введено вручную)' : '(нет данных учёта)'}</span>
+        <span className="mono muted has-tip" title={VC_TIP}>C — пропускная способность {fmt(row.capacity)} авт./ч · v/c {fmt(vc, 2)} ⓘ</span>
       </div>
       <div className="row between small muted">
         <span>t: {fmt(row.t0_s, 0)} с свободно → {fmt(row.t_s, 0)} с</span>

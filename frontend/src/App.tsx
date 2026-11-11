@@ -1,3 +1,4 @@
+import { Toast } from './components/Toast';
 import { createMutationQueue } from './utils/mutationQueue';
 import EditorMenus from './components/EditorMenus';
 import { PanelToggle } from './components/PanelClose';
@@ -80,6 +81,8 @@ export default function App() {
   const [base, setBase] = useState<BaseMap>('osm');
   const [overlay, setOverlay] = useState<ImageOverlay | null>(null);
   const [threeD, setThreeD] = useState(false);
+  // the satellite base is a flat image: 3D switches off and stays unavailable while it is on
+  useEffect(() => { if (base === 'sat') setThreeD(false); }, [base]);
   const [highlight, setHighlight] = useState<{ kind: string; id: number }[]>([]);
   // a suggested fix under review: drawn on the map, applied only on the user's click
   const mapHighlight = useMemo(() => [...highlight,...multi], [highlight,multi]);
@@ -708,15 +711,24 @@ export default function App() {
     if (ref && ref.kind !== 'relation') setSelection({ kind: ref.kind, id: ref.id });
   }, []);
 
+  const onIssuePick = useCallback((id: string, go: boolean) => {
+    const i = mapIssues.find((x) => x.id === id);
+    if (!i) return;
+    if (go) { showIssue(i); return; }
+    setIssueInfo(i);
+    const ref = i.refs.find((r) => r.kind === 'way' || r.kind === 'node');
+    if (ref && ref.kind !== 'relation') setSelection({ kind: ref.kind, id: ref.id });
+  }, [mapIssues, showIssue]);
+
   // ---------------------------------------------------------- hotkeys
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       const k = e.key.toLowerCase();
-      // Esc and Ctrl+Z work the same way: first they cancel what is still in progress
-      // (a road being drawn, an open dialog, a fix under review, vertex or merge picking),
-      // and when nothing is pending they undo the last edit from the history.
+      // Esc and Ctrl+Z first cancel what is still in progress (a road being drawn, an open
+      // dialog, a fix under review, vertex or merge picking). With nothing pending, Ctrl+Z
+      // undoes the last edit, while Esc only drops the active tool and the selection.
       const cancelUnsaved = (): boolean => {
         if ((mapRef.current?.draftPointCount() ?? 0) > 0) { mapRef.current?.cancelDraft(); return true; }
         if (organizer && organizer !== 'running') { setOrganizer(null); return true; }
@@ -745,10 +757,10 @@ export default function App() {
       if (isFullscreenToggle(e)) { e.preventDefault(); mapRef.current?.toggleFullscreen(); return; }
       if (e.key === 'Escape') {
         e.preventDefault();
+        // Esc only cancels what is active now; undoing edits stays on Ctrl+Z
         if (cancelUnsaved()) return;
-        if (selection || multi.length || segment || analysisPick) { setSelection(null);setMulti([]);setSegment(null);setAnalysisPick(false);return; }
         if (tool !== 'select') { setTool('select'); return; }
-        undoWithNotice();
+        if (selection || multi.length || segment || analysisPick) { setSelection(null);setMulti([]);setSegment(null);setAnalysisPick(false); }
         return;
       }
       // Delete/Backspace remove the selection, unless a way draft owns the key
@@ -900,7 +912,8 @@ export default function App() {
           <button aria-pressed={mode === 'analytics'} onClick={() => switchMode('analytics')}>Аналитика</button>
           <button aria-pressed={mode === 'simulation'} onClick={() => switchMode('simulation')}>Симуляция</button>
         </div>
-        <button className="btn" aria-pressed={threeD} onClick={() => setThreeD(!threeD)} title="Объёмный вид зданий">3D</button>
+        <button className="btn" aria-pressed={threeD && base !== 'sat'} disabled={base === 'sat'} onClick={() => setThreeD(!threeD)}
+          title={base === 'sat' ? '3D недоступен на спутниковой подложке — выключите «Спутник»' : 'Объёмный вид зданий'}>3D</button>
         <span className="grow" />
         <div className="peers" aria-label={`В документе: ${[myName, ...peerList.map((p) => p.name)].join(', ')}`}>
           <button className="peer-avatar me" style={{ background: '#334155' }} title={`${myName} (вы) — изменить имя`}
@@ -966,8 +979,8 @@ export default function App() {
                 setMulti((m) => toggleSelection(m.length ? m : selection ? [selection] : [], s))}
               onBoxSelection={mode === 'simulation' ? undefined : setMulti}
               onSegment={mode === 'simulation' ? undefined : setSegment}
-              threeD={threeD} highlight={mapHighlight} onView={onView} fixPreview={mode === 'simulation' ? null : fixReview?.preview ?? null}
-              baseOpacity={baseOpacity} issues={mode === 'simulation' ? NO_ISSUES : mapIssues}
+              threeD={threeD && base !== 'sat'} highlight={mapHighlight} onView={onView} fixPreview={mode === 'simulation' ? null : fixReview?.preview ?? null}
+              baseOpacity={baseOpacity} issues={mode === 'simulation' ? NO_ISSUES : mapIssues} onIssuePick={onIssuePick}
               onSelect={(s) => {
                 if (mode === 'simulation') return;
                 setSelection(s);
@@ -988,11 +1001,8 @@ export default function App() {
               <FixReview key={`${fixReview.issue.id}:${fixReview.fix.op}:${fixReview.fix.label}`} review={fixReview}
                 onApply={applyReviewedFix} onCancel={cancelFixReview} />
             )}
-            {notice && !error && (
-              <div className="toast notice" role="status">{notice}
-                <button className="icon-btn" aria-label="Закрыть" onClick={() => setNotice(null)}>×</button></div>
-            )}
-            {error && <div className="toast error" role="alert">{error}<button className="icon-btn" aria-label="Закрыть" onClick={() => setError(null)}>×</button></div>}
+            {notice && !error && <Toast kind="notice" text={notice} onClose={() => setNotice(null)} />}
+            {error && <Toast kind="error" text={error} onClose={() => setError(null)} />}
           </div>
           {mode !== 'simulation' && win.layout.visible.bottom && (
             <Splitter panel="bottom" value={win.layout.size.bottom} onResize={(v) => win.resize('bottom', v)}
