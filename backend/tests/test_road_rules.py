@@ -36,6 +36,8 @@ def test_segment_intersection_and_parallel():
 
 def test_can_connect_matrix():
     assert can_connect({"highway": "footway"}, {"highway": "residential"}) is None
+    assert can_connect({"highway": "pedestrian"}, {"highway": "residential"})
+    assert can_connect({"highway": "primary"}, {"highway": "pedestrian"})
     assert can_connect({"highway": "service"}, {"highway": "primary"}) is None
     assert can_connect({"highway": "motorway"}, {"highway": "motorway_link"}) is None
     assert can_connect({"highway": "motorway"}, {"highway": "motorway"}) is None
@@ -332,3 +334,10 @@ def test_oneway_driveway_into_an_entrance_is_not_a_trap(doc):
     flagged = [i for i in issues if i["category"] in {"connectivity", "direction"}
                and any(r["kind"] == "node" and r["id"] == 70 for r in i["refs"])]
     assert flagged == []
+
+
+def test_pedestrian_street_does_not_auto_join_motor_road(doc):
+    before = list(doc.ways[100].nodes)
+    result = _draw(doc, [(52.2795, 104.2805), (52.2805, 104.2805)], {"highway": "pedestrian"})
+    assert not _shared(doc, 100, result["id"])
+    assert doc.ways[100].nodes == before

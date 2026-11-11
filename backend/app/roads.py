@@ -29,14 +29,17 @@ def can_connect(a: dict[str, str], b: dict[str, str]) -> str | None:
     A footway (and the other walking/cycling classes) must not merge into a
     motorway or trunk. A motorway itself only connects to another motorway or
     to ``motorway_link`` — a primary, a residential street or a driveway has to
-    meet the motorway through a link road. Same class, and every ordinary
-    urban pair (footway × residential, service × primary), is allowed.
+    meet the motorway through a link road. Pedestrian streets cannot merge
+    with motor roads. Footway crossings of ordinary streets remain allowed,
+    as do ordinary urban motor-road pairs (service × primary).
     """
     ha = a.get("highway") or ""
     hb = b.get("highway") or ""
     if not ha or not hb or ha == hb:
         return None
     pair = {ha, hb}
+    if "pedestrian" in pair and pair & DRIVABLE:
+        return "Автомобильная дорога не соединяется с пешеходной улицей"
     if (pair & _NONMOTOR) and (pair & _FAST):
         return "Пешеходная или велосипедная дорога не соединяется с магистралью"
     if "motorway" in pair and not pair <= {"motorway", "motorway_link"}:

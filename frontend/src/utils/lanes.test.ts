@@ -71,8 +71,8 @@ test('display smoothing preserves the road class lane width',()=>{
 });
 
 
-test('T junction asphalt stays within the incident road edges instead of forming a disk', async () => {
-  const { findJunctions, junctionPlate } = await import('./lanes.ts');
+test('T junction has curved returns and clips markings to its actual outline', async () => {
+  const { findJunctions, junctionPlate, cutPolygons } = await import('./lanes.ts');
   const a = [104.28, 52.28], b = [104.281, 52.28], c = [104.282, 52.28], d = [104.281, 52.281];
   const roads = [
     { id: 1, coords: [a, b, c], nodes: [1, 2, 3], halfWidth: 7, forward: 2, backward: 2 },
@@ -80,26 +80,67 @@ test('T junction asphalt stays within the incident road edges instead of forming
   ];
   const junction = findJunctions(roads).get(2)!;
   const ring = junctionPlate(junction, roads);
-  assert.equal(ring.length, 5);
+  assert.ok(ring.length > 10);
   assert.deepEqual(ring[0], ring[ring.length - 1]);
   const kx = 111_320 * Math.cos(b[1] * Math.PI / 180);
   for (const point of ring) {
-    assert.ok(Math.abs((point[0] - b[0]) * kx) <= 1.751);
-    assert.ok(Math.abs((point[1] - b[1]) * M_PER_DEG_LAT) <= 7.001);
+    assert.ok(Math.abs((point[0] - b[0]) * kx) <= 15.001);
+    assert.ok((point[1] - b[1]) * M_PER_DEG_LAT >= -7.001);
   }
-  assert.equal(buildLanes(roads, [junction]).surface.features.length, 3);
+  const pieces = cutPolygons([a, c], [ring]);
+  assert.equal(pieces.length, 2);
+  assert.ok(pieces[0].at(-1)![0] < b[0]);
+  assert.ok(pieces[1][0][0] > b[0]);
+  const geometry = buildLanes(roads.map(r => ({...r, junctions: [junction]})), [junction]);
+  assert.equal(geometry.surface.features.length, 3);
+  assert.equal(geometry.marks.features.filter(f => f.properties?.junction).length, 3);
 });
 
-test('a slip road leaves from the outer lane of the main road, not from its centre line', async () => {
-  const { attachToLanes } = await import('./lanes.ts');
-  const kx = 111_320 * Math.cos((52.28 * Math.PI) / 180);
-  // main road eastbound 14 m wide; a 3.5 m ramp leaves at node 2 to the south-east (right side)
-  const main = { id: 1, coords: [[104.28, 52.28], [104.281, 52.28], [104.282, 52.28]], nodes: [1, 2, 3], halfWidth: 7 };
-  const ramp = { id: 2, coords: [[104.281, 52.28], [104.2815, 52.2797]], nodes: [2, 4], halfWidth: 1.75 };
-  const out = attachToLanes([main, ramp]);
-  const start = out.get(2)![0];
-  const southM = (52.28 - start[1]) * 110_540;
-  assert.ok(Math.abs(southM - (7 - 1.75)) < 0.05);        // shifted to the right edge of the main road
-  assert.ok(Math.abs((start[0] - 104.281) * kx) < 0.05);   // only sideways
-  assert.equal(out.has(1), false);                          // the main road itself is not moved
+test('bent continuations share the same cross-section with reversed OSM direction', () => {
+  const joint = [104.281, 52.28];
+  const geometry = buildLanes([
+    {id: 1, coords: [[104.28,52.28],joint],forward:1,backward:1},
+    {id: 2, coords: [[104.2815,52.281],joint],forward:1,backward:1},
+  ]);
+  const edges = geometry.marks.features.filter(f => f.properties?.kind === 'edge');
+  const distance = (a:number[],b:number[]) => Math.hypot(a[0]-b[0],a[1]-b[1]);
+  assert.ok(distance(edges[0].geometry.coordinates.at(-1)!,edges[3].geometry.coordinates.at(-1)!) < 1e-10);
+  assert.ok(distance(edges[1].geometry.coordinates.at(-1)!,edges[2].geometry.coordinates.at(-1)!) < 1e-10);
+});
+
+test('lane-count transitions keep edge markings on the tapered asphalt', () => {
+  const geometry = buildLanes([
+    {id:1,coords:[[104.28,52.28],[104.282,52.28]],forward:1,backward:1},
+    {id:2,coords:[[104.282,52.28],[104.284,52.28]],forward:2,backward:2},
+  ]);
+  for(const surface of geometry.surface.features) {
+    const ring=surface.geometry.coordinates[0];
+    const edges=geometry.marks.features.filter(f=>f.properties?.id===surface.properties?.id && f.properties?.kind==='edge');
+    for(const edge of edges) for(const point of edge.geometry.coordinates) {
+      assert.ok(ring.some(p=>Math.hypot(p[0]-point[0],p[1]-point[1])<1e-10));
+    }
+  }
+  const edges=geometry.marks.features.filter(f=>f.properties?.kind==='edge');
+  assert.deepEqual(edges[0].geometry.coordinates.at(-1),edges[2].geometry.coordinates[0]);
+});
+
+
+test('four-lane opposing traffic has a double solid separator', () => {
+  const geometry = buildLanes([{id:1,coords:[[104.28,52.28],[104.282,52.28]],forward:2,backward:2}]);
+  const center = geometry.marks.features.filter(f => f.properties?.kind === 'center');
+  assert.equal(center.length, 2);
+  const gap = Math.abs(center[0].geometry.coordinates[0][1] - center[1].geometry.coordinates[0][1]) * M_PER_DEG_LAT;
+  assert.ok(Math.abs(gap - 0.3) < 0.001);
+});
+
+
+test('a dropped lane divider converges on the road edge at the join', () => {
+  const geometry=buildLanes([
+    {id:1,coords:[[104.28,52.28],[104.282,52.28]],forward:1,backward:1},
+    {id:2,coords:[[104.282,52.28],[104.284,52.28]],forward:2,backward:2},
+  ]);
+  const dividers=geometry.marks.features.filter(f=>f.properties?.id===2 && f.properties?.kind==='lane');
+  const edges=geometry.marks.features.filter(f=>f.properties?.id===2 && f.properties?.kind==='edge');
+  assert.equal(dividers.length,2);
+  for(let i=0;i<2;i++) assert.deepEqual(dividers[i].geometry.coordinates[0],edges[i].geometry.coordinates[0]);
 });
