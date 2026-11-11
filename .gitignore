@@ -232,3 +232,6 @@ data/*.osm
 data/drafts/
 *.log
 !data/README.md
+
+# Persisted OAuth grants (never commit bearer credentials)
+data/oauth.sqlite3*

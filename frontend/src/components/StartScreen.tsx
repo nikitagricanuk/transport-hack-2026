@@ -47,6 +47,7 @@ export default function StartScreen({ onLoaded }: { onLoaded: (d: DocState) => v
             ))}
           </div>
         )}
+        <p className="muted small"><a href="/mcp/connect" target="_blank" rel="noreferrer">Подключить ИИ через MCP</a></p>
         {error && <p className="bad" role="alert">{error}</p>}
       </div>
     </div>

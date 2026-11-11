@@ -1,6 +1,5 @@
 -r requirements.txt
 pytest==8.3.4
-httpx==0.28.1
 ruff==0.17.4
 # optional: local SUMO netconvert check (large download, ~100 MB)
 # eclipse-sumo==1.21.0

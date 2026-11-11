@@ -10,3 +10,4 @@ matplotlib==3.9.4
 reportlab==4.2.5
 
 shapely==2.0.6
+httpx==0.28.1
