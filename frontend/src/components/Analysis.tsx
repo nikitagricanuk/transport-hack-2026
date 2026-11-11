@@ -71,7 +71,7 @@ function Delta({ before, after, digits, lowerBetter }: { before: number; after: 
 
 // ------------------------------------------------------------- load panel
 export const LoadPanel = memo(function LoadPanel({
-  load, comparison, onMultiplier, onSnapshot, onDeleteSnapshot, onCompare, onReset, onShowRoad, colorOn, onColor,
+  load, comparison, onSnapshot, onDeleteSnapshot, onCompare, onShowRoad, colorOn, onColor,
 }: {
   load: LoadState | null;
   comparison: Comparison | null;
@@ -85,12 +85,9 @@ export const LoadPanel = memo(function LoadPanel({
   onColor: (on: boolean) => void;
 }) {
   const [name, setName] = useState('');
-  const [mult, setMult] = useState<number | null>(null);
   const [a, setA] = useState('');
   const [b, setB] = useState('current');
   if (!load) return <p className="muted pad">Расчёт нагрузки…</p>;
-  const s = load.summary;
-  const m = mult ?? load.multiplier;
   const worst = [...load.rows].sort((x, y) => y.vc - x.vc).slice(0, 8);
   const snapA = a || load.snapshots[load.snapshots.length - 1]?.id || '';
 
@@ -101,25 +98,6 @@ export const LoadPanel = memo(function LoadPanel({
           <b>Нагрузка сети</b>
           <label className="row gap8 small"><input type="checkbox" checked={colorOn} onChange={(e) => onColor(e.target.checked)} />окрасить дороги</label>
         </div>
-        <label className="field"><span>Спрос: ×{fmt(m, 2)} к базовой интенсивности</span>
-          <input type="range" min={0.3} max={2} step={0.05} value={m}
-            onChange={(e) => setMult(Number(e.target.value))}
-            onPointerUp={() => { if (mult !== null) { onMultiplier(mult); setMult(null); } }}
-            onKeyUp={() => { if (mult !== null) { onMultiplier(mult); setMult(null); } }} />
-        </label>
-        <div className="kpis">
-          <div><b>{fmt(s.avg_vc, 2)}</b><span>средняя v/c</span></div>
-          <div><b>{fmt(s.congested_km, 2)}</b><span>км с v/c ≥ 0,9</span></div>
-          <div><b>{fmt(s.delay_hours, 1)}</b><span>задержка, авт·ч</span></div>
-        </div>
-        <div className="los-strip" aria-label="Распределение по уровню обслуживания">
-          {(Object.keys(s.by_los) as Los[]).map((l) => (
-            <span key={l} style={{ flex: Math.max(s.by_los[l], 0.001), background: LOS_COLOR[l] }}
-              title={`${l} — ${LOS_TEXT[l]}: ${s.by_los[l]} рёбер`}>{s.by_los[l] ? l : ''}</span>
-          ))}
-        </div>
-        <AnalyticsAssumptions />
-        <button className="btn small" onClick={onReset}>Сбросить нагрузку</button>
       </section>
 
       <section className="load-col">
