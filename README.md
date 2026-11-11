@@ -401,7 +401,8 @@ The server negotiates MCP versions `2025-11-25`, `2025-06-18`, and `2025-03-26`.
 It uses stateless JSON responses, with no long-lived SSE stream or MCP session ID.
 The tools are:
 
-- `list_documents`: discover open documents and persisted drafts by `doc_id`.
+- `list_documents`: discover shared sample rooms by `doc_id` (same list as the app lobby);
+  private projects are not listed and are reached by a `doc_id` the user shares.
 - `api_schema`: discover API request schemas and every edit operation's arguments;
   use `path_filter` to narrow the returned paths.
 - `editor_api`: invoke any documented local editor endpoint using `method`,

@@ -129,7 +129,9 @@ def test_mcp_edit_undo_export_and_persistence(client, raw):
     import json
     doc_id = json.loads(result["content"][0]["text"])["doc_id"]
     path = f"/api/documents/{doc_id}"
-    assert doc_id in tool(client, tokens, "list_documents")["content"][0]["text"]
+    listed = json.loads(tool(client, tokens, "list_documents")["content"][0]["text"])
+    assert doc_id not in {r["doc_id"] for r in listed}  # private import stays off the lobby
+    assert all(r["doc_id"].startswith("sample-") for r in listed)
     schema = json.loads(tool(client, tokens, "api_schema", path_filter="/ops")["content"][0]["text"])
     assert "/api/documents/{doc_id}/ops" in schema["paths"] and "set_tags" in schema["edit_operations"]
     doc = client.get(path).json()
